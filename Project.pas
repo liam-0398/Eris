@@ -5,7 +5,7 @@ unit Project;
 interface
 
 uses
-  SampleTypes, ClipOverwrite, Waveform;
+  SampleTypes, ClipOverwrite, Waveform, Effects;
 
 const
   MaxTracks = 16;
@@ -41,10 +41,22 @@ var
   TrackInstrumentStart: array[0..MaxTracks - 1] of Int64;
   TrackInstrumentEnd: array[0..MaxTracks - 1] of Int64;
 
+  { simple mute toggle, shown on the track header in the arrangement view }
+  TrackEnabled: array[0..MaxTracks - 1] of Boolean;
+
+  { per-track insert effects chain - a fixed number of ordered slots per
+    track, Kind = ekNone marks an unused slot beyond TrackEffectCount }
+  TrackEffects: array[0..MaxTracks - 1, 0..Effects.MaxEffectsPerTrack - 1] of
+    Effects.TEffect;
+  TrackEffectCount: array[0..MaxTracks - 1] of Integer;
+
 function AddSampleToPool(const ASample: TSample; const AName, APath: string): Integer;
 procedure CommitClipToTrack(ATrackIndex: Integer; const ANewClip: TClip);
 procedure ReplaceTrackClips(ATrackIndex: Integer; const AClips: TClipArray);
 procedure RemoveClipAt(ATrackIndex, AClipIndex: Integer);
+
+function AddTrackEffect(ATrackIndex, AKind: Integer): Boolean;
+procedure RemoveTrackEffect(ATrackIndex, AEffectIndex: Integer);
 
 procedure PushUndoSnapshot(ATrackIndex: Integer);
 function PopUndo(out ATrackIndex: Integer): Boolean;
@@ -74,7 +86,37 @@ begin
     TrackVolume[i] := 1.0;
     TrackInstrumentStart[i] := 0;
     TrackInstrumentEnd[i] := 0;
+    TrackEnabled[i] := True;
+    TrackEffectCount[i] := 0;
   end;
+end;
+
+function AddTrackEffect(ATrackIndex, AKind: Integer): Boolean;
+var
+  Slot: Integer;
+begin
+  if (ATrackIndex < 0) or (ATrackIndex >= MaxTracks) then
+    Exit(False);
+  if TrackEffectCount[ATrackIndex] >= Effects.MaxEffectsPerTrack then
+    Exit(False);
+  Slot := TrackEffectCount[ATrackIndex];
+  Effects.DefaultEffect(AKind, TrackEffects[ATrackIndex][Slot]);
+  Inc(TrackEffectCount[ATrackIndex]);
+  Result := True;
+end;
+
+procedure RemoveTrackEffect(ATrackIndex, AEffectIndex: Integer);
+var
+  j: Integer;
+begin
+  if (ATrackIndex < 0) or (ATrackIndex >= MaxTracks) then
+    Exit;
+  if (AEffectIndex < 0) or (AEffectIndex >= TrackEffectCount[ATrackIndex]) then
+    Exit;
+  for j := AEffectIndex to TrackEffectCount[ATrackIndex] - 2 do
+    TrackEffects[ATrackIndex][j] := TrackEffects[ATrackIndex][j + 1];
+  Dec(TrackEffectCount[ATrackIndex]);
+  TrackEffects[ATrackIndex][TrackEffectCount[ATrackIndex]].Kind := Effects.ekNone;
 end;
 
 function AddSampleToPool(const ASample: TSample; const AName, APath: string): Integer;
@@ -156,6 +198,8 @@ begin
   TrackVolume[TrackCount] := 1.0;
   TrackInstrumentStart[TrackCount] := 0;
   TrackInstrumentEnd[TrackCount] := 0;
+  TrackEnabled[TrackCount] := True;
+  TrackEffectCount[TrackCount] := 0;
   Inc(TrackCount);
   Result := True;
 end;

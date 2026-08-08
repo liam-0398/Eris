@@ -4,6 +4,9 @@ unit SP1200;
 
 interface
 
+uses
+  BiquadFilters;
+
 const
   { the hardware's fixed converter rate and bit depth - never configurable,
     matching the real box }
@@ -11,14 +14,6 @@ const
   SP1200QuantLevels = 2048; { 2^11 - signed 12-bit full-scale }
 
 type
-  TBiquadCoeffs = record
-    B0, B1, B2, A1, A2: Single;
-  end;
-
-  TBiquadState = record
-    X1, X2, Y1, Y2: Single;
-  end;
-
   TSP1200Channel = record
     PreBq1, PreBq2: TBiquadState; { anti-aliasing stage ahead of the "ADC" }
     PostBq: TBiquadState;         { reconstruction stage after the "DAC" }
@@ -46,35 +41,6 @@ procedure SP1200Process(var AState: TSP1200State; ABuffer: PSingle;
   AFrameCount: Int64; AChannels: Integer; AProjectSampleRate: Integer);
 
 implementation
-
-procedure ComputeLowpassBiquad(AFc, AFs, AQ: Double; out ACoeffs: TBiquadCoeffs);
-var
-  w0, alpha, cosw0, a0: Double;
-begin
-  w0 := 2 * Pi * AFc / AFs;
-  alpha := Sin(w0) / (2 * AQ);
-  cosw0 := Cos(w0);
-  a0 := 1 + alpha;
-  ACoeffs.B0 := ((1 - cosw0) / 2) / a0;
-  ACoeffs.B1 := (1 - cosw0) / a0;
-  ACoeffs.B2 := ACoeffs.B0;
-  ACoeffs.A1 := (-2 * cosw0) / a0;
-  ACoeffs.A2 := (1 - alpha) / a0;
-end;
-
-function ProcessBiquad(var AState: TBiquadState; const ACoeffs: TBiquadCoeffs;
-  AInput: Single): Single;
-var
-  Output: Single;
-begin
-  Output := ACoeffs.B0 * AInput + ACoeffs.B1 * AState.X1 + ACoeffs.B2 * AState.X2
-    - ACoeffs.A1 * AState.Y1 - ACoeffs.A2 * AState.Y2;
-  AState.X2 := AState.X1;
-  AState.X1 := AInput;
-  AState.Y2 := AState.Y1;
-  AState.Y1 := Output;
-  Result := Output;
-end;
 
 procedure SP1200Reset(var AState: TSP1200State);
 begin

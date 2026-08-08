@@ -8,7 +8,7 @@ uses
   Classes, SysUtils, Math, Forms, Controls, Graphics, Dialogs, Menus, ExtCtrls,
   StdCtrls, ComCtrls, LCLType, ArrangementView, PrefsForm, FileBrowser,
   SampleTypes, WavDecoder, AudioEngine, Project, ProjectFile, WarpEditor,
-  InstrumentEditor;
+  InstrumentEditor, Effects, EffectsRack;
 
 type
   TForm1 = class(TForm)
@@ -51,6 +51,9 @@ type
     FInstrumentEditorWidget: TPanel;
     FInstrumentEditor: TInstrumentEditor;
     FDeviceScrollBar: TScrollBar;
+    FEffectsMenu: TPopupMenu;
+    FEffectWidgets: array of TEffectWidget;
+    FLastEffectsRackTrack: Integer;
     FPlaybackPollTimer: TTimer;
     FCurrentProjectPath: string;
 
@@ -91,6 +94,16 @@ type
     procedure InstrumentZoomOutClick(Sender: TObject);
     procedure RefreshWarpWidgetSize;
     procedure RefreshInstrumentWidgetSize;
+    function EffectsRackBaseLeft: Integer;
+    function EffectsRackTotalWidth: Integer;
+    procedure RebuildEffectWidgets;
+    procedure EffectRackChanged(Sender: TObject);
+    procedure AddEffectToCurrentTrack(AKind: Integer);
+    procedure AddLowpassEffectClick(Sender: TObject);
+    procedure AddEQ4EffectClick(Sender: TObject);
+    procedure BuildEffectsMenu;
+    procedure DevicePanelMouseDown(Sender: TObject; Button: TMouseButton;
+      Shift: TShiftState; X, Y: Integer);
     procedure DeviceScrollBarChange(Sender: TObject);
     procedure UpdateDevicePanelScroll;
     procedure DevicePanelDragOver(Sender, Source: TObject; X, Y: Integer;
@@ -121,7 +134,9 @@ constructor TForm1.Create(AOwner: TComponent);
 begin
   inherited Create(AOwner);
   Caption := 'Eris';
+  FLastEffectsRackTrack := -2;
   BuildMenu;
+  BuildEffectsMenu;
   BuildLayout;
   AudioEngineInit;
   KeyPreview := True;
@@ -298,6 +313,7 @@ begin
   FDevicePanel.OnDragOver := @DevicePanelDragOver;
   FDevicePanel.OnDragDrop := @DevicePanelDragDrop;
   FDevicePanel.OnResize := @DevicePanelResize;
+  FDevicePanel.OnMouseDown := @DevicePanelMouseDown;
 
   { horizontal scroll for the device widgets - only shown if their total
     width outgrows the panel, e.g. when the warp widget expands for a long
@@ -873,9 +889,129 @@ begin
   UpdateDevicePanelScroll;
 end;
 
+procedure TForm1.RebuildEffectWidgets;
+var
+  i, Track: Integer;
+begin
+  for i := 0 to High(FEffectWidgets) do
+    FEffectWidgets[i].Free;
+  FEffectWidgets := nil;
+
+  Track := FArrangementView.KeyboardTrack;
+  FLastEffectsRackTrack := Track;
+  if Track >= 0 then
+  begin
+    SetLength(FEffectWidgets, Project.TrackEffectCount[Track]);
+    for i := 0 to High(FEffectWidgets) do
+      FEffectWidgets[i] := TEffectWidget.CreateFor(Self, FDevicePanel, Track, i,
+        @EffectRackChanged);
+  end;
+
+  UpdateDevicePanelScroll;
+end;
+
+procedure TForm1.EffectRackChanged(Sender: TObject);
+begin
+  RebuildEffectWidgets;
+end;
+
+procedure TForm1.AddEffectToCurrentTrack(AKind: Integer);
+var
+  Track: Integer;
+begin
+  Track := FArrangementView.KeyboardTrack;
+  if Track < 0 then
+  begin
+    ShowMessage('Select a track first.');
+    Exit;
+  end;
+  if not Project.AddTrackEffect(Track, AKind) then
+  begin
+    ShowMessage(Format('Maximum of %d effects per track.', [Effects.MaxEffectsPerTrack]));
+    Exit;
+  end;
+  RebuildEffectWidgets;
+end;
+
+procedure TForm1.AddLowpassEffectClick(Sender: TObject);
+begin
+  AddEffectToCurrentTrack(Effects.ekLowpass);
+end;
+
+procedure TForm1.AddEQ4EffectClick(Sender: TObject);
+begin
+  AddEffectToCurrentTrack(Effects.ekEQ4);
+end;
+
+procedure TForm1.BuildEffectsMenu;
+
+  function AddCategory(const ACaption: string): TMenuItem;
+  begin
+    Result := TMenuItem.Create(Self);
+    Result.Caption := ACaption;
+    FEffectsMenu.Items.Add(Result);
+  end;
+
+  function AddEffectItem(AParent: TMenuItem; const ACaption: string;
+    AOnClick: TNotifyEvent): TMenuItem;
+  begin
+    Result := TMenuItem.Create(Self);
+    Result.Caption := ACaption;
+    Result.OnClick := AOnClick;
+    AParent.Add(Result);
+  end;
+
+var
+  FiltersItem, EQItem, UtilityItem, MasteringItem, Placeholder: TMenuItem;
+begin
+  FEffectsMenu := TPopupMenu.Create(Self);
+
+  FiltersItem := AddCategory('Filters');
+  AddEffectItem(FiltersItem, 'LP', @AddLowpassEffectClick);
+
+  EQItem := AddCategory('EQ');
+  AddEffectItem(EQItem, '4', @AddEQ4EffectClick);
+
+  UtilityItem := AddCategory('Utility');
+  Placeholder := AddEffectItem(UtilityItem, '(none yet)', nil);
+  Placeholder.Enabled := False;
+
+  MasteringItem := AddCategory('Mastering');
+  Placeholder := AddEffectItem(MasteringItem, '(none yet)', nil);
+  Placeholder.Enabled := False;
+end;
+
+procedure TForm1.DevicePanelMouseDown(Sender: TObject; Button: TMouseButton;
+  Shift: TShiftState; X, Y: Integer);
+begin
+  if Button <> mbRight then
+    Exit;
+  FEffectsMenu.PopupComponent := FDevicePanel;
+  FEffectsMenu.Popup(Mouse.CursorPos.X, Mouse.CursorPos.Y - 140);
+end;
+
+function TForm1.EffectsRackBaseLeft: Integer;
+begin
+  if FWarpWidget.Visible then
+    Result := WarpSlotLeft + FWarpWidget.Width + 8
+  else if FInstrumentEditorWidget.Visible then
+    Result := WarpSlotLeft + FInstrumentEditorWidget.Width + 8
+  else
+    Result := WarpSlotLeft;
+end;
+
+function TForm1.EffectsRackTotalWidth: Integer;
+var
+  i: Integer;
+begin
+  Result := 0;
+  for i := 0 to High(FEffectWidgets) do
+    Result := Result + FEffectWidgets[i].Width + 8;
+end;
+
 procedure TForm1.DeviceScrollBarChange(Sender: TObject);
 var
-  Offset: Integer;
+  Offset, EffLeft, i: Integer;
 begin
   Offset := FDeviceScrollBar.Position;
   FTrackWidget.Left := TrackWidgetLeft - Offset;
@@ -883,6 +1019,14 @@ begin
   FDropHintLabel.Left := InstrumentSlotLeft - Offset;
   FWarpWidget.Left := WarpSlotLeft - Offset;
   FInstrumentEditorWidget.Left := WarpSlotLeft - Offset;
+
+  EffLeft := EffectsRackBaseLeft - Offset;
+  for i := 0 to High(FEffectWidgets) do
+  begin
+    FEffectWidgets[i].Left := EffLeft;
+    FEffectWidgets[i].Top := WidgetTop;
+    Inc(EffLeft, FEffectWidgets[i].Width + 8);
+  end;
 end;
 
 procedure TForm1.UpdateDevicePanelScroll;
@@ -896,6 +1040,8 @@ begin
     ContentRight := Max(ContentRight, WarpSlotLeft + FWarpWidget.Width)
   else if FInstrumentEditorWidget.Visible then
     ContentRight := Max(ContentRight, WarpSlotLeft + FInstrumentEditorWidget.Width);
+  if Length(FEffectWidgets) > 0 then
+    ContentRight := Max(ContentRight, EffectsRackBaseLeft + EffectsRackTotalWidth);
   ContentRight := ContentRight + TrackWidgetLeft; { trailing margin }
 
   PanelWidth := FDevicePanel.ClientWidth;
@@ -986,6 +1132,8 @@ begin
     FInstrumentEditorWidget.Visible := False;
     FDropHintLabel.Caption := 'Select a track to load an instrument';
     FDropHintLabel.Visible := not FWarpWidget.Visible;
+    if FLastEffectsRackTrack <> Track then
+      RebuildEffectWidgets;
     UpdateDevicePanelScroll;
     Exit;
   end;
@@ -1015,6 +1163,8 @@ begin
     end;
   end;
 
+  if FLastEffectsRackTrack <> Track then
+    RebuildEffectWidgets;
   UpdateDevicePanelScroll;
 end;
 

@@ -5,7 +5,7 @@ unit ArrangementView;
 interface
 
 uses
-  Classes, SysUtils, Math, Forms, Controls, Graphics, LCLType, StdCtrls,
+  Classes, SysUtils, Math, Types, Forms, Controls, Graphics, LCLType, StdCtrls,
   FileBrowser, SampleTypes, Project, AudioEngine, Waveform;
 
 type
@@ -14,7 +14,7 @@ type
 
   TSeekEvent = procedure(Sender: TObject; AFrameOffset: Int64) of object;
 
-  TDragMode = (dmNone, dmMove, dmResizeLeft, dmResizeRight);
+  TDragMode = (dmNone, dmMove, dmResizeLeft, dmResizeRight, dmRangeSelect);
 
   TArrangementView = class(TCustomControl)
   private
@@ -35,6 +35,8 @@ type
       VolumeSliderRadius = 5;
       VolumeSliderGrabPixels = 8;
       TrackVolumeMax = 2.0;
+      MuteButtonSize = 16;
+      MuteButtonMargin = 4;
     var
       FOnFileDrop: TFileDropEvent;
       FOnSeek: TSeekEvent;
@@ -59,6 +61,11 @@ type
       FLoopEnd: Int64;
       FDraggingVolumeTrack: Integer;
       FGridDivision: Integer; { divisions per bar, e.g. 16 = 1/16th notes }
+      FRangeSelectActive: Boolean;
+      FRangeDragStartFrame: Int64;
+      FRangeDragStartTrack: Integer;
+      FRangeStartFrame, FRangeEndFrame: Int64;
+      FRangeStartTrack, FRangeEndTrack: Integer;
     function LaneWidth: Integer;
     function ContentHeight: Integer;
     function ContentEndFrame: Int64;
@@ -75,6 +82,7 @@ type
     function VolumeKnobX(ATrackIndex: Integer): Integer;
     function XToVolume(X: Integer): Single;
     function HitTestVolumeSlider(ATrackIndex, Y: Integer): Boolean;
+    function MuteButtonRect(ATrackIndex: Integer): TRect;
     procedure SelectClip(ATrack, AClip: Integer);
     procedure PushTrackToEngine(ATrackIndex: Integer);
     procedure UpdateEngineLoop;
@@ -87,6 +95,10 @@ type
     procedure DrawTrackHeaders;
     procedure DrawClips;
     procedure DrawCursor;
+    procedure DrawRangeSelection;
+    procedure CopySelection;
+    procedure PasteSelection;
+    procedure DuplicateSelection;
   protected
     procedure Paint; override;
     procedure Resize; override;
@@ -121,6 +133,15 @@ type
 
 implementation
 
+type
+  TClipboardItem = record
+    RelTrack: Integer; { 0-based offset from the base track of the copied selection }
+    Clip: TClip;        { Position holds an offset relative to the selection start }
+  end;
+
+var
+  ClipboardItems: array of TClipboardItem;
+
 constructor TArrangementView.Create(AOwner: TComponent);
 var
   i: Integer;
@@ -137,6 +158,9 @@ begin
   FLoopEnd := -1;
   FDraggingVolumeTrack := -1;
   FGridDivision := 16;
+  FRangeSelectActive := False;
+  FRangeStartTrack := -1;
+  FRangeEndTrack := -1;
 
   Randomize;
   for i := 0 to Project.MaxTracks - 1 do
@@ -323,6 +347,15 @@ var
 begin
   SliderY := RulerHeight + ATrackIndex * TrackHeight + VolumeSliderY;
   Result := Abs(Y - SliderY) <= VolumeSliderGrabPixels;
+end;
+
+function TArrangementView.MuteButtonRect(ATrackIndex: Integer): TRect;
+var
+  y: Integer;
+begin
+  y := RulerHeight + ATrackIndex * TrackHeight;
+  Result := Rect(Width - MuteButtonSize - MuteButtonMargin, y + MuteButtonMargin,
+    Width - MuteButtonMargin, y + MuteButtonMargin + MuteButtonSize);
 end;
 
 procedure TArrangementView.SelectClip(ATrack, AClip: Integer);
@@ -536,6 +569,7 @@ end;
 procedure TArrangementView.DrawTrackHeaders;
 var
   i, y, SliderY, kx: Integer;
+  MuteRect: TRect;
 begin
   for i := 0 to Project.TrackCount - 1 do
   begin
@@ -550,6 +584,15 @@ begin
     Canvas.Brush.Style := bsClear;
     Canvas.TextOut(LaneWidth + 8, y + 8, 'Track ' + IntToStr(i + 1));
     Canvas.Brush.Style := bsSolid;
+
+    { simple on/off mute toggle }
+    MuteRect := MuteButtonRect(i);
+    if Project.TrackEnabled[i] then
+      Canvas.Brush.Color := clLime
+    else
+      Canvas.Brush.Color := clRed;
+    Canvas.Pen.Color := clBlack;
+    Canvas.Rectangle(MuteRect);
 
     { simple volume slider - a plain line with a draggable knob, no readout }
     SliderY := y + VolumeSliderY;
@@ -631,12 +674,43 @@ begin
   Canvas.Line(x, 0, x, ContentHeight);
 end;
 
+procedure TArrangementView.DrawRangeSelection;
+var
+  xs, xe, yTop, yBottom, t1, t2: Integer;
+begin
+  if not FRangeSelectActive then
+    Exit;
+  if (FRangeStartTrack < 0) or (FRangeEndTrack < 0) then
+    Exit;
+
+  t1 := Min(FRangeStartTrack, FRangeEndTrack);
+  t2 := Max(FRangeStartTrack, FRangeEndTrack);
+
+  xs := FrameToX(Min(FRangeStartFrame, FRangeEndFrame));
+  xe := FrameToX(Max(FRangeStartFrame, FRangeEndFrame));
+  if (xe < 0) or (xs > LaneWidth) then
+    Exit;
+  xs := Max(xs, 0);
+  xe := Min(xe, LaneWidth);
+
+  yTop := RulerHeight + t1 * TrackHeight;
+  yBottom := RulerHeight + (t2 + 1) * TrackHeight;
+
+  { drawn before DrawClips so clips still render normally on top - only the
+    empty lane background under/around them gets the highlight tint }
+  Canvas.Brush.Color := clHighlight;
+  Canvas.Brush.Style := bsSolid;
+  Canvas.Pen.Color := clHighlight;
+  Canvas.Rectangle(xs, yTop, xe, yBottom);
+end;
+
 procedure TArrangementView.Paint;
 begin
   Canvas.Brush.Color := clBtnFace;
   Canvas.FillRect(Rect(LaneWidth, 0, Width, RulerHeight));
   Canvas.FillRect(Rect(0, ContentHeight, Width, Height));
   DrawLanes;
+  DrawRangeSelection;
   DrawClips;
   DrawCursor;
   DrawRuler;
@@ -765,6 +839,14 @@ begin
 
   TrackIndex := TrackIndexAtY(Y);
 
+  if (TrackIndex >= 0) and (X >= LaneWidth) and
+    PtInRect(MuteButtonRect(TrackIndex), Point(X, Y)) then
+  begin
+    Project.TrackEnabled[TrackIndex] := not Project.TrackEnabled[TrackIndex];
+    Invalidate;
+    Exit;
+  end;
+
   if (TrackIndex >= 0) and (X >= LaneWidth) and HitTestVolumeSlider(TrackIndex, Y) then
   begin
     FDraggingVolumeTrack := TrackIndex;
@@ -777,6 +859,7 @@ begin
   if TrackIndex < 0 then
   begin
     SelectClip(-1, -1);
+    FRangeSelectActive := False;
     Frame := SnapFrame(XToFrame(X));
     if Frame < 0 then
       Frame := 0;
@@ -796,6 +879,7 @@ begin
 
   if HitTestClip(TrackIndex, X, ClipIndex, Mode) then
   begin
+    FRangeSelectActive := False;
     SelectClip(TrackIndex, ClipIndex);
     FDragMode := Mode;
     FDragActive := True;
@@ -815,6 +899,18 @@ begin
     if Frame < 0 then
       Frame := 0;
     FCursorFrame := Frame;
+
+    { clicking empty lane space seeks immediately (unchanged); it also
+      arms a potential time-range selection drag, same as Ableton - a plain
+      click leaves no visible range (MouseMove below is what actually turns
+      this into a real selection), a click-drag selects [start,end) across
+      whichever tracks the drag crosses }
+    FDragMode := dmRangeSelect;
+    FDragActive := True;
+    FRangeSelectActive := False;
+    FRangeDragStartFrame := Frame;
+    FRangeDragStartTrack := TrackIndex;
+
     Invalidate;
     if Assigned(FOnSeek) then
       FOnSeek(Self, Frame);
@@ -825,7 +921,7 @@ procedure TArrangementView.MouseMove(Shift: TShiftState; X, Y: Integer);
 var
   MouseFrame, NewPosition, NewEnd, MinPos, MaxPos, MinEnd, Delta: Int64;
   FreePlacement: Boolean;
-  TargetTrack: Integer;
+  TargetTrack, Row: Integer;
 begin
   inherited MouseMove(Shift, X, Y);
 
@@ -887,6 +983,24 @@ begin
           NewEnd := MinEnd;
 
         FDragCurrentClip.Length := NewEnd - FDragOrigClip.Position;
+      end;
+    dmRangeSelect:
+      begin
+        FRangeStartFrame := FRangeDragStartFrame;
+        FRangeEndFrame := SnapFrame(MouseFrame);
+        if FRangeEndFrame < 0 then
+          FRangeEndFrame := 0;
+
+        Row := (Y - RulerHeight) div TrackHeight;
+        if Row < 0 then
+          Row := 0;
+        if Row > Project.TrackCount - 1 then
+          Row := Project.TrackCount - 1;
+        FRangeStartTrack := FRangeDragStartTrack;
+        FRangeEndTrack := Row;
+
+        if FRangeEndFrame <> FRangeStartFrame then
+          FRangeSelectActive := True;
       end;
   else
     Exit;
@@ -963,6 +1077,174 @@ begin
   Invalidate;
 end;
 
+{ Extracts whatever portion of AClip falls inside [ARangeStart, ARangeEnd),
+  trimming its warp markers to match exactly like a real split would - used
+  by both range-select copy and range-select duplicate. Returns False if
+  AClip doesn't overlap the range at all. }
+function ExtractClipInRange(const AClip: TClip; ARangeStart, ARangeEnd: Int64;
+  out AResult: TClip): Boolean;
+var
+  ClipEnd, NewStart, NewEnd, SplitRel: Int64;
+  DiscardMarkers, KeptMarkers: TWarpMarkerArray;
+begin
+  ClipEnd := AClip.Position + AClip.Length;
+  if (ClipEnd <= ARangeStart) or (AClip.Position >= ARangeEnd) then
+    Exit(False);
+
+  AResult := AClip;
+  NewStart := Max(AClip.Position, ARangeStart);
+  NewEnd := Min(ClipEnd, ARangeEnd);
+
+  if NewStart > AClip.Position then
+  begin
+    SplitRel := SplitWarpMarkers(AClip.WarpMarkers, NewStart - AClip.Position,
+      DiscardMarkers, KeptMarkers);
+    AResult.WarpMarkers := KeptMarkers;
+    AResult.Offset := AClip.Offset + SplitRel;
+    AResult.Position := AClip.Position + SplitRel;
+  end;
+
+  if NewEnd < ClipEnd then
+  begin
+    SplitRel := SplitWarpMarkers(AResult.WarpMarkers, NewEnd - AResult.Position,
+      KeptMarkers, DiscardMarkers);
+    AResult.WarpMarkers := KeptMarkers;
+    AResult.Length := SplitRel;
+  end
+  else
+    AResult.Length := ClipEnd - AResult.Position;
+
+  Result := True;
+end;
+
+procedure TArrangementView.CopySelection;
+var
+  t1, t2, t, i: Integer;
+  RangeStart, RangeEnd: Int64;
+  Extracted: TClip;
+begin
+  ClipboardItems := nil;
+
+  if FRangeSelectActive then
+  begin
+    t1 := Min(FRangeStartTrack, FRangeEndTrack);
+    t2 := Max(FRangeStartTrack, FRangeEndTrack);
+    RangeStart := Min(FRangeStartFrame, FRangeEndFrame);
+    RangeEnd := Max(FRangeStartFrame, FRangeEndFrame);
+    if RangeEnd <= RangeStart then
+      Exit;
+
+    for t := t1 to t2 do
+      for i := 0 to High(Project.Tracks[t].Clips) do
+        if ExtractClipInRange(Project.Tracks[t].Clips[i], RangeStart, RangeEnd,
+          Extracted) then
+        begin
+          Extracted.Position := Extracted.Position - RangeStart;
+          SetLength(ClipboardItems, Length(ClipboardItems) + 1);
+          ClipboardItems[High(ClipboardItems)].RelTrack := t - t1;
+          ClipboardItems[High(ClipboardItems)].Clip := Extracted;
+        end;
+  end
+  else if (FSelectedTrack >= 0) and (FSelectedClip >= 0) and
+    (FSelectedClip <= High(Project.Tracks[FSelectedTrack].Clips)) then
+  begin
+    Extracted := Project.Tracks[FSelectedTrack].Clips[FSelectedClip];
+    Extracted.Position := 0;
+    SetLength(ClipboardItems, 1);
+    ClipboardItems[0].RelTrack := 0;
+    ClipboardItems[0].Clip := Extracted;
+  end;
+end;
+
+procedure TArrangementView.PasteSelection;
+var
+  i, BaseTrack, TargetTrack: Integer;
+  NewClip: TClip;
+  Snapshotted: array[0..Project.MaxTracks - 1] of Boolean;
+begin
+  if Length(ClipboardItems) = 0 then
+    Exit;
+  BaseTrack := FKeyboardTrack;
+  if BaseTrack < 0 then
+    Exit;
+
+  FillChar(Snapshotted, SizeOf(Snapshotted), 0);
+
+  for i := 0 to High(ClipboardItems) do
+  begin
+    TargetTrack := BaseTrack + ClipboardItems[i].RelTrack;
+    if (TargetTrack < 0) or (TargetTrack >= Project.TrackCount) then
+      Continue;
+    if not Snapshotted[TargetTrack] then
+    begin
+      Project.PushUndoSnapshot(TargetTrack);
+      Snapshotted[TargetTrack] := True;
+    end;
+    NewClip := ClipboardItems[i].Clip;
+    NewClip.Position := FCursorFrame + NewClip.Position;
+    NewClip.TrackID := TargetTrack;
+    Project.CommitClipToTrack(TargetTrack, NewClip);
+    PushTrackToEngine(TargetTrack);
+  end;
+  Invalidate;
+end;
+
+procedure TArrangementView.DuplicateSelection;
+var
+  t1, t2, t, i: Integer;
+  RangeStart, RangeEnd, Span: Int64;
+  Extracted, NewClip: TClip;
+  Snapshotted: array[0..Project.MaxTracks - 1] of Boolean;
+begin
+  if FRangeSelectActive then
+  begin
+    t1 := Min(FRangeStartTrack, FRangeEndTrack);
+    t2 := Max(FRangeStartTrack, FRangeEndTrack);
+    RangeStart := Min(FRangeStartFrame, FRangeEndFrame);
+    RangeEnd := Max(FRangeStartFrame, FRangeEndFrame);
+    if RangeEnd <= RangeStart then
+      Exit;
+    Span := RangeEnd - RangeStart;
+
+    FillChar(Snapshotted, SizeOf(Snapshotted), 0);
+    for t := t1 to t2 do
+      for i := 0 to High(Project.Tracks[t].Clips) do
+        if ExtractClipInRange(Project.Tracks[t].Clips[i], RangeStart, RangeEnd,
+          Extracted) then
+        begin
+          if not Snapshotted[t] then
+          begin
+            Project.PushUndoSnapshot(t);
+            Snapshotted[t] := True;
+          end;
+          NewClip := Extracted;
+          NewClip.Position := Extracted.Position + Span;
+          Project.CommitClipToTrack(t, NewClip);
+          PushTrackToEngine(t);
+        end;
+
+    { move the selection along with the duplicate, Ableton-style, so
+      repeated Ctrl+D keeps stacking copies rightward }
+    FRangeStartFrame := FRangeStartFrame + Span;
+    FRangeEndFrame := FRangeEndFrame + Span;
+    Invalidate;
+  end
+  else if (FSelectedTrack >= 0) and (FSelectedClip >= 0) and
+    (FSelectedClip <= High(Project.Tracks[FSelectedTrack].Clips)) then
+  begin
+    Extracted := Project.Tracks[FSelectedTrack].Clips[FSelectedClip];
+    NewClip := Extracted;
+    NewClip.Position := Extracted.Position + Extracted.Length;
+
+    Project.PushUndoSnapshot(FSelectedTrack);
+    Project.CommitClipToTrack(FSelectedTrack, NewClip);
+    PushTrackToEngine(FSelectedTrack);
+
+    SelectClip(FSelectedTrack, High(Project.Tracks[FSelectedTrack].Clips));
+    Invalidate;
+  end;
+end;
+
 procedure TArrangementView.KeyDown(var Key: Word; Shift: TShiftState);
 var
   Track: Integer;
@@ -990,6 +1272,28 @@ begin
 
   if not (ssCtrl in Shift) then
     Exit;
+
+  if Key = Ord('C') then
+  begin
+    CopySelection;
+    Key := 0;
+    Exit;
+  end;
+
+  if Key = Ord('V') then
+  begin
+    PasteSelection;
+    Key := 0;
+    Exit;
+  end;
+
+  if Key = Ord('D') then
+  begin
+    DuplicateSelection;
+    Key := 0;
+    Exit;
+  end;
+
   if FSelectedTrack < 0 then
     Exit;
 
@@ -997,21 +1301,7 @@ begin
   if (FSelectedClip < 0) or (FSelectedClip > High(Project.Tracks[Track].Clips)) then
     Exit;
 
-  if (Key = Ord('D')) then
-  begin
-    Selected := Project.Tracks[Track].Clips[FSelectedClip];
-    NewClip := Selected;
-    NewClip.Position := Selected.Position + Selected.Length;
-
-    Project.PushUndoSnapshot(Track);
-    Project.CommitClipToTrack(Track, NewClip);
-    PushTrackToEngine(Track);
-
-    SelectClip(Track, High(Project.Tracks[Track].Clips));
-    Invalidate;
-    Key := 0;
-  end
-  else if (Key = Ord('E')) then
+  if (Key = Ord('E')) then
   begin
     Selected := Project.Tracks[Track].Clips[FSelectedClip];
     SplitFrame := FCursorFrame;

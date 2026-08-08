@@ -55,7 +55,8 @@ function AudioEngineTakeRecordedAudio(out AData: PSingle; out AFrameCount: Integ
 implementation
 
 uses
-  Classes, SysUtils, AudioBackend, ALSABackend, Resample, Project, SP1200;
+  Classes, SysUtils, AudioBackend, ALSABackend, Resample, Project, SP1200,
+  Effects;
 
 const
   BlockFrames = 512;
@@ -138,6 +139,9 @@ var
 
   SP1200Enabled: Boolean;
   SP1200MixState: TSP1200State;
+
+  TrackEffectState: array[0..MaxTracks - 1, 0..Effects.MaxEffectsPerTrack - 1] of
+    Effects.TEffectState;
 
 function PushCommand(const ACmd: TCommand): Boolean;
 var
@@ -395,7 +399,7 @@ end;
 
 procedure FillBlock;
 var
-  Frame, t, i: Integer;
+  Frame, t, i, e: Integer;
   GlobalFrame, ClipRelFrame: Int64;
   SrcPos: Double;
   Clip: PPlaybackClip;
@@ -410,10 +414,18 @@ begin
   begin
     L := 0;
     R := 0;
+    RecL := 0;
+    RecR := 0;
 
-    if Playing then
+    for t := 0 to MaxTracks - 1 do
     begin
-      for t := 0 to MaxTracks - 1 do
+      if not Project.TrackEnabled[t] then
+        Continue;
+
+      TrackL := 0;
+      TrackR := 0;
+
+      if Playing then
         for i := 0 to TrackClips[t].Count - 1 do
         begin
           Clip := @(TrackClips[t].Items[i]);
@@ -427,28 +439,19 @@ begin
 
           if Clip^.Channels = 1 then
           begin
-            L := L + Interpolate(Clip^.Data, Clip^.FrameCount, Clip^.Channels,
-              0, SrcPos) * Clip^.Gain;
-            R := R + Interpolate(Clip^.Data, Clip^.FrameCount, Clip^.Channels,
-              0, SrcPos) * Clip^.Gain;
+            TrackL := TrackL + Interpolate(Clip^.Data, Clip^.FrameCount,
+              Clip^.Channels, 0, SrcPos) * Clip^.Gain;
+            TrackR := TrackR + Interpolate(Clip^.Data, Clip^.FrameCount,
+              Clip^.Channels, 0, SrcPos) * Clip^.Gain;
           end
           else
           begin
-            L := L + Interpolate(Clip^.Data, Clip^.FrameCount, Clip^.Channels,
-              0, SrcPos) * Clip^.Gain;
-            R := R + Interpolate(Clip^.Data, Clip^.FrameCount, Clip^.Channels,
-              1, SrcPos) * Clip^.Gain;
+            TrackL := TrackL + Interpolate(Clip^.Data, Clip^.FrameCount,
+              Clip^.Channels, 0, SrcPos) * Clip^.Gain;
+            TrackR := TrackR + Interpolate(Clip^.Data, Clip^.FrameCount,
+              Clip^.Channels, 1, SrcPos) * Clip^.Gain;
           end;
         end;
-    end;
-
-    RecL := 0;
-    RecR := 0;
-
-    for t := 0 to MaxTracks - 1 do
-    begin
-      TrackL := 0;
-      TrackR := 0;
 
       MixNoteVoice(LiveNotes[t], 1.0, TrackL, TrackR);
       if FadingNotes[t].Active then
@@ -459,14 +462,23 @@ begin
           FadingNotes[t].Active := False;
       end;
 
-      L := L + TrackL;
-      R := R + TrackR;
-
       if (RecordState = RecordStateRecording) and (t = RecordTrackIndex) then
       begin
         RecL := TrackL;
         RecR := TrackR;
       end;
+
+      { per-track insert effects chain - applied after the record tap, so a
+        take is recorded dry even if the track's monitored/played-back
+        output is being filtered/EQ'd. Entirely separate from the SP1200
+        master-bus emulation, which runs once on the final mix. }
+      for e := 0 to Project.TrackEffectCount[t] - 1 do
+        if Project.TrackEffects[t][e].Kind <> Effects.ekNone then
+          Effects.ProcessEffect(TrackEffectState[t][e], Project.TrackEffects[t][e],
+            TrackL, TrackR, ProjectSampleRate);
+
+      L := L + TrackL;
+      R := R + TrackR;
     end;
 
     { metronome count-in: 4 clicks spaced one beat apart (at the current
@@ -571,7 +583,7 @@ end;
 
 procedure AudioEngineInit;
 var
-  i: Integer;
+  i, e: Integer;
 begin
   RingHead := 0;
   RingTail := 0;
@@ -589,6 +601,8 @@ begin
     TrackClips[i].Count := 0;
     LiveNotes[i].Active := False;
     FadingNotes[i].Active := False;
+    for e := 0 to Effects.MaxEffectsPerTrack - 1 do
+      Effects.EffectStateReset(TrackEffectState[i][e]);
   end;
 
   GetMem(MixBuffer, BlockFrames * OutputChannels * SizeOf(Single));
