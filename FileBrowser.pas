@@ -8,11 +8,14 @@ uses
   Classes, SysUtils, Controls, ExtCtrls, StdCtrls, Graphics;
 
 type
+  TFileActivateEvent = procedure(Sender: TObject; const AFilePath: string) of object;
+
   TFileBrowser = class(TPanel)
   private
     FPathLabel: TLabel;
     FListBox: TListBox;
     FCurrentDir: string;
+    FOnFileActivate: TFileActivateEvent;
     function HasWavExtension(const AName: string): Boolean;
     procedure Populate;
     procedure ListBoxDblClick(Sender: TObject);
@@ -20,6 +23,8 @@ type
     constructor Create(AOwner: TComponent); override;
     procedure SetDirectory(const ADir: string);
     function SelectedFullPath: string;
+    property OnFileActivate: TFileActivateEvent read FOnFileActivate
+      write FOnFileActivate;
   end;
 
 implementation
@@ -114,7 +119,9 @@ begin
     SetDirectory(NewDir);
   end
   else if (Item <> '') and (Item[Length(Item)] = PathDelim) then
-    SetDirectory(IncludeTrailingPathDelimiter(FCurrentDir) + Item);
+    SetDirectory(IncludeTrailingPathDelimiter(FCurrentDir) + Item)
+  else if Assigned(FOnFileActivate) then
+    FOnFileActivate(Self, IncludeTrailingPathDelimiter(FCurrentDir) + Item);
 end;
 
 procedure TFileBrowser.SetDirectory(const ADir: string);

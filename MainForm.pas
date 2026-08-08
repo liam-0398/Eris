@@ -23,7 +23,15 @@ type
     FArrangementView: TArrangementView;
     FSplitter: TSplitter;
     FDevicePanel: TPanel;
-    FDevicePanelLabel: TLabel;
+    FTrackWidget: TPanel;
+    FTrackWidgetLabel: TLabel;
+    FInstrumentWidget: TPanel;
+    FInstrumentNameLabel: TLabel;
+    FInstrumentDeleteButton: TButton;
+    FOctaveLabel: TLabel;
+    FOctaveMinusButton: TButton;
+    FOctavePlusButton: TButton;
+    FDropHintLabel: TLabel;
     FPlaybackPollTimer: TTimer;
 
     procedure BuildMenu;
@@ -44,7 +52,12 @@ type
     procedure DevicePanelDragOver(Sender, Source: TObject; X, Y: Integer;
       State: TDragState; var Accept: Boolean);
     procedure DevicePanelDragDrop(Sender, Source: TObject; X, Y: Integer);
-    procedure UpdateDevicePanelLabel;
+    procedure FileBrowserFileActivate(Sender: TObject; const AFilePath: string);
+    procedure LoadInstrumentForKeyboardTrack(const APath: string);
+    procedure UpdateDevicePanel;
+    procedure InstrumentDeleteClick(Sender: TObject);
+    procedure OctaveMinusClick(Sender: TObject);
+    procedure OctavePlusClick(Sender: TObject);
     procedure TriggerKeyboardNote(ASemitoneOffset: Integer);
     procedure PlaybackPollTimerTimer(Sender: TObject);
     procedure FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
@@ -183,15 +196,83 @@ begin
   FDevicePanel.Align := alBottom;
   FDevicePanel.Height := 160;
   FDevicePanel.BevelOuter := bvNone;
-
-  FDevicePanelLabel := TLabel.Create(Self);
-  FDevicePanelLabel.Parent := FDevicePanel;
-  FDevicePanelLabel.Caption := 'Device / instrument panel (select a track)';
-  FDevicePanelLabel.Left := 8;
-  FDevicePanelLabel.Top := 8;
-
   FDevicePanel.OnDragOver := @DevicePanelDragOver;
   FDevicePanel.OnDragDrop := @DevicePanelDragDrop;
+
+  { "Track N" widget - always present, identifies whose device chain this is }
+  FTrackWidget := TPanel.Create(Self);
+  FTrackWidget.Parent := FDevicePanel;
+  FTrackWidget.Left := 8;
+  FTrackWidget.Top := 8;
+  FTrackWidget.Width := 100;
+  FTrackWidget.Height := 144;
+  FTrackWidget.BevelOuter := bvRaised;
+
+  FTrackWidgetLabel := TLabel.Create(Self);
+  FTrackWidgetLabel.Parent := FTrackWidget;
+  FTrackWidgetLabel.Align := alClient;
+  FTrackWidgetLabel.Alignment := taCenter;
+  FTrackWidgetLabel.Layout := tlCenter;
+  FTrackWidgetLabel.Caption := 'No Track';
+
+  { instrument widget - one "device" holding the sample dragged in for
+    keyboard play on the currently selected track }
+  FInstrumentWidget := TPanel.Create(Self);
+  FInstrumentWidget.Parent := FDevicePanel;
+  FInstrumentWidget.Left := 116;
+  FInstrumentWidget.Top := 8;
+  FInstrumentWidget.Width := 220;
+  FInstrumentWidget.Height := 144;
+  FInstrumentWidget.BevelOuter := bvRaised;
+  FInstrumentWidget.Visible := False;
+
+  FInstrumentDeleteButton := TButton.Create(Self);
+  FInstrumentDeleteButton.Parent := FInstrumentWidget;
+  FInstrumentDeleteButton.Caption := 'X';
+  FInstrumentDeleteButton.Left := FInstrumentWidget.Width - 24;
+  FInstrumentDeleteButton.Top := 4;
+  FInstrumentDeleteButton.Width := 20;
+  FInstrumentDeleteButton.Height := 20;
+  FInstrumentDeleteButton.OnClick := @InstrumentDeleteClick;
+
+  FInstrumentNameLabel := TLabel.Create(Self);
+  FInstrumentNameLabel.Parent := FInstrumentWidget;
+  FInstrumentNameLabel.Left := 8;
+  FInstrumentNameLabel.Top := 8;
+  FInstrumentNameLabel.Width := FInstrumentWidget.Width - 40;
+  FInstrumentNameLabel.Height := 40;
+  FInstrumentNameLabel.AutoSize := False;
+  FInstrumentNameLabel.WordWrap := True;
+
+  FOctaveLabel := TLabel.Create(Self);
+  FOctaveLabel.Parent := FInstrumentWidget;
+  FOctaveLabel.Left := 8;
+  FOctaveLabel.Top := 64;
+  FOctaveLabel.Caption := 'Octave: 0';
+
+  FOctaveMinusButton := TButton.Create(Self);
+  FOctaveMinusButton.Parent := FInstrumentWidget;
+  FOctaveMinusButton.Caption := '-';
+  FOctaveMinusButton.Left := 8;
+  FOctaveMinusButton.Top := 88;
+  FOctaveMinusButton.Width := 28;
+  FOctaveMinusButton.Height := 24;
+  FOctaveMinusButton.OnClick := @OctaveMinusClick;
+
+  FOctavePlusButton := TButton.Create(Self);
+  FOctavePlusButton.Parent := FInstrumentWidget;
+  FOctavePlusButton.Caption := '+';
+  FOctavePlusButton.Left := 44;
+  FOctavePlusButton.Top := 88;
+  FOctavePlusButton.Width := 28;
+  FOctavePlusButton.Height := 24;
+  FOctavePlusButton.OnClick := @OctavePlusClick;
+
+  FDropHintLabel := TLabel.Create(Self);
+  FDropHintLabel.Parent := FDevicePanel;
+  FDropHintLabel.Left := 116;
+  FDropHintLabel.Top := 8;
+  FDropHintLabel.Caption := 'Select a track to load an instrument';
 
   FSplitter := TSplitter.Create(Self);
   FSplitter.Parent := Self;
@@ -201,6 +282,7 @@ begin
   FFileBrowser.Parent := Self;
   FFileBrowser.Align := alLeft;
   FFileBrowser.Width := 220;
+  FFileBrowser.OnFileActivate := @FileBrowserFileActivate;
 
   FFileBrowserSplitter := TSplitter.Create(Self);
   FFileBrowserSplitter.Parent := Self;
@@ -342,7 +424,7 @@ end;
 
 procedure TForm1.ArrangementViewKeyboardTrackChanged(Sender: TObject);
 begin
-  UpdateDevicePanelLabel;
+  UpdateDevicePanel;
 end;
 
 procedure TForm1.DevicePanelDragOver(Sender, Source: TObject; X, Y: Integer;
@@ -355,12 +437,7 @@ end;
 procedure TForm1.DevicePanelDragDrop(Sender, Source: TObject; X, Y: Integer);
 var
   Path: string;
-  Sample: TSample;
-  Track: Integer;
 begin
-  Track := FArrangementView.KeyboardTrack;
-  if Track < 0 then
-    Exit;
   if not ((Source is TControl) and (TControl(Source).Parent is TFileBrowser)) then
     Exit;
 
@@ -368,40 +445,105 @@ begin
   if Path = '' then
     Exit;
 
-  if not DecodeSampleFile(Path, Sample) then
+  LoadInstrumentForKeyboardTrack(Path);
+end;
+
+procedure TForm1.FileBrowserFileActivate(Sender: TObject; const AFilePath: string);
+begin
+  LoadInstrumentForKeyboardTrack(AFilePath);
+end;
+
+procedure TForm1.LoadInstrumentForKeyboardTrack(const APath: string);
+var
+  Sample: TSample;
+  Track: Integer;
+begin
+  Track := FArrangementView.KeyboardTrack;
+  if Track < 0 then
+    Exit;
+
+  if not DecodeSampleFile(APath, Sample) then
   begin
-    ShowMessage('Could not load "' + Path + '" as a WAV file.');
+    ShowMessage('Could not load "' + APath + '" as a WAV file.');
     Exit;
   end;
 
   Project.TrackInstrument[Track] := Project.AddSampleToPool(Sample,
-    ExtractFileName(Path));
-  UpdateDevicePanelLabel;
+    ExtractFileName(APath));
+  UpdateDevicePanel;
 end;
 
-procedure TForm1.UpdateDevicePanelLabel;
+procedure TForm1.UpdateDevicePanel;
 var
   Track, SampleID: Integer;
 begin
   Track := FArrangementView.KeyboardTrack;
+
   if Track < 0 then
   begin
-    FDevicePanelLabel.Caption := 'Device / instrument panel (select a track)';
+    FTrackWidgetLabel.Caption := 'No Track';
+    FInstrumentWidget.Visible := False;
+    FDropHintLabel.Caption := 'Select a track to load an instrument';
+    FDropHintLabel.Visible := True;
     Exit;
   end;
 
+  FTrackWidgetLabel.Caption := 'Track ' + IntToStr(Track + 1);
+
   SampleID := Project.TrackInstrument[Track];
   if SampleID < 0 then
-    FDevicePanelLabel.Caption := Format(
-      'Track %d: drag a WAV here to sample it for keyboard play', [Track + 1])
+  begin
+    FInstrumentWidget.Visible := False;
+    FDropHintLabel.Caption := 'Drag a WAV file here to sample it';
+    FDropHintLabel.Visible := True;
+  end
   else
-    FDevicePanelLabel.Caption := Format('Track %d: %s',
-      [Track + 1, Project.SampleNames[SampleID]]);
+  begin
+    FDropHintLabel.Visible := False;
+    FInstrumentWidget.Visible := True;
+    FInstrumentNameLabel.Caption := Project.SampleNames[SampleID];
+    FOctaveLabel.Caption := Format('Octave: %d', [Project.TrackOctave[Track]]);
+  end;
+end;
+
+procedure TForm1.InstrumentDeleteClick(Sender: TObject);
+var
+  Track: Integer;
+begin
+  Track := FArrangementView.KeyboardTrack;
+  if Track < 0 then
+    Exit;
+  Project.TrackInstrument[Track] := -1;
+  UpdateDevicePanel;
+end;
+
+procedure TForm1.OctaveMinusClick(Sender: TObject);
+var
+  Track: Integer;
+begin
+  Track := FArrangementView.KeyboardTrack;
+  if Track < 0 then
+    Exit;
+  if Project.TrackOctave[Track] > -4 then
+    Dec(Project.TrackOctave[Track]);
+  UpdateDevicePanel;
+end;
+
+procedure TForm1.OctavePlusClick(Sender: TObject);
+var
+  Track: Integer;
+begin
+  Track := FArrangementView.KeyboardTrack;
+  if Track < 0 then
+    Exit;
+  if Project.TrackOctave[Track] < 4 then
+    Inc(Project.TrackOctave[Track]);
+  UpdateDevicePanel;
 end;
 
 procedure TForm1.TriggerKeyboardNote(ASemitoneOffset: Integer);
 var
-  Track, SampleID: Integer;
+  Track, SampleID, TotalOffset: Integer;
   Sample: TSample;
 begin
   Track := FArrangementView.KeyboardTrack;
@@ -413,8 +555,9 @@ begin
     Exit;
 
   Sample := Project.SamplePool[SampleID];
+  TotalOffset := ASemitoneOffset + Project.TrackOctave[Track] * 12;
   AudioEngineTriggerNote(Track, Sample.Data, Sample.FrameCount, Sample.Channels,
-    ASemitoneOffset, 1.0);
+    TotalOffset, 1.0);
 end;
 
 procedure TForm1.PlaybackPollTimerTimer(Sender: TObject);

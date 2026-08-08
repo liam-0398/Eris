@@ -25,6 +25,7 @@ var
   { keyboard-play instrument assigned to each track via the device panel;
     -1 means no instrument loaded }
   TrackInstrument: array[0..TrackCount - 1] of Integer;
+  TrackOctave: array[0..TrackCount - 1] of Integer;
 
 function AddSampleToPool(const ASample: TSample; const AName: string): Integer;
 procedure CommitClipToTrack(ATrackIndex: Integer; const ANewClip: TClip);
