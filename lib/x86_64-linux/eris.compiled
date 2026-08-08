@@ -1,5 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<CONFIG>
-  <Compiler Value="/home/liam/fpcupdeluxe/fpc/bin/x86_64-linux/fpc.sh" Date="1783887915"/>
-  <Params Value="-MObjFPC -Scghi -Cg -O1 -g -gl -l -vewnhibq -Fi/NFS/Code/Pascal/Lazarus/Eris/lib/x86_64-linux -Fu/NFS/Code/Pascal/Lazarus/Eris/ -Fu/home/liam/fpcupdeluxe/lazarus/lcl/units/x86_64-linux/gtk2 -Fu/home/liam/fpcupdeluxe/lazarus/lcl/units/x86_64-linux -Fu/home/liam/fpcupdeluxe/lazarus/components/freetype/lib/x86_64-linux -Fu/home/liam/fpcupdeluxe/lazarus/components/lazutils/lib/x86_64-linux -Fu/home/liam/fpcupdeluxe/lazarus/packager/units/x86_64-linux -FU/NFS/Code/Pascal/Lazarus/Eris/lib/x86_64-linux/ -FE/NFS/Code/Pascal/Lazarus/Eris/ -o/NFS/Code/Pascal/Lazarus/Eris/eris -dLCL -dLCLgtk2 eris.lpr"/>
-</CONFIG>
