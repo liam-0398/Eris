@@ -42,6 +42,8 @@ function AudioEngineLiveNoteActive(ATrackIndex: Integer): Boolean;
 function AudioEngineLiveNotePosition(ATrackIndex: Integer): Int64;
 procedure AudioEngineSetSP1200Enabled(AEnabled: Boolean);
 function AudioEngineGetSP1200Enabled: Boolean;
+procedure AudioEngineSetMetronomeEnabled(AEnabled: Boolean);
+function AudioEngineGetMetronomeEnabled: Boolean;
 
 const
   RecordStateIdle = 0;
@@ -76,7 +78,8 @@ const
 
 type
   TCommandKind = (ckSetTrackClips, ckPlay, ckStop, ckSeek, ckTriggerNote,
-    ckStartCountIn, ckStopRecording, ckSetLoop, ckClearLoop, ckSetSP1200Enabled);
+    ckStartCountIn, ckStopRecording, ckSetLoop, ckClearLoop, ckSetSP1200Enabled,
+    ckSetMetronomeEnabled);
 
   TCommand = record
     Kind: TCommandKind;
@@ -144,6 +147,7 @@ var
   ClickPlayPos: Integer;
 
   SP1200Enabled: Boolean;
+  MetronomeEnabled: Boolean;
   SP1200MixState: TSP1200State;
 
   TrackEffectState: array[0..MaxTracks - 1, 0..Effects.MaxEffectsPerTrack - 1] of
@@ -255,6 +259,8 @@ begin
         LoopActive := False;
       ckSetSP1200Enabled:
         SP1200Enabled := Cmd.Param <> 0;
+      ckSetMetronomeEnabled:
+        MetronomeEnabled := Cmd.Param <> 0;
     end;
 end;
 
@@ -562,6 +568,16 @@ begin
         Dec(CountInFramesUntilNextBeat);
     end;
 
+    { tempo-aware metronome during normal playback - reuses the exact same
+      click sound/voice as the count-in above. The two never collide: this
+      only fires once Playing is True, and count-in only runs before Playing
+      becomes True. Driven off the absolute playback position (not a running
+      countdown) so it stays beat-aligned to frame 0 through seeks/loops
+      instead of drifting. }
+    if Playing and MetronomeEnabled and (ClickPlayPos < 0) and
+      (GlobalFrame mod BeatFrames = 0) then
+      ClickPlayPos := 0;
+
     if (ClickPlayPos >= 0) and (ClickPlayPos < Length(ClickSamples)) then
     begin
       ClickVal := ClickSamples[ClickPlayPos];
@@ -652,6 +668,7 @@ begin
   Playing := False;
   LoopActive := False;
   SP1200Enabled := False;
+  MetronomeEnabled := False;
   SP1200Reset(SP1200MixState);
   RecordState := RecordStateIdle;
   RecordWritePos := 0;
@@ -828,6 +845,23 @@ end;
 function AudioEngineGetSP1200Enabled: Boolean;
 begin
   Result := SP1200Enabled;
+end;
+
+procedure AudioEngineSetMetronomeEnabled(AEnabled: Boolean);
+var
+  Cmd: TCommand;
+begin
+  Cmd.Kind := ckSetMetronomeEnabled;
+  if AEnabled then
+    Cmd.Param := 1
+  else
+    Cmd.Param := 0;
+  PushCommand(Cmd);
+end;
+
+function AudioEngineGetMetronomeEnabled: Boolean;
+begin
+  Result := MetronomeEnabled;
 end;
 
 procedure AudioEngineStartCountIn(ATrackIndex: Integer);

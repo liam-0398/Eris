@@ -974,7 +974,10 @@ begin
   if not FDragActive then
     Exit;
 
-  FreePlacement := ssShift in Shift;
+  { Ctrl bypasses grid snapping for free/unbounded placement while dragging -
+    kept distinct from Shift, which (on a resize handle, see MouseUp) means
+    something else entirely: enforce the elastic Re-Pitch warp stretch. }
+  FreePlacement := ssCtrl in Shift;
   MouseFrame := XToFrame(X);
 
   case FDragMode of

@@ -24,6 +24,7 @@ type
     var
     FMainMenu: TMainMenu;
     FTransportPanel: TPanel;
+    FMetronomeToggle: TSpeedButton;
     FStopButton: TButton;
     FPlayPauseButton: TButton;
     FRecordButton: TButton;
@@ -98,6 +99,8 @@ type
     procedure InstrumentEditorChanged(Sender: TObject);
     procedure WarpRepitchToggleClick(Sender: TObject);
     procedure UpdateWarpRepitchToggleLook;
+    procedure MetronomeToggleClick(Sender: TObject);
+    procedure UpdateMetronomeToggleLook;
     procedure WarpZoomInClick(Sender: TObject);
     procedure WarpZoomOutClick(Sender: TObject);
     procedure InstrumentZoomInClick(Sender: TObject);
@@ -191,16 +194,19 @@ procedure TForm1.BuildMenu;
 var
   FileMenu, EditMenu, ViewMenu, TrackMenu, HelpMenu, UndoItem,
   ZoomInItem, ZoomOutItem, CopyItem, PasteItem, DuplicateItem, SplitItem,
-  DeleteItem: TMenuItem;
+  DeleteItem, OpenItem, SaveItem, SaveAsItem, AddTrackItem: TMenuItem;
 begin
   FMainMenu := TMainMenu.Create(Self);
   Menu := FMainMenu;
 
   FileMenu := AddMenu('&File');
   AddItem(FileMenu, '&New', @FileNewClick);
-  AddItem(FileMenu, '&Open...', @FileOpenClick);
-  AddItem(FileMenu, '&Save', @FileSaveClick);
-  AddItem(FileMenu, 'Save &As...', @FileSaveAsClick);
+  OpenItem := AddItem(FileMenu, '&Open...', @FileOpenClick);
+  OpenItem.ShortCut := Menus.ShortCut(Ord('O'), [ssCtrl]);
+  SaveItem := AddItem(FileMenu, '&Save', @FileSaveClick);
+  SaveItem.ShortCut := Menus.ShortCut(Ord('S'), [ssCtrl]);
+  SaveAsItem := AddItem(FileMenu, 'Save &As...', @FileSaveAsClick);
+  SaveAsItem.ShortCut := Menus.ShortCut(Ord('S'), [ssCtrl, ssShift]);
   AddSeparator(FileMenu);
   AddItem(FileMenu, '&Export...', @FileExportClick);
   AddSeparator(FileMenu);
@@ -230,7 +236,8 @@ begin
   ZoomOutItem.ShortCut := Menus.ShortCut(VK_OEM_MINUS, [ssCtrl]);
 
   TrackMenu := AddMenu('&Track');
-  AddItem(TrackMenu, '&Add Track', @TrackAddClick);
+  AddTrackItem := AddItem(TrackMenu, '&Add Track', @TrackAddClick);
+  AddTrackItem.ShortCut := Menus.ShortCut(Ord('N'), [ssCtrl]);
 
   HelpMenu := AddMenu('&Help');
   AddItem(HelpMenu, '&About...', @HelpAboutClick);
@@ -307,6 +314,18 @@ begin
   FGridLabel := TLabel.Create(Self);
   FGridLabel.Parent := FTransportPanel;
   FGridLabel.Caption := '1/16';
+
+  { tempo-aware metronome toggle - sits just left of Stop, colored when on }
+  FMetronomeToggle := TSpeedButton.Create(Self);
+  FMetronomeToggle.Parent := FTransportPanel;
+  FMetronomeToggle.Caption := 'M';
+  FMetronomeToggle.Width := Px(32);
+  FMetronomeToggle.Height := Px(32);
+  FMetronomeToggle.Font.Style := [fsBold];
+  FMetronomeToggle.ShowHint := True;
+  FMetronomeToggle.Hint := 'Metronome (tempo-aware click on every beat during playback)';
+  FMetronomeToggle.OnClick := @MetronomeToggleClick;
+  UpdateMetronomeToggleLook;
 
   FStopButton := TButton.Create(Self);
   FStopButton.Parent := FTransportPanel;
@@ -825,14 +844,16 @@ var
   Gap, GroupWidth, GroupLeft, ButtonTop: Integer;
 begin
   Gap := Px(8);
-  GroupWidth := FStopButton.Width + Gap + FPlayPauseButton.Width + Gap +
-    FRecordButton.Width;
+  GroupWidth := FMetronomeToggle.Width + Gap + FStopButton.Width + Gap +
+    FPlayPauseButton.Width + Gap + FRecordButton.Width;
   GroupLeft := (FTransportPanel.ClientWidth - GroupWidth) div 2;
   ButtonTop := (FTransportPanel.ClientHeight - FPlayPauseButton.Height) div 2;
 
-  FStopButton.Left := GroupLeft;
+  FMetronomeToggle.Left := GroupLeft;
+  FMetronomeToggle.Top := ButtonTop;
+  FStopButton.Left := FMetronomeToggle.Left + FMetronomeToggle.Width + Gap;
   FStopButton.Top := ButtonTop;
-  FPlayPauseButton.Left := GroupLeft + FStopButton.Width + Gap;
+  FPlayPauseButton.Left := GroupLeft + FMetronomeToggle.Width + Gap + FStopButton.Width + Gap;
   FPlayPauseButton.Top := ButtonTop;
   FRecordButton.Left := FPlayPauseButton.Left + FPlayPauseButton.Width + Gap;
   FRecordButton.Top := ButtonTop;
@@ -965,16 +986,37 @@ begin
   FWarpEditor.Invalidate;
 end;
 
-procedure TForm1.UpdateWarpRepitchToggleLook;
+procedure TForm1.MetronomeToggleClick(Sender: TObject);
 begin
-  if FWarpRepitchToggle.Down then
+  AudioEngineSetMetronomeEnabled(FMetronomeToggle.Down);
+  UpdateMetronomeToggleLook;
+end;
+
+procedure TForm1.UpdateMetronomeToggleLook;
+begin
+  if FMetronomeToggle.Down then
   begin
-    FWarpRepitchToggle.Caption := 'RP';
-    FWarpRepitchToggle.Font.Color := clRed;
+    FMetronomeToggle.Color := clLime;
+    FMetronomeToggle.Font.Color := clBlack;
   end
   else
   begin
-    FWarpRepitchToggle.Caption := 'RP';
+    FMetronomeToggle.Color := clBtnFace;
+    FMetronomeToggle.Font.Color := clWindowText;
+  end;
+end;
+
+procedure TForm1.UpdateWarpRepitchToggleLook;
+begin
+  FWarpRepitchToggle.Caption := 'RP';
+  if FWarpRepitchToggle.Down then
+  begin
+    FWarpRepitchToggle.Color := clLime;
+    FWarpRepitchToggle.Font.Color := clBlack;
+  end
+  else
+  begin
+    FWarpRepitchToggle.Color := clBtnFace;
     FWarpRepitchToggle.Font.Color := clWindowText;
   end;
 end;
