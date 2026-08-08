@@ -30,7 +30,7 @@ type
       FOnSeek: TSeekEvent;
       FOnKeyboardTrackChanged: TNotifyEvent;
       FOnClipSelectionChanged: TNotifyEvent;
-      FTrackColors: array[0..Project.TrackCount - 1] of TColor;
+      FTrackColors: array[0..Project.MaxTracks - 1] of TColor;
       FCursorFrame: Int64;
       FSelectedTrack: Integer;
       FSelectedClip: Integer;
@@ -79,6 +79,7 @@ type
     property KeyboardTrack: Integer read FKeyboardTrack;
     property SelectedTrack: Integer read FSelectedTrack;
     property SelectedClipIndex: Integer read FSelectedClip;
+    property CursorFrame: Int64 read FCursorFrame;
     property OnFileDrop: TFileDropEvent read FOnFileDrop write FOnFileDrop;
     property OnSeek: TSeekEvent read FOnSeek write FOnSeek;
     property OnKeyboardTrackChanged: TNotifyEvent read FOnKeyboardTrackChanged
@@ -102,7 +103,7 @@ begin
   FKeyboardTrack := -1;
 
   Randomize;
-  for i := 0 to Project.TrackCount - 1 do
+  for i := 0 to Project.MaxTracks - 1 do
     FTrackColors[i] := RGBToColor(100 + Random(120), 100 + Random(120),
       100 + Random(120));
 end;

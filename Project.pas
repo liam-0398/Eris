@@ -8,7 +8,8 @@ uses
   SampleTypes, ClipOverwrite, Waveform;
 
 const
-  TrackCount = 4;
+  MaxTracks = 16;
+  DefaultTrackCount = 4;
   DefaultTempoBPM = 160.0;
 
 type
@@ -17,7 +18,11 @@ type
   end;
 
 var
-  Tracks: array[0..TrackCount - 1] of TTrack;
+  { the arrays below are always sized to MaxTracks so the audio engine's
+    matching fixed-size arrays never need to be reallocated; TrackCount is
+    how many of those slots are currently active/visible }
+  TrackCount: Integer = DefaultTrackCount;
+  Tracks: array[0..MaxTracks - 1] of TTrack;
   SamplePool: array of TSample;
   SampleNames: array of string;
   SamplePaths: array of string;
@@ -26,8 +31,8 @@ var
 
   { keyboard-play instrument assigned to each track via the device panel;
     -1 means no instrument loaded }
-  TrackInstrument: array[0..TrackCount - 1] of Integer;
-  TrackOctave: array[0..TrackCount - 1] of Integer;
+  TrackInstrument: array[0..MaxTracks - 1] of Integer;
+  TrackOctave: array[0..MaxTracks - 1] of Integer;
 
 function AddSampleToPool(const ASample: TSample; const AName, APath: string): Integer;
 procedure CommitClipToTrack(ATrackIndex: Integer; const ANewClip: TClip);
@@ -37,6 +42,7 @@ procedure RemoveClipAt(ATrackIndex, AClipIndex: Integer);
 procedure PushUndoSnapshot(ATrackIndex: Integer);
 function PopUndo(out ATrackIndex: Integer): Boolean;
 
+function AddTrack: Boolean;
 procedure NewProject;
 
 implementation
@@ -54,7 +60,7 @@ procedure InitTrackInstruments;
 var
   i: Integer;
 begin
-  for i := 0 to TrackCount - 1 do
+  for i := 0 to MaxTracks - 1 do
   begin
     TrackInstrument[i] := -1;
     TrackOctave[i] := 0;
@@ -130,6 +136,17 @@ begin
   Result := True;
 end;
 
+function AddTrack: Boolean;
+begin
+  if TrackCount >= MaxTracks then
+    Exit(False);
+  Tracks[TrackCount].Clips := nil;
+  TrackInstrument[TrackCount] := -1;
+  TrackOctave[TrackCount] := 0;
+  Inc(TrackCount);
+  Result := True;
+end;
+
 procedure NewProject;
 var
   i: Integer;
@@ -143,9 +160,10 @@ begin
   SetLength(SamplePeaks, 0);
   SetLength(UndoStack, 0);
 
-  for i := 0 to TrackCount - 1 do
+  for i := 0 to MaxTracks - 1 do
     Tracks[i].Clips := nil;
 
+  TrackCount := DefaultTrackCount;
   InitTrackInstruments;
   TempoBPM := DefaultTempoBPM;
 end;

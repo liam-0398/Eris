@@ -16,6 +16,10 @@ type
     FTransportPanel: TPanel;
     FStopButton: TButton;
     FPlayPauseButton: TButton;
+    FRecordButton: TButton;
+    FRecordStartFrame: Int64;
+    FRecordTrackIndex: Integer;
+    FRecordingCounter: Integer;
     FTempoLabel: TLabel;
     FTempoEdit: TEdit;
     FFileBrowser: TFileBrowser;
@@ -49,9 +53,12 @@ type
     procedure FileExitClick(Sender: TObject);
     procedure EditPreferencesClick(Sender: TObject);
     procedure EditUndoClick(Sender: TObject);
+    procedure TrackAddClick(Sender: TObject);
     procedure HelpAboutClick(Sender: TObject);
     procedure StopClick(Sender: TObject);
     procedure PlayPauseClick(Sender: TObject);
+    procedure RecordClick(Sender: TObject);
+    procedure FinalizeRecording;
     procedure TransportPanelResize(Sender: TObject);
     procedure TempoEditEditingDone(Sender: TObject);
     procedure ArrangementViewFileDrop(Sender: TObject; ATrackIndex: Integer;
@@ -156,7 +163,7 @@ begin
   AddItem(ViewMenu, 'Zoom &Out', nil);
 
   TrackMenu := AddMenu('&Track');
-  AddItem(TrackMenu, '&Add Track', nil);
+  AddItem(TrackMenu, '&Add Track', @TrackAddClick);
 
   HelpMenu := AddMenu('&Help');
   AddItem(HelpMenu, '&About...', @HelpAboutClick);
@@ -201,6 +208,13 @@ begin
   FPlayPauseButton.Width := 80;
   FPlayPauseButton.Height := 32;
   FPlayPauseButton.OnClick := @PlayPauseClick;
+
+  FRecordButton := TButton.Create(Self);
+  FRecordButton.Parent := FTransportPanel;
+  FRecordButton.Caption := 'Record';
+  FRecordButton.Width := 80;
+  FRecordButton.Height := 32;
+  FRecordButton.OnClick := @RecordClick;
 
   FDevicePanel := TPanel.Create(Self);
   FDevicePanel.Parent := Self;
@@ -468,6 +482,14 @@ begin
   end;
 end;
 
+procedure TForm1.TrackAddClick(Sender: TObject);
+begin
+  if Project.AddTrack then
+    FArrangementView.Invalidate
+  else
+    ShowMessage(Format('Maximum of %d tracks reached.', [Project.MaxTracks]));
+end;
+
 procedure TForm1.HelpAboutClick(Sender: TObject);
 begin
   ShowMessage('Eris' + LineEnding + 'A linear-timeline, audio-only DAW.');
@@ -498,13 +520,79 @@ begin
   end;
 end;
 
+procedure TForm1.RecordClick(Sender: TObject);
+begin
+  if AudioEngineRecordState <> RecordStateIdle then
+  begin
+    FinalizeRecording;
+    Exit;
+  end;
+
+  if FArrangementView.KeyboardTrack < 0 then
+  begin
+    ShowMessage('Select a track first.');
+    Exit;
+  end;
+  if Project.TrackInstrument[FArrangementView.KeyboardTrack] < 0 then
+  begin
+    ShowMessage('Load an instrument for this track first.');
+    Exit;
+  end;
+
+  FRecordTrackIndex := FArrangementView.KeyboardTrack;
+  FRecordStartFrame := FArrangementView.CursorFrame;
+  AudioEngineSeek(FRecordStartFrame);
+  AudioEngineStartCountIn(FRecordTrackIndex);
+  FRecordButton.Caption := 'Counting in...';
+end;
+
+procedure TForm1.FinalizeRecording;
+var
+  WasRecording: Boolean;
+  Data: PSingle;
+  FrameCount: Integer;
+  Sample: TSample;
+  Clip: TClip;
+begin
+  WasRecording := AudioEngineRecordState = RecordStateRecording;
+  AudioEngineStopRecording;
+  FRecordButton.Caption := 'Record';
+
+  if not WasRecording then
+    Exit; { cancelled during count-in - nothing to keep }
+  if not AudioEngineTakeRecordedAudio(Data, FrameCount) then
+    Exit;
+
+  FillChar(Sample, SizeOf(Sample), 0);
+  Sample.Data := Data;
+  Sample.FrameCount := FrameCount;
+  Sample.Channels := 2;
+  Sample.SampleRate := AudioEngine.ProjectSampleRate;
+  Sample.BaseNote := 60.0;
+
+  Inc(FRecordingCounter);
+  Clip.SampleID := Project.AddSampleToPool(Sample,
+    'Recording ' + IntToStr(FRecordingCounter), '');
+  Clip.Offset := 0;
+  Clip.Length := FrameCount;
+  Clip.Position := FRecordStartFrame;
+  Clip.TrackID := FRecordTrackIndex;
+  Clip.PitchSemitones := 0;
+  Clip.Gain := 1.0;
+
+  Project.PushUndoSnapshot(FRecordTrackIndex);
+  Project.CommitClipToTrack(FRecordTrackIndex, Clip);
+  FArrangementView.RefreshTrack(FRecordTrackIndex);
+end;
+
 procedure TForm1.TransportPanelResize(Sender: TObject);
 const
   Gap = 8;
 var
   GroupWidth, GroupLeft, ButtonTop: Integer;
 begin
-  GroupWidth := FStopButton.Width + Gap + FPlayPauseButton.Width;
+  GroupWidth := FStopButton.Width + Gap + FPlayPauseButton.Width + Gap +
+    FRecordButton.Width;
   GroupLeft := (FTransportPanel.ClientWidth - GroupWidth) div 2;
   ButtonTop := (FTransportPanel.ClientHeight - FPlayPauseButton.Height) div 2;
 
@@ -512,6 +600,8 @@ begin
   FStopButton.Top := ButtonTop;
   FPlayPauseButton.Left := GroupLeft + FStopButton.Width + Gap;
   FPlayPauseButton.Top := ButtonTop;
+  FRecordButton.Left := FPlayPauseButton.Left + FPlayPauseButton.Width + Gap;
+  FRecordButton.Top := ButtonTop;
 end;
 
 procedure TForm1.TempoEditEditingDone(Sender: TObject);
@@ -725,6 +815,16 @@ begin
     FPlayPauseButton.Caption := 'Play';
 
   FWarpEditor.SetPlayheadState(AudioEngineGetPosition, AudioEngineIsPlaying);
+
+  case AudioEngineRecordState of
+    RecordStateCountIn:
+      FRecordButton.Caption := 'Counting in...';
+    RecordStateRecording:
+      FRecordButton.Caption := 'Recording... (click to stop)';
+    RecordStateIdle:
+      if FRecordButton.Caption <> 'Record' then
+        FinalizeRecording; { engine auto-stopped (hit the recording cap) }
+  end;
 end;
 
 function KeyToSemitoneOffset(AKey: Word; out AOffset: Integer): Boolean;

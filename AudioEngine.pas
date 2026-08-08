@@ -36,20 +36,34 @@ function AudioEngineIsPlaying: Boolean;
 function AudioEngineHasClip: Boolean;
 function AudioEngineGetPosition: Int64;
 
+const
+  RecordStateIdle = 0;
+  RecordStateCountIn = 1;
+  RecordStateRecording = 2;
+
+procedure AudioEngineStartCountIn(ATrackIndex: Integer);
+procedure AudioEngineStopRecording;
+function AudioEngineRecordState: Integer;
+function AudioEngineTakeRecordedAudio(out AData: PSingle; out AFrameCount: Integer): Boolean;
+
 implementation
 
 uses
-  Classes, SysUtils, AudioBackend, ALSABackend, Resample;
+  Classes, SysUtils, AudioBackend, ALSABackend, Resample, Project;
 
 const
   BlockFrames = 512;
   OutputChannels = 2;
   RingBufferCapacity = 32;
-  MaxTracks = 4;
+  MaxTracks = Project.MaxTracks;
   NoteFadeSamples = 128; { short crossfade on hard-retrigger, avoids a click }
+  MaxRecordSeconds = 180;
+  ClickDurationMs = 50;
+  ClickFreqHz = 1000;
 
 type
-  TCommandKind = (ckSetTrackClips, ckPlay, ckStop, ckSeek, ckTriggerNote);
+  TCommandKind = (ckSetTrackClips, ckPlay, ckStop, ckSeek, ckTriggerNote,
+    ckStartCountIn, ckStopRecording);
 
   TCommand = record
     Kind: TCommandKind;
@@ -101,6 +115,16 @@ var
 
   LiveNotes: array[0..MaxTracks - 1] of TLiveNote;
   FadingNotes: array[0..MaxTracks - 1] of TLiveNote;
+
+  RecordBuffer: PSingle;
+  RecordCapacityFrames: Int64;
+  RecordWritePos: Int64;
+  RecordTrackIndex: Integer;
+  RecordState: Integer;
+  CountInBeatsRemaining: Integer;
+  CountInFramesUntilNextBeat: Int64;
+  ClickSamples: array of Single;
+  ClickPlayPos: Integer;
 
 function PushCommand(const ACmd: TCommand): Boolean;
 var
@@ -174,6 +198,20 @@ begin
           LiveNotes[t].FadeStep := 0;
           LiveNotes[t].Active := True;
         end;
+      ckStartCountIn:
+        begin
+          RecordTrackIndex := Cmd.TrackIndex;
+          RecordState := RecordStateCountIn;
+          CountInBeatsRemaining := 4;
+          CountInFramesUntilNextBeat := 0;
+          RecordWritePos := 0;
+          ClickPlayPos := -1;
+        end;
+      ckStopRecording:
+        begin
+          RecordState := RecordStateIdle;
+          Playing := False;
+        end;
     end;
 end;
 
@@ -235,9 +273,11 @@ var
   GlobalFrame, ClipRelFrame: Int64;
   SrcPos: Double;
   Clip: PPlaybackClip;
-  L, R: Single;
+  L, R, TrackL, TrackR, RecL, RecR, ClickVal: Single;
+  BeatFrames: Int64;
 begin
   FillChar(MixBuffer^, BlockFrames * OutputChannels * SizeOf(Single), 0);
+  BeatFrames := Round((ProjectSampleRate * 60) / Project.TempoBPM);
 
   for Frame := 0 to BlockFrames - 1 do
   begin
@@ -276,16 +316,79 @@ begin
         end;
     end;
 
+    RecL := 0;
+    RecR := 0;
+
     for t := 0 to MaxTracks - 1 do
     begin
-      MixNoteVoice(LiveNotes[t], 1.0, L, R);
+      TrackL := 0;
+      TrackR := 0;
+
+      MixNoteVoice(LiveNotes[t], 1.0, TrackL, TrackR);
       if FadingNotes[t].Active then
       begin
-        MixNoteVoice(FadingNotes[t], FadingNotes[t].FadeGain, L, R);
+        MixNoteVoice(FadingNotes[t], FadingNotes[t].FadeGain, TrackL, TrackR);
         FadingNotes[t].FadeGain := FadingNotes[t].FadeGain - FadingNotes[t].FadeStep;
         if FadingNotes[t].FadeGain <= 0 then
           FadingNotes[t].Active := False;
       end;
+
+      L := L + TrackL;
+      R := R + TrackR;
+
+      if (RecordState = RecordStateRecording) and (t = RecordTrackIndex) then
+      begin
+        RecL := TrackL;
+        RecR := TrackR;
+      end;
+    end;
+
+    { metronome count-in: 4 clicks spaced one beat apart (at the current
+      tempo), then hand off to recording }
+    if RecordState = RecordStateCountIn then
+    begin
+      if CountInFramesUntilNextBeat <= 0 then
+      begin
+        if CountInBeatsRemaining > 0 then
+        begin
+          ClickPlayPos := 0;
+          Dec(CountInBeatsRemaining);
+          CountInFramesUntilNextBeat := BeatFrames;
+        end;
+        if CountInBeatsRemaining = 0 then
+        begin
+          RecordState := RecordStateRecording;
+          RecordWritePos := 0;
+          { arrangement playback starts on the exact same frame as
+            recording, both from wherever the playhead already sits (it
+            hasn't moved since Playing was False throughout count-in) }
+          Playing := True;
+        end;
+      end
+      else
+        Dec(CountInFramesUntilNextBeat);
+    end;
+
+    if (ClickPlayPos >= 0) and (ClickPlayPos < Length(ClickSamples)) then
+    begin
+      ClickVal := ClickSamples[ClickPlayPos];
+      L := L + ClickVal;
+      R := R + ClickVal;
+      Inc(ClickPlayPos);
+    end
+    else
+      ClickPlayPos := -1;
+
+    if RecordState = RecordStateRecording then
+    begin
+      if RecordWritePos < RecordCapacityFrames then
+      begin
+        RecordBuffer[RecordWritePos * 2] := RecL;
+        RecordBuffer[RecordWritePos * 2 + 1] := RecR;
+        Inc(RecordWritePos);
+      end
+      else
+        RecordState := RecordStateIdle; { hit the cap - auto-stop }
     end;
 
     if L > 1.0 then L := 1.0 else if L < -1.0 then L := -1.0;
@@ -303,13 +406,27 @@ begin
   while not Terminated do
   begin
     DrainCommands;
-    if Playing or AnyLiveNoteActive then
+    if Playing or AnyLiveNoteActive or (RecordState <> RecordStateIdle) then
     begin
       FillBlock;
       Backend.WriteBlock(MixBuffer, BlockFrames);
     end
     else
       Sleep(10);
+  end;
+end;
+
+procedure PrecomputeClick;
+var
+  i, ClickLen: Integer;
+  Envelope: Single;
+begin
+  ClickLen := Round(ProjectSampleRate * ClickDurationMs / 1000);
+  SetLength(ClickSamples, ClickLen);
+  for i := 0 to ClickLen - 1 do
+  begin
+    Envelope := 1.0 - (i / ClickLen);
+    ClickSamples[i] := Envelope * 0.5 * Sin(2 * Pi * ClickFreqHz * i / ProjectSampleRate);
   end;
 end;
 
@@ -321,6 +438,9 @@ begin
   RingTail := 0;
   Playhead := 0;
   Playing := False;
+  RecordState := RecordStateIdle;
+  RecordWritePos := 0;
+  ClickPlayPos := -1;
   for i := 0 to MaxTracks - 1 do
   begin
     TrackClips[i].Items := nil;
@@ -330,6 +450,11 @@ begin
   end;
 
   GetMem(MixBuffer, BlockFrames * OutputChannels * SizeOf(Single));
+
+  RecordCapacityFrames := MaxRecordSeconds * ProjectSampleRate;
+  GetMem(RecordBuffer, RecordCapacityFrames * OutputChannels * SizeOf(Single));
+
+  PrecomputeClick;
 
   Backend := CreateALSABackend;
   Backend.Open(ProjectSampleRate, OutputChannels, BlockFrames);
@@ -353,6 +478,12 @@ begin
   begin
     FreeMem(MixBuffer);
     MixBuffer := nil;
+  end;
+
+  if RecordBuffer <> nil then
+  begin
+    FreeMem(RecordBuffer);
+    RecordBuffer := nil;
   end;
 end;
 
@@ -426,6 +557,41 @@ end;
 function AudioEngineGetPosition: Int64;
 begin
   Result := Playhead;
+end;
+
+procedure AudioEngineStartCountIn(ATrackIndex: Integer);
+var
+  Cmd: TCommand;
+begin
+  Cmd.Kind := ckStartCountIn;
+  Cmd.TrackIndex := ATrackIndex;
+  PushCommand(Cmd);
+end;
+
+procedure AudioEngineStopRecording;
+var
+  Cmd: TCommand;
+begin
+  Cmd.Kind := ckStopRecording;
+  PushCommand(Cmd);
+end;
+
+function AudioEngineRecordState: Integer;
+begin
+  Result := RecordState;
+end;
+
+function AudioEngineTakeRecordedAudio(out AData: PSingle; out AFrameCount: Integer): Boolean;
+begin
+  AData := nil;
+  AFrameCount := 0;
+  if RecordWritePos <= 0 then
+    Exit(False);
+
+  AFrameCount := RecordWritePos;
+  GetMem(AData, AFrameCount * OutputChannels * SizeOf(Single));
+  Move(RecordBuffer^, AData^, AFrameCount * OutputChannels * SizeOf(Single));
+  Result := True;
 end;
 
 end.
