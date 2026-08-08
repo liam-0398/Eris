@@ -9,12 +9,20 @@ uses
   AudioEngine, Waveform;
 
 const
-  WarpPixelsPerSecond = 150;
+  WarpDefaultPixelsPerSecond = 150;
+  WarpMinPixelsPerSecond = 20;
+  WarpMaxPixelsPerSecond = 2000;
+  WarpZoomFactor = 1.25;
   WarpRulerHeight = 18;
   WarpMinWidgetWidth = 120;
   WarpMaxWidgetWidth = 4000;
 
+var
+  WarpZoomPixelsPerSecond: Double = WarpDefaultPixelsPerSecond;
+
 function WarpWidthForFrames(AFrames: Int64): Integer;
+procedure WarpZoomIn;
+procedure WarpZoomOut;
 
 type
   TWarpEditor = class(TCustomControl)
@@ -63,11 +71,25 @@ implementation
 
 function WarpWidthForFrames(AFrames: Int64): Integer;
 begin
-  Result := Round(AFrames * WarpPixelsPerSecond / AudioEngine.ProjectSampleRate);
+  Result := Round(AFrames * WarpZoomPixelsPerSecond / AudioEngine.ProjectSampleRate);
   if Result < WarpMinWidgetWidth then
     Result := WarpMinWidgetWidth;
   if Result > WarpMaxWidgetWidth then
     Result := WarpMaxWidgetWidth;
+end;
+
+procedure WarpZoomIn;
+begin
+  WarpZoomPixelsPerSecond := WarpZoomPixelsPerSecond * WarpZoomFactor;
+  if WarpZoomPixelsPerSecond > WarpMaxPixelsPerSecond then
+    WarpZoomPixelsPerSecond := WarpMaxPixelsPerSecond;
+end;
+
+procedure WarpZoomOut;
+begin
+  WarpZoomPixelsPerSecond := WarpZoomPixelsPerSecond / WarpZoomFactor;
+  if WarpZoomPixelsPerSecond < WarpMinPixelsPerSecond then
+    WarpZoomPixelsPerSecond := WarpMinPixelsPerSecond;
 end;
 
 constructor TWarpEditor.Create(AOwner: TComponent);
@@ -100,12 +122,12 @@ end;
 
 function TWarpEditor.FrameToX(AFrame: Int64): Integer;
 begin
-  Result := Round(AFrame * WarpPixelsPerSecond / AudioEngine.ProjectSampleRate);
+  Result := Round(AFrame * WarpZoomPixelsPerSecond / AudioEngine.ProjectSampleRate);
 end;
 
 function TWarpEditor.XToFrame(AX: Integer): Int64;
 begin
-  Result := Round(AX * AudioEngine.ProjectSampleRate / WarpPixelsPerSecond);
+  Result := Round(AX * AudioEngine.ProjectSampleRate / WarpZoomPixelsPerSecond);
 end;
 
 function TWarpEditor.BeatFrames: Int64;

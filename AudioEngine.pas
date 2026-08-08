@@ -37,6 +37,8 @@ procedure AudioEngineTriggerNote(ATrackIndex: Integer; AData: PSingle;
 function AudioEngineIsPlaying: Boolean;
 function AudioEngineHasClip: Boolean;
 function AudioEngineGetPosition: Int64;
+function AudioEngineLiveNoteActive(ATrackIndex: Integer): Boolean;
+function AudioEngineLiveNotePosition(ATrackIndex: Integer): Int64;
 
 const
   RecordStateIdle = 0;
@@ -178,7 +180,16 @@ begin
       ckPlay:
         Playing := True;
       ckStop:
-        Playing := False;
+        begin
+          Playing := False;
+          { a hard panic-stop: also silences any keyboard-triggered instrument
+            notes still sounding, not just the timeline transport }
+          for t := 0 to MaxTracks - 1 do
+          begin
+            LiveNotes[t].Active := False;
+            FadingNotes[t].Active := False;
+          end;
+        end;
       ckSeek:
         begin
           Playhead := Cmd.Param;
@@ -600,6 +611,19 @@ end;
 function AudioEngineGetPosition: Int64;
 begin
   Result := Playhead;
+end;
+
+function AudioEngineLiveNoteActive(ATrackIndex: Integer): Boolean;
+begin
+  Result := (ATrackIndex >= 0) and (ATrackIndex < MaxTracks) and
+    LiveNotes[ATrackIndex].Active;
+end;
+
+function AudioEngineLiveNotePosition(ATrackIndex: Integer): Int64;
+begin
+  if (ATrackIndex < 0) or (ATrackIndex >= MaxTracks) then
+    Exit(0);
+  Result := Trunc(LiveNotes[ATrackIndex].Position);
 end;
 
 procedure AudioEngineStartCountIn(ATrackIndex: Integer);

@@ -81,6 +81,12 @@ type
     procedure ArrangementViewClipSelectionChanged(Sender: TObject);
     procedure WarpEditorClipChanged(Sender: TObject);
     procedure InstrumentEditorChanged(Sender: TObject);
+    procedure WarpZoomInClick(Sender: TObject);
+    procedure WarpZoomOutClick(Sender: TObject);
+    procedure InstrumentZoomInClick(Sender: TObject);
+    procedure InstrumentZoomOutClick(Sender: TObject);
+    procedure RefreshWarpWidgetSize;
+    procedure RefreshInstrumentWidgetSize;
     procedure DeviceScrollBarChange(Sender: TObject);
     procedure UpdateDevicePanelScroll;
     procedure DevicePanelDragOver(Sender, Source: TObject; X, Y: Integer;
@@ -189,6 +195,33 @@ begin
 end;
 
 procedure TForm1.BuildLayout;
+
+  procedure AddZoomButtons(AParent: TWinControl; AZoomInClick, AZoomOutClick: TNotifyEvent);
+  var
+    Panel: TPanel;
+    BtnPlus, BtnMinus: TButton;
+  begin
+    Panel := TPanel.Create(Self);
+    Panel.Parent := AParent;
+    Panel.Align := alLeft;
+    Panel.Width := 22;
+    Panel.BevelOuter := bvNone;
+
+    BtnPlus := TButton.Create(Self);
+    BtnPlus.Parent := Panel;
+    BtnPlus.Caption := '+';
+    BtnPlus.Align := alTop;
+    BtnPlus.Height := 24;
+    BtnPlus.OnClick := AZoomInClick;
+
+    BtnMinus := TButton.Create(Self);
+    BtnMinus.Parent := Panel;
+    BtnMinus.Caption := '-';
+    BtnMinus.Align := alBottom;
+    BtnMinus.Height := 24;
+    BtnMinus.OnClick := AZoomOutClick;
+  end;
+
 begin
   Width := 1280;
   Height := 800;
@@ -342,6 +375,8 @@ begin
   FWarpWidget.Visible := False;
   FWarpWidget.Caption := '';
 
+  AddZoomButtons(FWarpWidget, @WarpZoomInClick, @WarpZoomOutClick);
+
   FWarpEditor := TWarpEditor.Create(Self);
   FWarpEditor.Parent := FWarpWidget;
   FWarpEditor.Align := alClient;
@@ -358,6 +393,8 @@ begin
   FInstrumentEditorWidget.BevelOuter := bvRaised;
   FInstrumentEditorWidget.Visible := False;
   FInstrumentEditorWidget.Caption := '';
+
+  AddZoomButtons(FInstrumentEditorWidget, @InstrumentZoomInClick, @InstrumentZoomOutClick);
 
   FInstrumentEditor := TInstrumentEditor.Create(Self);
   FInstrumentEditor.Parent := FInstrumentEditorWidget;
@@ -721,11 +758,10 @@ procedure TForm1.ArrangementViewClipSelectionChanged(Sender: TObject);
 begin
   if FArrangementView.SelectedClipIndex >= 0 then
   begin
-    FWarpWidget.Width := WarpWidthForFrames(
-      Project.Tracks[FArrangementView.SelectedTrack].Clips[FArrangementView.SelectedClipIndex].Length);
     FWarpEditor.SetClip(FArrangementView.SelectedTrack,
       FArrangementView.SelectedClipIndex);
     FWarpWidget.Visible := True;
+    RefreshWarpWidgetSize;
   end
   else
     FWarpWidget.Visible := False;
@@ -735,20 +771,64 @@ end;
 procedure TForm1.WarpEditorClipChanged(Sender: TObject);
 begin
   if FArrangementView.SelectedTrack >= 0 then
-  begin
-    if (FArrangementView.SelectedClipIndex >= 0) and
-      (FArrangementView.SelectedClipIndex <= High(Project.Tracks[FArrangementView.SelectedTrack].Clips)) then
-      FWarpWidget.Width := WarpWidthForFrames(
-        Project.Tracks[FArrangementView.SelectedTrack].Clips[FArrangementView.SelectedClipIndex].Length);
     FArrangementView.RefreshTrack(FArrangementView.SelectedTrack);
-  end;
-  UpdateDevicePanelScroll;
+  RefreshWarpWidgetSize;
 end;
 
 procedure TForm1.InstrumentEditorChanged(Sender: TObject);
 begin
   { the start/end trim points are read live from Project at each keypress -
     nothing needs to be pushed ahead of time }
+end;
+
+procedure TForm1.WarpZoomInClick(Sender: TObject);
+begin
+  WarpEditor.WarpZoomIn;
+  RefreshWarpWidgetSize;
+end;
+
+procedure TForm1.WarpZoomOutClick(Sender: TObject);
+begin
+  WarpEditor.WarpZoomOut;
+  RefreshWarpWidgetSize;
+end;
+
+procedure TForm1.InstrumentZoomInClick(Sender: TObject);
+begin
+  InstrumentEditor.InstrumentZoomIn;
+  RefreshInstrumentWidgetSize;
+end;
+
+procedure TForm1.InstrumentZoomOutClick(Sender: TObject);
+begin
+  InstrumentEditor.InstrumentZoomOut;
+  RefreshInstrumentWidgetSize;
+end;
+
+procedure TForm1.RefreshWarpWidgetSize;
+begin
+  if (FArrangementView.SelectedTrack >= 0) and (FArrangementView.SelectedClipIndex >= 0) and
+    (FArrangementView.SelectedClipIndex <= High(Project.Tracks[FArrangementView.SelectedTrack].Clips)) then
+    FWarpWidget.Width := WarpWidthForFrames(
+      Project.Tracks[FArrangementView.SelectedTrack].Clips[FArrangementView.SelectedClipIndex].Length);
+  FWarpEditor.Invalidate;
+  UpdateDevicePanelScroll;
+end;
+
+procedure TForm1.RefreshInstrumentWidgetSize;
+var
+  Track, SampleID: Integer;
+begin
+  Track := FArrangementView.KeyboardTrack;
+  if Track >= 0 then
+  begin
+    SampleID := Project.TrackInstrument[Track];
+    if SampleID >= 0 then
+      FInstrumentEditorWidget.Width := InstrumentWidthForFrames(
+        Project.SamplePool[SampleID].FrameCount, Project.SamplePool[SampleID].SampleRate);
+  end;
+  FInstrumentEditor.Invalidate;
+  UpdateDevicePanelScroll;
 end;
 
 procedure TForm1.DeviceScrollBarChange(Sender: TObject);
@@ -887,7 +967,10 @@ begin
 
     FInstrumentEditorWidget.Visible := not FWarpWidget.Visible;
     if FInstrumentEditorWidget.Visible then
+    begin
       FInstrumentEditor.SetTrack(Track);
+      RefreshInstrumentWidgetSize;
+    end;
   end;
 
   UpdateDevicePanelScroll;
@@ -960,6 +1043,8 @@ begin
 end;
 
 procedure TForm1.PlaybackPollTimerTimer(Sender: TObject);
+var
+  Track: Integer;
 begin
   if AudioEngineIsPlaying then
     FArrangementView.SetCursorFrame(AudioEngineGetPosition)
@@ -967,6 +1052,15 @@ begin
     FPlayPauseButton.Caption := 'Play';
 
   FWarpEditor.SetPlayheadState(AudioEngineGetPosition, AudioEngineIsPlaying);
+
+  if FInstrumentEditorWidget.Visible then
+  begin
+    Track := FArrangementView.KeyboardTrack;
+    if Track >= 0 then
+      FInstrumentEditor.SetPlayheadState(
+        Project.TrackInstrumentStart[Track] + AudioEngineLiveNotePosition(Track),
+        AudioEngineLiveNoteActive(Track));
+  end;
 
   case AudioEngineRecordState of
     RecordStateCountIn:
