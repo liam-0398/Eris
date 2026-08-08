@@ -5,13 +5,20 @@ unit MainForm;
 interface
 
 uses
-  Classes, SysUtils, Forms, Controls, Graphics, Dialogs, Menus, ExtCtrls,
+  Classes, SysUtils, Math, Forms, Controls, Graphics, Dialogs, Menus, ExtCtrls,
   StdCtrls, LCLType, ArrangementView, PrefsForm, FileBrowser, SampleTypes,
-  WavDecoder, AudioEngine, Project, ProjectFile, WarpEditor;
+  WavDecoder, AudioEngine, Project, ProjectFile, WarpEditor, InstrumentEditor;
 
 type
   TForm1 = class(TForm)
   private
+    const
+      TrackWidgetLeft = 8;
+      InstrumentSlotLeft = 116;
+      WarpSlotLeft = 344;
+      DeviceScrollBarHeight = 16;
+      WidgetTop = 8 + DeviceScrollBarHeight;
+    var
     FMainMenu: TMainMenu;
     FTransportPanel: TPanel;
     FStopButton: TButton;
@@ -38,6 +45,9 @@ type
     FDropHintLabel: TLabel;
     FWarpWidget: TPanel;
     FWarpEditor: TWarpEditor;
+    FInstrumentEditorWidget: TPanel;
+    FInstrumentEditor: TInstrumentEditor;
+    FDeviceScrollBar: TScrollBar;
     FPlaybackPollTimer: TTimer;
     FCurrentProjectPath: string;
 
@@ -62,6 +72,7 @@ type
     procedure RecordClick(Sender: TObject);
     procedure FinalizeRecording;
     procedure TransportPanelResize(Sender: TObject);
+    procedure DevicePanelResize(Sender: TObject);
     procedure TempoEditEditingDone(Sender: TObject);
     procedure ArrangementViewFileDrop(Sender: TObject; ATrackIndex: Integer;
       AFramePosition: Int64; const AFilePath: string);
@@ -69,6 +80,9 @@ type
     procedure ArrangementViewKeyboardTrackChanged(Sender: TObject);
     procedure ArrangementViewClipSelectionChanged(Sender: TObject);
     procedure WarpEditorClipChanged(Sender: TObject);
+    procedure InstrumentEditorChanged(Sender: TObject);
+    procedure DeviceScrollBarChange(Sender: TObject);
+    procedure UpdateDevicePanelScroll;
     procedure DevicePanelDragOver(Sender, Source: TObject; X, Y: Integer;
       State: TDragState; var Accept: Boolean);
     procedure DevicePanelDragDrop(Sender, Source: TObject; X, Y: Integer);
@@ -224,16 +238,29 @@ begin
   FDevicePanel := TPanel.Create(Self);
   FDevicePanel.Parent := Self;
   FDevicePanel.Align := alBottom;
-  FDevicePanel.Height := 160;
+  FDevicePanel.Height := 160 + DeviceScrollBarHeight;
   FDevicePanel.BevelOuter := bvNone;
   FDevicePanel.OnDragOver := @DevicePanelDragOver;
   FDevicePanel.OnDragDrop := @DevicePanelDragDrop;
+  FDevicePanel.OnResize := @DevicePanelResize;
+
+  { horizontal scroll for the device widgets - only shown if their total
+    width outgrows the panel, e.g. when the warp widget expands for a long
+    clip; sits at the very top of the bottom bar, opposite the timeline's
+    own scrollbar at the bottom of the arrangement view }
+  FDeviceScrollBar := TScrollBar.Create(Self);
+  FDeviceScrollBar.Parent := FDevicePanel;
+  FDeviceScrollBar.Kind := sbHorizontal;
+  FDeviceScrollBar.Align := alTop;
+  FDeviceScrollBar.Height := DeviceScrollBarHeight;
+  FDeviceScrollBar.Visible := False;
+  FDeviceScrollBar.OnChange := @DeviceScrollBarChange;
 
   { "Track N" widget - always present, identifies whose device chain this is }
   FTrackWidget := TPanel.Create(Self);
   FTrackWidget.Parent := FDevicePanel;
-  FTrackWidget.Left := 8;
-  FTrackWidget.Top := 8;
+  FTrackWidget.Left := TrackWidgetLeft;
+  FTrackWidget.Top := WidgetTop;
   FTrackWidget.Width := 100;
   FTrackWidget.Height := 144;
   FTrackWidget.BevelOuter := bvRaised;
@@ -249,8 +276,8 @@ begin
     keyboard play on the currently selected track }
   FInstrumentWidget := TPanel.Create(Self);
   FInstrumentWidget.Parent := FDevicePanel;
-  FInstrumentWidget.Left := 116;
-  FInstrumentWidget.Top := 8;
+  FInstrumentWidget.Left := InstrumentSlotLeft;
+  FInstrumentWidget.Top := WidgetTop;
   FInstrumentWidget.Width := 220;
   FInstrumentWidget.Height := 144;
   FInstrumentWidget.BevelOuter := bvRaised;
@@ -300,15 +327,15 @@ begin
 
   FDropHintLabel := TLabel.Create(Self);
   FDropHintLabel.Parent := FDevicePanel;
-  FDropHintLabel.Left := 116;
-  FDropHintLabel.Top := 8;
+  FDropHintLabel.Left := InstrumentSlotLeft;
+  FDropHintLabel.Top := WidgetTop;
   FDropHintLabel.Caption := 'Select a track to load an instrument';
 
   { warp editor widget - appears when a clip is selected on the timeline }
   FWarpWidget := TPanel.Create(Self);
   FWarpWidget.Parent := FDevicePanel;
-  FWarpWidget.Left := 344;
-  FWarpWidget.Top := 8;
+  FWarpWidget.Left := WarpSlotLeft;
+  FWarpWidget.Top := WidgetTop;
   FWarpWidget.Width := 500;
   FWarpWidget.Height := 144;
   FWarpWidget.BevelOuter := bvRaised;
@@ -319,6 +346,23 @@ begin
   FWarpEditor.Parent := FWarpWidget;
   FWarpEditor.Align := alClient;
   FWarpEditor.OnClipChanged := @WarpEditorClipChanged;
+
+  { instrument (keyboard-play) waveform editor - shares the same slot as the
+    warp widget, shown instead of it when no clip is selected on the timeline }
+  FInstrumentEditorWidget := TPanel.Create(Self);
+  FInstrumentEditorWidget.Parent := FDevicePanel;
+  FInstrumentEditorWidget.Left := WarpSlotLeft;
+  FInstrumentEditorWidget.Top := WidgetTop;
+  FInstrumentEditorWidget.Width := 400;
+  FInstrumentEditorWidget.Height := 144;
+  FInstrumentEditorWidget.BevelOuter := bvRaised;
+  FInstrumentEditorWidget.Visible := False;
+  FInstrumentEditorWidget.Caption := '';
+
+  FInstrumentEditor := TInstrumentEditor.Create(Self);
+  FInstrumentEditor.Parent := FInstrumentEditorWidget;
+  FInstrumentEditor.Align := alClient;
+  FInstrumentEditor.OnChanged := @InstrumentEditorChanged;
 
   FSplitter := TSplitter.Create(Self);
   FSplitter.Parent := Self;
@@ -698,6 +742,65 @@ begin
         Project.Tracks[FArrangementView.SelectedTrack].Clips[FArrangementView.SelectedClipIndex].Length);
     FArrangementView.RefreshTrack(FArrangementView.SelectedTrack);
   end;
+  UpdateDevicePanelScroll;
+end;
+
+procedure TForm1.InstrumentEditorChanged(Sender: TObject);
+begin
+  { the start/end trim points are read live from Project at each keypress -
+    nothing needs to be pushed ahead of time }
+end;
+
+procedure TForm1.DeviceScrollBarChange(Sender: TObject);
+var
+  Offset: Integer;
+begin
+  Offset := FDeviceScrollBar.Position;
+  FTrackWidget.Left := TrackWidgetLeft - Offset;
+  FInstrumentWidget.Left := InstrumentSlotLeft - Offset;
+  FDropHintLabel.Left := InstrumentSlotLeft - Offset;
+  FWarpWidget.Left := WarpSlotLeft - Offset;
+  FInstrumentEditorWidget.Left := WarpSlotLeft - Offset;
+end;
+
+procedure TForm1.UpdateDevicePanelScroll;
+var
+  ContentRight, PanelWidth: Integer;
+begin
+  ContentRight := TrackWidgetLeft + FTrackWidget.Width;
+  if FInstrumentWidget.Visible then
+    ContentRight := Max(ContentRight, InstrumentSlotLeft + FInstrumentWidget.Width);
+  if FWarpWidget.Visible then
+    ContentRight := Max(ContentRight, WarpSlotLeft + FWarpWidget.Width)
+  else if FInstrumentEditorWidget.Visible then
+    ContentRight := Max(ContentRight, WarpSlotLeft + FInstrumentEditorWidget.Width);
+  ContentRight := ContentRight + TrackWidgetLeft; { trailing margin }
+
+  PanelWidth := FDevicePanel.ClientWidth;
+
+  if ContentRight > PanelWidth then
+  begin
+    FDeviceScrollBar.Visible := True;
+    FDeviceScrollBar.Min := 0;
+    FDeviceScrollBar.Max := ContentRight;
+    FDeviceScrollBar.PageSize := PanelWidth;
+    FDeviceScrollBar.LargeChange := PanelWidth;
+    FDeviceScrollBar.SmallChange := 32;
+    if FDeviceScrollBar.Position > ContentRight - PanelWidth then
+      FDeviceScrollBar.Position := ContentRight - PanelWidth;
+  end
+  else
+  begin
+    FDeviceScrollBar.Visible := False;
+    FDeviceScrollBar.Position := 0;
+  end;
+
+  DeviceScrollBarChange(FDeviceScrollBar);
+end;
+
+procedure TForm1.DevicePanelResize(Sender: TObject);
+begin
+  UpdateDevicePanelScroll;
 end;
 
 procedure TForm1.DevicePanelDragOver(Sender, Source: TObject; X, Y: Integer;
@@ -743,6 +846,8 @@ begin
 
   Project.TrackInstrument[Track] := Project.AddSampleToPool(Sample,
     ExtractFileName(APath), APath);
+  Project.TrackInstrumentStart[Track] := 0;
+  Project.TrackInstrumentEnd[Track] := Sample.FrameCount;
   UpdateDevicePanel;
 end;
 
@@ -756,8 +861,10 @@ begin
   begin
     FTrackWidgetLabel.Caption := 'No Track';
     FInstrumentWidget.Visible := False;
+    FInstrumentEditorWidget.Visible := False;
     FDropHintLabel.Caption := 'Select a track to load an instrument';
     FDropHintLabel.Visible := not FWarpWidget.Visible;
+    UpdateDevicePanelScroll;
     Exit;
   end;
 
@@ -767,6 +874,7 @@ begin
   if SampleID < 0 then
   begin
     FInstrumentWidget.Visible := False;
+    FInstrumentEditorWidget.Visible := False;
     FDropHintLabel.Caption := 'Drag a WAV file here to sample it';
     FDropHintLabel.Visible := not FWarpWidget.Visible;
   end
@@ -776,7 +884,13 @@ begin
     FInstrumentWidget.Visible := True;
     FInstrumentNameLabel.Caption := Project.SampleNames[SampleID];
     FOctaveLabel.Caption := Format('Octave: %d', [Project.TrackOctave[Track]]);
+
+    FInstrumentEditorWidget.Visible := not FWarpWidget.Visible;
+    if FInstrumentEditorWidget.Visible then
+      FInstrumentEditor.SetTrack(Track);
   end;
+
+  UpdateDevicePanelScroll;
 end;
 
 procedure TForm1.InstrumentDeleteClick(Sender: TObject);
@@ -818,6 +932,7 @@ procedure TForm1.TriggerKeyboardNote(ASemitoneOffset: Integer);
 var
   Track, SampleID, TotalOffset: Integer;
   Sample: TSample;
+  StartFrame, EndFrame, TrimmedCount: Int64;
 begin
   Track := FArrangementView.KeyboardTrack;
   if Track < 0 then
@@ -828,9 +943,20 @@ begin
     Exit;
 
   Sample := Project.SamplePool[SampleID];
+
+  StartFrame := Project.TrackInstrumentStart[Track];
+  EndFrame := Project.TrackInstrumentEnd[Track];
+  if StartFrame < 0 then
+    StartFrame := 0;
+  if EndFrame > Sample.FrameCount then
+    EndFrame := Sample.FrameCount;
+  TrimmedCount := EndFrame - StartFrame;
+  if TrimmedCount <= 0 then
+    Exit;
+
   TotalOffset := ASemitoneOffset + Project.TrackOctave[Track] * 12;
-  AudioEngineTriggerNote(Track, Sample.Data, Sample.FrameCount, Sample.Channels,
-    TotalOffset, Project.TrackVolume[Track]);
+  AudioEngineTriggerNote(Track, @Sample.Data[StartFrame * Sample.Channels],
+    TrimmedCount, Sample.Channels, TotalOffset, Project.TrackVolume[Track]);
 end;
 
 procedure TForm1.PlaybackPollTimerTimer(Sender: TObject);

@@ -36,6 +36,11 @@ var
   { linear gain multiplier applied on top of each clip's own Gain; 1.0 = unity/default }
   TrackVolume: array[0..MaxTracks - 1] of Single;
 
+  { trim points (in source sample frames) for the keyboard-play instrument on
+    each track; default is the entire sample (Start=0, End=FrameCount) }
+  TrackInstrumentStart: array[0..MaxTracks - 1] of Int64;
+  TrackInstrumentEnd: array[0..MaxTracks - 1] of Int64;
+
 function AddSampleToPool(const ASample: TSample; const AName, APath: string): Integer;
 procedure CommitClipToTrack(ATrackIndex: Integer; const ANewClip: TClip);
 procedure ReplaceTrackClips(ATrackIndex: Integer; const AClips: TClipArray);
@@ -67,6 +72,8 @@ begin
     TrackInstrument[i] := -1;
     TrackOctave[i] := 0;
     TrackVolume[i] := 1.0;
+    TrackInstrumentStart[i] := 0;
+    TrackInstrumentEnd[i] := 0;
   end;
 end;
 
@@ -147,6 +154,8 @@ begin
   TrackInstrument[TrackCount] := -1;
   TrackOctave[TrackCount] := 0;
   TrackVolume[TrackCount] := 1.0;
+  TrackInstrumentStart[TrackCount] := 0;
+  TrackInstrumentEnd[TrackCount] := 0;
   Inc(TrackCount);
   Result := True;
 end;
