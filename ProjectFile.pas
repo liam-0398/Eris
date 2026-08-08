@@ -14,11 +14,54 @@ uses
   SysUtils, Classes, IniFiles, FileUtil, SampleTypes, Project, WavDecoder,
   AudioEngine, Resample, Waveform, SP1200, TarArchive, Effects;
 
+{ Every field of TEffect is written/read unconditionally regardless of Kind -
+  it's a flat tagged record, so this is simpler and safer than branching per
+  Kind, and any fields unused by a given Kind are just harmlessly ignored. }
+procedure SaveEffect(Ini: TIniFile; const ASection, APrefix: string;
+  const AEffect: Effects.TEffect);
+var
+  b: Integer;
+begin
+  Ini.WriteInteger(ASection, APrefix + 'Kind', AEffect.Kind);
+  Ini.WriteFloat(ASection, APrefix + 'LowpassFreqHz', AEffect.LowpassFreqHz);
+  for b := 0 to Effects.MaxEQBands - 1 do
+  begin
+    Ini.WriteFloat(ASection, APrefix + 'EQFreq' + IntToStr(b), AEffect.EQFreqHz[b]);
+    Ini.WriteFloat(ASection, APrefix + 'EQGain' + IntToStr(b), AEffect.EQGainDb[b]);
+  end;
+  Ini.WriteFloat(ASection, APrefix + 'LimiterThresholdDb', AEffect.LimiterThresholdDb);
+  Ini.WriteFloat(ASection, APrefix + 'LimiterReleaseMs', AEffect.LimiterReleaseMs);
+  Ini.WriteFloat(ASection, APrefix + 'ChorusRateHz', AEffect.ChorusRateHz);
+  Ini.WriteFloat(ASection, APrefix + 'ChorusDepthPercent', AEffect.ChorusDepthPercent);
+  Ini.WriteInteger(ASection, APrefix + 'ReverbPreset', AEffect.ReverbPreset);
+  Ini.WriteFloat(ASection, APrefix + 'ReverbMixPercent', AEffect.ReverbMixPercent);
+end;
+
+function LoadEffect(Ini: TIniFile; const ASection, APrefix: string): Effects.TEffect;
+var
+  b: Integer;
+begin
+  FillChar(Result, SizeOf(Result), 0);
+  Result.Kind := Ini.ReadInteger(ASection, APrefix + 'Kind', Effects.ekNone);
+  Result.LowpassFreqHz := Ini.ReadFloat(ASection, APrefix + 'LowpassFreqHz', 8000);
+  for b := 0 to Effects.MaxEQBands - 1 do
+  begin
+    Result.EQFreqHz[b] := Ini.ReadFloat(ASection, APrefix + 'EQFreq' + IntToStr(b), 0);
+    Result.EQGainDb[b] := Ini.ReadFloat(ASection, APrefix + 'EQGain' + IntToStr(b), 0);
+  end;
+  Result.LimiterThresholdDb := Ini.ReadFloat(ASection, APrefix + 'LimiterThresholdDb', -1);
+  Result.LimiterReleaseMs := Ini.ReadFloat(ASection, APrefix + 'LimiterReleaseMs', 150);
+  Result.ChorusRateHz := Ini.ReadFloat(ASection, APrefix + 'ChorusRateHz', 0.5);
+  Result.ChorusDepthPercent := Ini.ReadFloat(ASection, APrefix + 'ChorusDepthPercent', 50);
+  Result.ReverbPreset := Ini.ReadInteger(ASection, APrefix + 'ReverbPreset', Effects.ReverbPresetRoom);
+  Result.ReverbMixPercent := Ini.ReadFloat(ASection, APrefix + 'ReverbMixPercent', 30);
+end;
+
 function SaveProject(const APath: string): Boolean;
 var
   Dir, IniPath, Section, Prefix, EmbeddedName: string;
   Ini: TIniFile;
-  t, i, m: Integer;
+  t, i, m, e: Integer;
   Clip: TClip;
 begin
   Result := False;
@@ -37,6 +80,12 @@ begin
   Ini := TIniFile.Create(IniPath);
   try
     Ini.WriteFloat('Project', 'Tempo', Project.TempoBPM);
+    Ini.WriteInteger('Project', 'TrackCount', Project.TrackCount);
+    Ini.WriteBool('Project', 'SP1200Enabled', AudioEngineGetSP1200Enabled);
+
+    Ini.WriteInteger('Master', 'EffectCount', Project.MasterEffectCount);
+    for e := 0 to Project.MasterEffectCount - 1 do
+      SaveEffect(Ini, 'Master', 'Effect' + IntToStr(e) + '.', Project.MasterEffects[e]);
 
     Ini.WriteInteger('Samples', 'Count', Length(Project.SamplePool));
     for i := 0 to High(Project.SamplePool) do
@@ -64,8 +113,17 @@ begin
       Section := 'Track' + IntToStr(t);
       Ini.WriteInteger(Section, 'Instrument', Project.TrackInstrument[t]);
       Ini.WriteInteger(Section, 'Octave', Project.TrackOctave[t]);
+      Ini.WriteFloat(Section, 'Volume', Project.TrackVolume[t]);
+      Ini.WriteBool(Section, 'Enabled', Project.TrackEnabled[t]);
+      Ini.WriteInt64(Section, 'InstrumentStart', Project.TrackInstrumentStart[t]);
+      Ini.WriteInt64(Section, 'InstrumentEnd', Project.TrackInstrumentEnd[t]);
       Ini.WriteFloat(Section, 'SwingPercent', Project.TrackSwingPercent[t]);
       Ini.WriteInteger(Section, 'SwingDivision', Project.TrackSwingDivision[t]);
+
+      Ini.WriteInteger(Section, 'EffectCount', Project.TrackEffectCount[t]);
+      for e := 0 to Project.TrackEffectCount[t] - 1 do
+        SaveEffect(Ini, Section, 'Effect' + IntToStr(e) + '.', Project.TrackEffects[t][e]);
+
       Ini.WriteInteger(Section, 'ClipCount', Length(Project.Tracks[t].Clips));
 
       for i := 0 to High(Project.Tracks[t].Clips) do
@@ -112,7 +170,7 @@ function LoadProject(const APath: string): Boolean;
 var
   Dir, IniPath, Section, Prefix, StoredPath, ResolvedPath: string;
   Ini: TIniFile;
-  t, i, m, SampleCount, ClipCount, MarkerCount: Integer;
+  t, i, m, e, SampleCount, ClipCount, MarkerCount: Integer;
   Sample, EmptySample: TSample;
   Clip: TClip;
 begin
@@ -144,6 +202,18 @@ begin
   Ini := TIniFile.Create(IniPath);
   try
     Project.TempoBPM := Ini.ReadFloat('Project', 'Tempo', Project.DefaultTempoBPM);
+    Project.TrackCount := Ini.ReadInteger('Project', 'TrackCount', Project.DefaultTrackCount);
+    if Project.TrackCount < 1 then
+      Project.TrackCount := 1
+    else if Project.TrackCount > Project.MaxTracks then
+      Project.TrackCount := Project.MaxTracks;
+    AudioEngineSetSP1200Enabled(Ini.ReadBool('Project', 'SP1200Enabled', False));
+
+    Project.MasterEffectCount := Ini.ReadInteger('Master', 'EffectCount', 0);
+    if Project.MasterEffectCount > Effects.MaxEffectsPerTrack then
+      Project.MasterEffectCount := Effects.MaxEffectsPerTrack;
+    for e := 0 to Project.MasterEffectCount - 1 do
+      Project.MasterEffects[e] := LoadEffect(Ini, 'Master', 'Effect' + IntToStr(e) + '.');
 
     SampleCount := Ini.ReadInteger('Samples', 'Count', 0);
     for i := 0 to SampleCount - 1 do
@@ -167,8 +237,24 @@ begin
       Section := 'Track' + IntToStr(t);
       Project.TrackInstrument[t] := Ini.ReadInteger(Section, 'Instrument', -1);
       Project.TrackOctave[t] := Ini.ReadInteger(Section, 'Octave', 0);
+      Project.TrackVolume[t] := Ini.ReadFloat(Section, 'Volume', 1.0);
+      Project.TrackEnabled[t] := Ini.ReadBool(Section, 'Enabled', True);
       Project.TrackSwingPercent[t] := Ini.ReadFloat(Section, 'SwingPercent', 50);
       Project.TrackSwingDivision[t] := Ini.ReadInteger(Section, 'SwingDivision', 16);
+
+      Project.TrackInstrumentStart[t] := Ini.ReadInt64(Section, 'InstrumentStart', 0);
+      if (Project.TrackInstrument[t] >= 0) and
+        (Project.TrackInstrument[t] <= High(Project.SamplePool)) then
+        Project.TrackInstrumentEnd[t] := Ini.ReadInt64(Section, 'InstrumentEnd',
+          Project.SamplePool[Project.TrackInstrument[t]].FrameCount)
+      else
+        Project.TrackInstrumentEnd[t] := Ini.ReadInt64(Section, 'InstrumentEnd', 0);
+
+      Project.TrackEffectCount[t] := Ini.ReadInteger(Section, 'EffectCount', 0);
+      if Project.TrackEffectCount[t] > Effects.MaxEffectsPerTrack then
+        Project.TrackEffectCount[t] := Effects.MaxEffectsPerTrack;
+      for e := 0 to Project.TrackEffectCount[t] - 1 do
+        Project.TrackEffects[t][e] := LoadEffect(Ini, Section, 'Effect' + IntToStr(e) + '.');
 
       ClipCount := Ini.ReadInteger(Section, 'ClipCount', 0);
       for i := 0 to ClipCount - 1 do
