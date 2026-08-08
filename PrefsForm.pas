@@ -58,7 +58,11 @@ procedure TPrefsForm.BuildLayout;
 
 begin
   FBackendCombo := AddRow('Backend:', 16);
+  {$IFDEF WINDOWS}
+  FBackendCombo.Items.Add('DirectSound');
+  {$ELSE}
   FBackendCombo.Items.Add('ALSA');
+  {$ENDIF}
   FBackendCombo.Items.Add('PortAudio (planned)');
   FBackendCombo.Items.Add('JACK (planned)');
   FBackendCombo.ItemIndex := 0;

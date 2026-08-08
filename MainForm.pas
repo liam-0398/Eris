@@ -494,12 +494,18 @@ begin
   FFileBrowser := TFileBrowser.Create(Self);
   FFileBrowser.Parent := Self;
   FFileBrowser.Align := alLeft;
-  FFileBrowser.Width := 220;
+  FFileBrowser.Width := Px(220);
+  FFileBrowser.Constraints.MinWidth := Px(120);
+  FFileBrowser.Constraints.MaxWidth := Px(600);
   FFileBrowser.OnFileActivate := @FileBrowserFileActivate;
 
+  { the default splitter width is a handful of unscaled pixels - at a HiDPI
+    Xft.dpi setting that's a sliver too thin to reliably grab, which is what
+    made this look like it couldn't be dragged at all }
   FFileBrowserSplitter := TSplitter.Create(Self);
   FFileBrowserSplitter.Parent := Self;
   FFileBrowserSplitter.Align := alLeft;
+  FFileBrowserSplitter.Width := Px(6);
 
   FArrangementView := TArrangementView.Create(Self);
   FArrangementView.Parent := Self;

@@ -56,8 +56,13 @@ function AudioEngineTakeRecordedAudio(out AData: PSingle; out AFrameCount: Integ
 implementation
 
 uses
-  Classes, SysUtils, AudioBackend, ALSABackend, Resample, Project, SP1200,
-  Effects;
+  Classes, SysUtils, AudioBackend,
+  {$IFDEF WINDOWS}
+  DirectSoundBackend,
+  {$ELSE}
+  ALSABackend,
+  {$ENDIF}
+  Resample, Project, SP1200, Effects;
 
 const
   BlockFrames = 512;
@@ -670,7 +675,11 @@ begin
 
   PrecomputeClick;
 
+  {$IFDEF WINDOWS}
+  Backend := CreateDirectSoundBackend;
+  {$ELSE}
   Backend := CreateALSABackend;
+  {$ENDIF}
   Backend.Open(ProjectSampleRate, OutputChannels, BlockFrames);
 
   PlaybackThread := TPlaybackThread.Create(False);
