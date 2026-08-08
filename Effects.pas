@@ -5,7 +5,7 @@ unit Effects;
 interface
 
 uses
-  BiquadFilters;
+  Math, BiquadFilters;
 
 const
   MaxEffectsPerTrack = 4;
@@ -14,6 +14,7 @@ const
   ekNone = 0;
   ekLowpass = 1;
   ekEQ4 = 2;
+  ekLimiter = 3;
 
 type
   { plain flat record with fields used depending on Kind, matching the
@@ -24,6 +25,8 @@ type
     LowpassFreqHz: Single;
     EQFreqHz: array[0..MaxEQBands - 1] of Single;
     EQGainDb: array[0..MaxEQBands - 1] of Single;
+    LimiterThresholdDb: Single;
+    LimiterReleaseMs: Single;
   end;
 
   TEffectChannelState = record
@@ -39,6 +42,8 @@ type
     LastLowpassFreq: Single;
     LastEQFreq: array[0..MaxEQBands - 1] of Single;
     LastEQGain: array[0..MaxEQBands - 1] of Single;
+    LimiterGain: Single; { current smoothed gain reduction, linked across L/R
+      so limiting never shifts the stereo image }
   end;
 
 procedure EffectStateReset(var AState: TEffectState);
@@ -59,6 +64,7 @@ const
 procedure EffectStateReset(var AState: TEffectState);
 begin
   FillChar(AState, SizeOf(AState), 0);
+  AState.LimiterGain := 1.0; { unity - no reduction until something is loud enough to need it }
 end;
 
 procedure DefaultEffect(AKind: Integer; out AEffect: TEffect);
@@ -75,6 +81,11 @@ begin
         AEffect.EQFreqHz[1] := 500;
         AEffect.EQFreqHz[2] := 2000;
         AEffect.EQFreqHz[3] := 8000;
+      end;
+    ekLimiter:
+      begin
+        AEffect.LimiterThresholdDb := -1.0; { ceiling just under 0dBFS }
+        AEffect.LimiterReleaseMs := 150;
       end;
   end;
 end;
@@ -93,6 +104,7 @@ procedure ProcessEffect(var AState: TEffectState; const AEffect: TEffect;
 var
   b: Integer;
   Freq: Single;
+  ThresholdLin, Peak, TargetGain, ReleaseCoeff, ReleaseMs: Single;
 begin
   case AEffect.Kind of
     ekLowpass:
@@ -126,6 +138,38 @@ begin
           R := ProcessBiquad(AState.Channels[1].EQBq[b], AState.EQCoeffs[b], R);
         end;
         AState.LastSampleRate := ASampleRate;
+      end;
+    ekLimiter:
+      begin
+        { zero-lookahead peak limiter, gain reduction linked across L/R so
+          the stereo image never shifts. Attack is instant (the target gain
+          for THIS sample is computed from THIS sample's peak and applied to
+          it immediately), which is what actually guarantees the ceiling is
+          never exceeded; release is a smooth one-pole climb back to unity
+          to avoid audible pumping. }
+        ThresholdLin := Power(10, AEffect.LimiterThresholdDb / 20);
+        Peak := Abs(L);
+        if Abs(R) > Peak then
+          Peak := Abs(R);
+
+        if Peak > ThresholdLin then
+          TargetGain := ThresholdLin / Peak
+        else
+          TargetGain := 1.0;
+
+        if TargetGain < AState.LimiterGain then
+          AState.LimiterGain := TargetGain
+        else
+        begin
+          ReleaseMs := AEffect.LimiterReleaseMs;
+          if ReleaseMs < 1 then
+            ReleaseMs := 1;
+          ReleaseCoeff := Exp(-1 / (0.001 * ReleaseMs * ASampleRate));
+          AState.LimiterGain := TargetGain + (AState.LimiterGain - TargetGain) * ReleaseCoeff;
+        end;
+
+        L := L * AState.LimiterGain;
+        R := R * AState.LimiterGain;
       end;
   end;
 end;

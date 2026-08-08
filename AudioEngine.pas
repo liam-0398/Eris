@@ -143,6 +143,7 @@ var
 
   TrackEffectState: array[0..MaxTracks - 1, 0..Effects.MaxEffectsPerTrack - 1] of
     Effects.TEffectState;
+  MasterEffectState: array[0..Effects.MaxEffectsPerTrack - 1] of Effects.TEffectState;
 
 function PushCommand(const ACmd: TCommand): Boolean;
 var
@@ -578,6 +579,15 @@ begin
         RecordState := RecordStateIdle; { hit the cap - auto-stop }
     end;
 
+    { master bus insert chain - applied to the summed mix after every track's
+      own inserts, before the hard clamp. Separate from the SP1200 emulation,
+      which is a different, always-master, non-editable system applied later
+      in TPlaybackThread.Execute on the whole finished block. }
+    for e := 0 to Project.MasterEffectCount - 1 do
+      if Project.MasterEffects[e].Kind <> Effects.ekNone then
+        Effects.ProcessEffect(MasterEffectState[e], Project.MasterEffects[e], L, R,
+          ProjectSampleRate);
+
     if L > 1.0 then L := 1.0 else if L < -1.0 then L := -1.0;
     if R > 1.0 then R := 1.0 else if R < -1.0 then R := -1.0;
     MixBuffer[Frame * OutputChannels] := L;
@@ -650,6 +660,8 @@ begin
     for e := 0 to Effects.MaxEffectsPerTrack - 1 do
       Effects.EffectStateReset(TrackEffectState[i][e]);
   end;
+  for e := 0 to Effects.MaxEffectsPerTrack - 1 do
+    Effects.EffectStateReset(MasterEffectState[e]);
 
   GetMem(MixBuffer, BlockFrames * OutputChannels * SizeOf(Single));
 

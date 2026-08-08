@@ -12,11 +12,11 @@ implementation
 
 uses
   SysUtils, Classes, IniFiles, FileUtil, SampleTypes, Project, WavDecoder,
-  AudioEngine, Resample, Waveform, SP1200, TarArchive;
+  AudioEngine, Resample, Waveform, SP1200, TarArchive, Effects;
 
 function SaveProject(const APath: string): Boolean;
 var
-  Dir, IniPath, Section, Prefix: string;
+  Dir, IniPath, Section, Prefix, EmbeddedName: string;
   Ini: TIniFile;
   t, i, m: Integer;
   Clip: TClip;
@@ -40,7 +40,24 @@ begin
 
     Ini.WriteInteger('Samples', 'Count', Length(Project.SamplePool));
     for i := 0 to High(Project.SamplePool) do
-      Ini.WriteString('Samples', 'Path' + IntToStr(i), Project.SamplePaths[i]);
+    begin
+      if not FileExists(Project.SamplePaths[i]) then
+      begin
+        { no real source file to reference - either a recorded clip (never
+          loaded from disk, SamplePaths is '') or a sample that came from a
+          previously embedded recording (a bare filename from an earlier
+          bundle, not a standalone path). Either way, embed its audio as a
+          real WAV right inside THIS bundle instead of writing a path that
+          resolves to nothing once the old bundle is gone. }
+        EmbeddedName := 'recorded' + IntToStr(i) + '.wav';
+        EncodeWav(IncludeTrailingPathDelimiter(Dir) + EmbeddedName,
+          Project.SamplePool[i].Data, Project.SamplePool[i].FrameCount,
+          Project.SamplePool[i].Channels, Project.SamplePool[i].SampleRate);
+        Ini.WriteString('Samples', 'Path' + IntToStr(i), EmbeddedName);
+      end
+      else
+        Ini.WriteString('Samples', 'Path' + IntToStr(i), Project.SamplePaths[i]);
+    end;
 
     for t := 0 to Project.TrackCount - 1 do
     begin
@@ -198,6 +215,9 @@ var
   Frame, OutIdx: Int64;
   SrcPos: Double;
   SP1200St: TSP1200State;
+  MasterEffectState: array[0..Effects.MaxEffectsPerTrack - 1] of Effects.TEffectState;
+  L, R: Single;
+  e: Integer;
 begin
   Result := False;
   ProjectLengthFrames := 0;
@@ -248,6 +268,23 @@ begin
           end;
         end;
       end;
+
+    if Project.MasterEffectCount > 0 then
+    begin
+      for e := 0 to Effects.MaxEffectsPerTrack - 1 do
+        Effects.EffectStateReset(MasterEffectState[e]);
+      for Frame := 0 to ProjectLengthFrames - 1 do
+      begin
+        L := Buffer[Frame * OutChannels];
+        R := Buffer[Frame * OutChannels + 1];
+        for e := 0 to Project.MasterEffectCount - 1 do
+          if Project.MasterEffects[e].Kind <> Effects.ekNone then
+            Effects.ProcessEffect(MasterEffectState[e], Project.MasterEffects[e], L, R,
+              ProjectSampleRate);
+        Buffer[Frame * OutChannels] := L;
+        Buffer[Frame * OutChannels + 1] := R;
+      end;
+    end;
 
     if AudioEngineGetSP1200Enabled then
     begin

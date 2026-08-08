@@ -8,7 +8,7 @@ uses
   Classes, SysUtils, Math, Forms, Controls, Graphics, Dialogs, Menus, ExtCtrls,
   StdCtrls, ComCtrls, Buttons, LCLType, ArrangementView, PrefsForm, FileBrowser,
   SampleTypes, WavDecoder, AudioEngine, Project, ProjectFile, WarpEditor,
-  InstrumentEditor, Effects, EffectsRack;
+  InstrumentEditor, Effects, EffectsRack, UIScale;
 
 type
   TForm1 = class(TForm)
@@ -111,6 +111,7 @@ type
     procedure AddEffectToCurrentTrack(AKind: Integer);
     procedure AddLowpassEffectClick(Sender: TObject);
     procedure AddEQ4EffectClick(Sender: TObject);
+    procedure AddLimiterEffectClick(Sender: TObject);
     procedure BuildEffectsMenu;
     procedure DevicePanelMouseDown(Sender: TObject; Button: TMouseButton;
       Shift: TShiftState; X, Y: Integer);
@@ -244,21 +245,21 @@ procedure TForm1.BuildLayout;
     Result := TPanel.Create(Self);
     Result.Parent := AParent;
     Result.Align := alLeft;
-    Result.Width := 22;
+    Result.Width := Px(22);
     Result.BevelOuter := bvNone;
 
     BtnPlus := TButton.Create(Self);
     BtnPlus.Parent := Result;
     BtnPlus.Caption := '+';
     BtnPlus.Align := alTop;
-    BtnPlus.Height := 24;
+    BtnPlus.Height := Px(24);
     BtnPlus.OnClick := AZoomInClick;
 
     BtnMinus := TButton.Create(Self);
     BtnMinus.Parent := Result;
     BtnMinus.Caption := '-';
     BtnMinus.Align := alBottom;
-    BtnMinus.Height := 24;
+    BtnMinus.Height := Px(24);
     BtnMinus.OnClick := AZoomOutClick;
   end;
 
@@ -271,22 +272,22 @@ begin
   FTransportPanel := TPanel.Create(Self);
   FTransportPanel.Parent := Self;
   FTransportPanel.Align := alTop;
-  FTransportPanel.Height := 52;
+  FTransportPanel.Height := Px(52);
   FTransportPanel.BevelOuter := bvNone;
   FTransportPanel.OnResize := @TransportPanelResize;
 
   FTempoLabel := TLabel.Create(Self);
   FTempoLabel.Parent := FTransportPanel;
   FTempoLabel.Caption := 'Tempo:';
-  FTempoLabel.Left := 8;
-  FTempoLabel.Top := 19;
+  FTempoLabel.Left := Px(8);
+  FTempoLabel.Top := Px(19);
 
   FTempoEdit := TEdit.Create(Self);
   FTempoEdit.Parent := FTransportPanel;
   FTempoEdit.Text := IntToStr(Round(Project.DefaultTempoBPM));
-  FTempoEdit.Left := 56;
-  FTempoEdit.Top := 14;
-  FTempoEdit.Width := 64;
+  FTempoEdit.Left := Px(64);
+  FTempoEdit.Top := Px(14);
+  FTempoEdit.Width := Px(64);
   FTempoEdit.OnEditingDone := @TempoEditEditingDone;
 
   { timeline grid resolution - pinned to the far right of the top bar }
@@ -297,8 +298,8 @@ begin
   FGridTrackBar.Frequency := 1;
   FGridTrackBar.TickStyle := tsAuto;
   FGridTrackBar.Position := 0; { 1/16, finest - matches ArrangementView's default }
-  FGridTrackBar.Width := 140;
-  FGridTrackBar.Height := 36;
+  FGridTrackBar.Width := Px(140);
+  FGridTrackBar.Height := Px(36);
   FGridTrackBar.ShowHint := True;
   FGridTrackBar.Hint := 'Timeline grid resolution';
   FGridTrackBar.OnChange := @GridTrackBarChange;
@@ -310,28 +311,28 @@ begin
   FStopButton := TButton.Create(Self);
   FStopButton.Parent := FTransportPanel;
   FStopButton.Caption := 'Stop';
-  FStopButton.Width := 80;
-  FStopButton.Height := 32;
+  FStopButton.Width := Px(80);
+  FStopButton.Height := Px(32);
   FStopButton.OnClick := @StopClick;
 
   FPlayPauseButton := TButton.Create(Self);
   FPlayPauseButton.Parent := FTransportPanel;
   FPlayPauseButton.Caption := 'Play';
-  FPlayPauseButton.Width := 80;
-  FPlayPauseButton.Height := 32;
+  FPlayPauseButton.Width := Px(80);
+  FPlayPauseButton.Height := Px(32);
   FPlayPauseButton.OnClick := @PlayPauseClick;
 
   FRecordButton := TButton.Create(Self);
   FRecordButton.Parent := FTransportPanel;
   FRecordButton.Caption := 'Record';
-  FRecordButton.Width := 80;
-  FRecordButton.Height := 32;
+  FRecordButton.Width := Px(80);
+  FRecordButton.Height := Px(32);
   FRecordButton.OnClick := @RecordClick;
 
   FDevicePanel := TPanel.Create(Self);
   FDevicePanel.Parent := Self;
   FDevicePanel.Align := alBottom;
-  FDevicePanel.Height := WidgetTop + WidgetHeight + WidgetBottomMargin;
+  FDevicePanel.Height := Px(WidgetTop + WidgetHeight + WidgetBottomMargin);
   FDevicePanel.BevelOuter := bvNone;
   FDevicePanel.OnDragOver := @DevicePanelDragOver;
   FDevicePanel.OnDragDrop := @DevicePanelDragDrop;
@@ -346,17 +347,17 @@ begin
   FDeviceScrollBar.Parent := FDevicePanel;
   FDeviceScrollBar.Kind := sbHorizontal;
   FDeviceScrollBar.Align := alTop;
-  FDeviceScrollBar.Height := DeviceScrollBarHeight;
+  FDeviceScrollBar.Height := Px(DeviceScrollBarHeight);
   FDeviceScrollBar.Visible := False;
   FDeviceScrollBar.OnChange := @DeviceScrollBarChange;
 
   { "Track N" widget - always present, identifies whose device chain this is }
   FTrackWidget := TPanel.Create(Self);
   FTrackWidget.Parent := FDevicePanel;
-  FTrackWidget.Left := TrackWidgetLeft;
-  FTrackWidget.Top := WidgetTop;
-  FTrackWidget.Width := 100;
-  FTrackWidget.Height := WidgetHeight;
+  FTrackWidget.Left := Px(TrackWidgetLeft);
+  FTrackWidget.Top := Px(WidgetTop);
+  FTrackWidget.Width := Px(100);
+  FTrackWidget.Height := Px(WidgetHeight);
   FTrackWidget.BevelOuter := bvRaised;
 
   FTrackWidgetLabel := TLabel.Create(Self);
@@ -370,74 +371,81 @@ begin
     keyboard play on the currently selected track }
   FInstrumentWidget := TPanel.Create(Self);
   FInstrumentWidget.Parent := FDevicePanel;
-  FInstrumentWidget.Left := InstrumentSlotLeft;
-  FInstrumentWidget.Top := WidgetTop;
-  FInstrumentWidget.Width := 220;
-  FInstrumentWidget.Height := WidgetHeight;
+  FInstrumentWidget.Left := Px(InstrumentSlotLeft);
+  FInstrumentWidget.Top := Px(WidgetTop);
+  FInstrumentWidget.Width := Px(220);
+  FInstrumentWidget.Height := Px(WidgetHeight);
   FInstrumentWidget.BevelOuter := bvRaised;
   FInstrumentWidget.Visible := False;
 
   FInstrumentDeleteButton := TButton.Create(Self);
   FInstrumentDeleteButton.Parent := FInstrumentWidget;
   FInstrumentDeleteButton.Caption := 'X';
-  FInstrumentDeleteButton.Left := FInstrumentWidget.Width - 24;
-  FInstrumentDeleteButton.Top := 4;
-  FInstrumentDeleteButton.Width := 20;
-  FInstrumentDeleteButton.Height := 20;
+  FInstrumentDeleteButton.Left := FInstrumentWidget.Width - Px(24);
+  FInstrumentDeleteButton.Top := Px(4);
+  FInstrumentDeleteButton.Width := Px(20);
+  FInstrumentDeleteButton.Height := Px(20);
   FInstrumentDeleteButton.OnClick := @InstrumentDeleteClick;
 
   FInstrumentNameLabel := TLabel.Create(Self);
   FInstrumentNameLabel.Parent := FInstrumentWidget;
-  FInstrumentNameLabel.Left := 8;
-  FInstrumentNameLabel.Top := 8;
-  FInstrumentNameLabel.Width := FInstrumentWidget.Width - 40;
-  FInstrumentNameLabel.Height := 40;
+  FInstrumentNameLabel.Left := Px(8);
+  FInstrumentNameLabel.Top := Px(8);
+  FInstrumentNameLabel.Width := FInstrumentWidget.Width - Px(40);
+  FInstrumentNameLabel.Height := Px(40);
   FInstrumentNameLabel.AutoSize := False;
   FInstrumentNameLabel.WordWrap := True;
 
   FOctaveLabel := TLabel.Create(Self);
   FOctaveLabel.Parent := FInstrumentWidget;
-  FOctaveLabel.Left := 8;
-  FOctaveLabel.Top := 64;
+  FOctaveLabel.Left := Px(8);
+  FOctaveLabel.Top := Px(64);
   FOctaveLabel.Caption := 'Octave: 0';
 
   FOctaveMinusButton := TButton.Create(Self);
   FOctaveMinusButton.Parent := FInstrumentWidget;
   FOctaveMinusButton.Caption := '-';
-  FOctaveMinusButton.Left := 8;
-  FOctaveMinusButton.Top := 88;
-  FOctaveMinusButton.Width := 28;
-  FOctaveMinusButton.Height := 24;
+  FOctaveMinusButton.Left := Px(8);
+  FOctaveMinusButton.Top := Px(88);
+  FOctaveMinusButton.Width := Px(28);
+  FOctaveMinusButton.Height := Px(24);
   FOctaveMinusButton.OnClick := @OctaveMinusClick;
 
   FOctavePlusButton := TButton.Create(Self);
   FOctavePlusButton.Parent := FInstrumentWidget;
   FOctavePlusButton.Caption := '+';
-  FOctavePlusButton.Left := 44;
-  FOctavePlusButton.Top := 88;
-  FOctavePlusButton.Width := 28;
-  FOctavePlusButton.Height := 24;
+  FOctavePlusButton.Left := Px(44);
+  FOctavePlusButton.Top := Px(88);
+  FOctavePlusButton.Width := Px(28);
+  FOctavePlusButton.Height := Px(24);
   FOctavePlusButton.OnClick := @OctavePlusClick;
 
   FDropHintLabel := TLabel.Create(Self);
   FDropHintLabel.Parent := FDevicePanel;
-  FDropHintLabel.Left := InstrumentSlotLeft;
-  FDropHintLabel.Top := WidgetTop;
+  FDropHintLabel.Left := Px(InstrumentSlotLeft);
+  FDropHintLabel.Top := Px(WidgetTop);
+  { pinned to the same footprint as the instrument widget it stands in for -
+    AutoSize off + WordWrap so a long hint never bleeds into whatever's
+    parented to its right (e.g. the master bus effects rack) }
+  FDropHintLabel.AutoSize := False;
+  FDropHintLabel.WordWrap := True;
+  FDropHintLabel.Width := Px(220);
+  FDropHintLabel.Height := Px(WidgetHeight);
   FDropHintLabel.Caption := 'Select a track to load an instrument';
 
   { warp editor widget - appears when a clip is selected on the timeline }
   FWarpWidget := TPanel.Create(Self);
   FWarpWidget.Parent := FDevicePanel;
-  FWarpWidget.Left := WarpSlotLeft;
-  FWarpWidget.Top := WidgetTop;
-  FWarpWidget.Width := 500;
-  FWarpWidget.Height := WidgetHeight;
+  FWarpWidget.Left := Px(WarpSlotLeft);
+  FWarpWidget.Top := Px(WidgetTop);
+  FWarpWidget.Width := Px(500);
+  FWarpWidget.Height := Px(WidgetHeight);
   FWarpWidget.BevelOuter := bvRaised;
   FWarpWidget.Visible := False;
   FWarpWidget.Caption := '';
 
   WarpButtonsPanel := AddZoomButtons(FWarpWidget, @WarpZoomInClick, @WarpZoomOutClick);
-  WarpButtonsPanel.Width := 34; { a bit wider than the plain zoom column, so the toggle isn't tiny }
+  WarpButtonsPanel.Width := Px(34); { a bit wider than the plain zoom column, so the toggle isn't tiny }
 
   { Re-Pitch toggle - the classic continuous vari-speed warp (same tech as
     keyboard pitch-shifting), as an alternative to the default Beats mode.
@@ -448,7 +456,7 @@ begin
   FWarpRepitchToggle.Parent := WarpButtonsPanel;
   FWarpRepitchToggle.Caption := 'RP';
   FWarpRepitchToggle.Align := alBottom;
-  FWarpRepitchToggle.Height := 40;
+  FWarpRepitchToggle.Height := Px(40);
   FWarpRepitchToggle.Font.Style := [fsBold];
   FWarpRepitchToggle.ShowHint := True;
   FWarpRepitchToggle.Hint := 'Re-Pitch warp mode (continuous vari-speed, changes pitch)' +
@@ -464,10 +472,10 @@ begin
     warp widget, shown instead of it when no clip is selected on the timeline }
   FInstrumentEditorWidget := TPanel.Create(Self);
   FInstrumentEditorWidget.Parent := FDevicePanel;
-  FInstrumentEditorWidget.Left := WarpSlotLeft;
-  FInstrumentEditorWidget.Top := WidgetTop;
-  FInstrumentEditorWidget.Width := 400;
-  FInstrumentEditorWidget.Height := WidgetHeight;
+  FInstrumentEditorWidget.Left := Px(WarpSlotLeft);
+  FInstrumentEditorWidget.Top := Px(WidgetTop);
+  FInstrumentEditorWidget.Width := Px(400);
+  FInstrumentEditorWidget.Height := Px(WidgetHeight);
   FInstrumentEditorWidget.BevelOuter := bvRaised;
   FInstrumentEditorWidget.Visible := False;
   FInstrumentEditorWidget.Caption := '';
@@ -807,11 +815,10 @@ begin
 end;
 
 procedure TForm1.TransportPanelResize(Sender: TObject);
-const
-  Gap = 8;
 var
-  GroupWidth, GroupLeft, ButtonTop: Integer;
+  Gap, GroupWidth, GroupLeft, ButtonTop: Integer;
 begin
+  Gap := Px(8);
   GroupWidth := FStopButton.Width + Gap + FPlayPauseButton.Width + Gap +
     FRecordButton.Width;
   GroupLeft := (FTransportPanel.ClientWidth - GroupWidth) div 2;
@@ -827,7 +834,7 @@ begin
   FGridTrackBar.Left := FTransportPanel.ClientWidth - FGridTrackBar.Width - Gap;
   FGridTrackBar.Top := (FTransportPanel.ClientHeight - FGridTrackBar.Height) div 2;
   FGridLabel.Left := FGridTrackBar.Left - FGridLabel.Width - Gap;
-  FGridLabel.Top := 19;
+  FGridLabel.Top := Px(19);
 end;
 
 procedure TForm1.GridTrackBarChange(Sender: TObject);
@@ -1026,7 +1033,14 @@ begin
 
   Track := FArrangementView.KeyboardTrack;
   FLastEffectsRackTrack := Track;
-  if Track >= 0 then
+  if Track = -2 then
+  begin
+    SetLength(FEffectWidgets, Project.MasterEffectCount);
+    for i := 0 to High(FEffectWidgets) do
+      FEffectWidgets[i] := TEffectWidget.CreateFor(Self, FDevicePanel, -1, i,
+        @EffectRackChanged, True);
+  end
+  else if Track >= 0 then
   begin
     SetLength(FEffectWidgets, Project.TrackEffectCount[Track]);
     for i := 0 to High(FEffectWidgets) do
@@ -1045,14 +1059,19 @@ end;
 procedure TForm1.AddEffectToCurrentTrack(AKind: Integer);
 var
   Track: Integer;
+  Added: Boolean;
 begin
   Track := FArrangementView.KeyboardTrack;
-  if Track < 0 then
+  if Track = -2 then
+    Added := Project.AddMasterEffect(AKind)
+  else if Track >= 0 then
+    Added := Project.AddTrackEffect(Track, AKind)
+  else
   begin
     ShowMessage('Select a track first.');
     Exit;
   end;
-  if not Project.AddTrackEffect(Track, AKind) then
+  if not Added then
   begin
     ShowMessage(Format('Maximum of %d effects per track.', [Effects.MaxEffectsPerTrack]));
     Exit;
@@ -1068,6 +1087,11 @@ end;
 procedure TForm1.AddEQ4EffectClick(Sender: TObject);
 begin
   AddEffectToCurrentTrack(Effects.ekEQ4);
+end;
+
+procedure TForm1.AddLimiterEffectClick(Sender: TObject);
+begin
+  AddEffectToCurrentTrack(Effects.ekLimiter);
 end;
 
 procedure TForm1.BuildEffectsMenu;
@@ -1104,8 +1128,7 @@ begin
   Placeholder.Enabled := False;
 
   MasteringItem := AddCategory('Mastering');
-  Placeholder := AddEffectItem(MasteringItem, '(none yet)', nil);
-  Placeholder.Enabled := False;
+  AddEffectItem(MasteringItem, 'Limiter', @AddLimiterEffectClick);
 end;
 
 procedure TForm1.DevicePanelMouseDown(Sender: TObject; Button: TMouseButton;
@@ -1120,11 +1143,11 @@ end;
 function TForm1.EffectsRackBaseLeft: Integer;
 begin
   if FWarpWidget.Visible then
-    Result := WarpSlotLeft + FWarpWidget.Width + 8
+    Result := Px(WarpSlotLeft) + FWarpWidget.Width + Px(8)
   else if FInstrumentEditorWidget.Visible then
-    Result := WarpSlotLeft + FInstrumentEditorWidget.Width + 8
+    Result := Px(WarpSlotLeft) + FInstrumentEditorWidget.Width + Px(8)
   else
-    Result := WarpSlotLeft;
+    Result := Px(WarpSlotLeft);
 end;
 
 function TForm1.EffectsRackTotalWidth: Integer;
@@ -1133,7 +1156,7 @@ var
 begin
   Result := 0;
   for i := 0 to High(FEffectWidgets) do
-    Result := Result + FEffectWidgets[i].Width + 8;
+    Result := Result + FEffectWidgets[i].Width + Px(8);
 end;
 
 procedure TForm1.DeviceScrollBarChange(Sender: TObject);
@@ -1141,18 +1164,18 @@ var
   Offset, EffLeft, i: Integer;
 begin
   Offset := FDeviceScrollBar.Position;
-  FTrackWidget.Left := TrackWidgetLeft - Offset;
-  FInstrumentWidget.Left := InstrumentSlotLeft - Offset;
-  FDropHintLabel.Left := InstrumentSlotLeft - Offset;
-  FWarpWidget.Left := WarpSlotLeft - Offset;
-  FInstrumentEditorWidget.Left := WarpSlotLeft - Offset;
+  FTrackWidget.Left := Px(TrackWidgetLeft) - Offset;
+  FInstrumentWidget.Left := Px(InstrumentSlotLeft) - Offset;
+  FDropHintLabel.Left := Px(InstrumentSlotLeft) - Offset;
+  FWarpWidget.Left := Px(WarpSlotLeft) - Offset;
+  FInstrumentEditorWidget.Left := Px(WarpSlotLeft) - Offset;
 
   EffLeft := EffectsRackBaseLeft - Offset;
   for i := 0 to High(FEffectWidgets) do
   begin
     FEffectWidgets[i].Left := EffLeft;
-    FEffectWidgets[i].Top := WidgetTop;
-    Inc(EffLeft, FEffectWidgets[i].Width + 8);
+    FEffectWidgets[i].Top := Px(WidgetTop);
+    Inc(EffLeft, FEffectWidgets[i].Width + Px(8));
   end;
 end;
 
@@ -1160,16 +1183,16 @@ procedure TForm1.UpdateDevicePanelScroll;
 var
   ContentRight, PanelWidth: Integer;
 begin
-  ContentRight := TrackWidgetLeft + FTrackWidget.Width;
+  ContentRight := Px(TrackWidgetLeft) + FTrackWidget.Width;
   if FInstrumentWidget.Visible then
-    ContentRight := Max(ContentRight, InstrumentSlotLeft + FInstrumentWidget.Width);
+    ContentRight := Max(ContentRight, Px(InstrumentSlotLeft) + FInstrumentWidget.Width);
   if FWarpWidget.Visible then
-    ContentRight := Max(ContentRight, WarpSlotLeft + FWarpWidget.Width)
+    ContentRight := Max(ContentRight, Px(WarpSlotLeft) + FWarpWidget.Width)
   else if FInstrumentEditorWidget.Visible then
-    ContentRight := Max(ContentRight, WarpSlotLeft + FInstrumentEditorWidget.Width);
+    ContentRight := Max(ContentRight, Px(WarpSlotLeft) + FInstrumentEditorWidget.Width);
   if Length(FEffectWidgets) > 0 then
     ContentRight := Max(ContentRight, EffectsRackBaseLeft + EffectsRackTotalWidth);
-  ContentRight := ContentRight + TrackWidgetLeft; { trailing margin }
+  ContentRight := ContentRight + Px(TrackWidgetLeft); { trailing margin }
 
   PanelWidth := FDevicePanel.ClientWidth;
 
@@ -1251,6 +1274,20 @@ var
   Track, SampleID: Integer;
 begin
   Track := FArrangementView.KeyboardTrack;
+
+  if Track = -2 then
+  begin
+    FTrackWidgetLabel.Caption := 'Master';
+    FInstrumentWidget.Visible := False;
+    FInstrumentEditorWidget.Visible := False;
+    FWarpWidget.Visible := False;
+    FDropHintLabel.Caption := 'Master bus - no instrument or warp';
+    FDropHintLabel.Visible := True;
+    if FLastEffectsRackTrack <> Track then
+      RebuildEffectWidgets;
+    UpdateDevicePanelScroll;
+    Exit;
+  end;
 
   if Track < 0 then
   begin

@@ -50,6 +50,11 @@ var
     Effects.TEffect;
   TrackEffectCount: array[0..MaxTracks - 1] of Integer;
 
+  { master bus insert chain - applied to the final mix, after every track's
+    own inserts, before the SP1200 emulation (a separate, always-on system) }
+  MasterEffects: array[0..Effects.MaxEffectsPerTrack - 1] of Effects.TEffect;
+  MasterEffectCount: Integer;
+
 function AddSampleToPool(const ASample: TSample; const AName, APath: string): Integer;
 procedure CommitClipToTrack(ATrackIndex: Integer; const ANewClip: TClip);
 procedure ReplaceTrackClips(ATrackIndex: Integer; const AClips: TClipArray);
@@ -57,6 +62,8 @@ procedure RemoveClipAt(ATrackIndex, AClipIndex: Integer);
 
 function AddTrackEffect(ATrackIndex, AKind: Integer): Boolean;
 procedure RemoveTrackEffect(ATrackIndex, AEffectIndex: Integer);
+function AddMasterEffect(AKind: Integer): Boolean;
+procedure RemoveMasterEffect(AEffectIndex: Integer);
 
 procedure PushUndoSnapshot(ATrackIndex: Integer);
 function PopUndo(out ATrackIndex: Integer): Boolean;
@@ -117,6 +124,30 @@ begin
     TrackEffects[ATrackIndex][j] := TrackEffects[ATrackIndex][j + 1];
   Dec(TrackEffectCount[ATrackIndex]);
   TrackEffects[ATrackIndex][TrackEffectCount[ATrackIndex]].Kind := Effects.ekNone;
+end;
+
+function AddMasterEffect(AKind: Integer): Boolean;
+var
+  Slot: Integer;
+begin
+  if MasterEffectCount >= Effects.MaxEffectsPerTrack then
+    Exit(False);
+  Slot := MasterEffectCount;
+  Effects.DefaultEffect(AKind, MasterEffects[Slot]);
+  Inc(MasterEffectCount);
+  Result := True;
+end;
+
+procedure RemoveMasterEffect(AEffectIndex: Integer);
+var
+  j: Integer;
+begin
+  if (AEffectIndex < 0) or (AEffectIndex >= MasterEffectCount) then
+    Exit;
+  for j := AEffectIndex to MasterEffectCount - 2 do
+    MasterEffects[j] := MasterEffects[j + 1];
+  Dec(MasterEffectCount);
+  MasterEffects[MasterEffectCount].Kind := Effects.ekNone;
 end;
 
 function AddSampleToPool(const ASample: TSample; const AName, APath: string): Integer;
@@ -222,6 +253,7 @@ begin
 
   TrackCount := DefaultTrackCount;
   InitTrackInstruments;
+  MasterEffectCount := 0;
   TempoBPM := DefaultTempoBPM;
 end;
 

@@ -70,6 +70,7 @@ type
     function ContentHeight: Integer;
     function ContentEndFrame: Int64;
     function TrackIndexAtY(Y: Integer): Integer;
+    function MasterRowTop: Integer;
     function FrameToAbsoluteX(AFrame: Int64): Integer;
     function FrameToX(AFrame: Int64): Integer;
     function XToFrame(AX: Integer): Int64;
@@ -201,6 +202,11 @@ begin
   { pad past the furthest clip so there's always room to keep scrolling,
     like Ableton's effectively-endless arrangement canvas }
   Result := EndFrame + (Int64(ContentEndPaddingSeconds) * AudioEngine.ProjectSampleRate);
+end;
+
+function TArrangementView.MasterRowTop: Integer;
+begin
+  Result := RulerHeight + Project.TrackCount * TrackHeight;
 end;
 
 function TArrangementView.TrackIndexAtY(Y: Integer): Integer;
@@ -475,7 +481,7 @@ begin
   Canvas.FillRect(Rect(0, RulerHeight, LaneWidth, ContentHeight));
 
   Canvas.Pen.Color := clSilver;
-  for i := 0 to Project.TrackCount do
+  for i := 0 to Project.TrackCount + 1 do
   begin
     y := RulerHeight + i * TrackHeight;
     Canvas.Line(0, y, LaneWidth, y);
@@ -607,6 +613,22 @@ begin
     Canvas.Ellipse(kx - VolumeSliderRadius, SliderY - VolumeSliderRadius,
       kx + VolumeSliderRadius, SliderY + VolumeSliderRadius);
   end;
+
+  { master bus row, always the last row, below every real track - no clips,
+    mute, or volume slider, just a click target for the master effects chain }
+  y := MasterRowTop;
+  if FKeyboardTrack = -2 then
+    Canvas.Brush.Color := clGray
+  else
+    Canvas.Brush.Color := clBtnFace;
+  Canvas.FillRect(Rect(LaneWidth, y, Width, y + TrackHeight));
+  Canvas.Pen.Color := clBtnShadow;
+  Canvas.Rectangle(LaneWidth, y, Width, y + TrackHeight);
+  Canvas.Brush.Style := bsClear;
+  Canvas.Font.Style := [fsBold];
+  Canvas.TextOut(LaneWidth + 8, y + 8, 'Master');
+  Canvas.Font.Style := [];
+  Canvas.Brush.Style := bsSolid;
 end;
 
 procedure TArrangementView.DrawClips;
@@ -840,6 +862,19 @@ begin
   if Button <> mbLeft then
     Exit;
 
+  if (X >= LaneWidth) and (Y >= MasterRowTop) and (Y < MasterRowTop + TrackHeight) then
+  begin
+    SelectClip(-1, -1);
+    if FKeyboardTrack <> -2 then
+    begin
+      FKeyboardTrack := -2;
+      if Assigned(FOnKeyboardTrackChanged) then
+        FOnKeyboardTrackChanged(Self);
+    end;
+    Invalidate;
+    Exit;
+  end;
+
   TrackIndex := TrackIndexAtY(Y);
 
   if (TrackIndex >= 0) and (X >= LaneWidth) and
@@ -1042,34 +1077,70 @@ begin
       end;
     dmResizeLeft:
       begin
-        { Offset/Position moved forward - equivalent to the right half of a
-          split at the trimmed-away point, so carry the matching (rebased)
-          warp markers across instead of discarding them. The returned split
-          frame may differ slightly from the drag position (see
-          SplitWarpMarkers) - align the clip's own geometry to it too so the
-          markers and geometry stay consistent. }
-        SplitRel := SplitWarpMarkers(FDragOrigClip.WarpMarkers,
-          FDragCurrentClip.Position - FDragOrigClip.Position, DiscardMarkers,
-          FDragCurrentClip.WarpMarkers, FDragOrigClip.WarpMode);
-        FDragCurrentClip.Offset := FDragOrigClip.Offset + SplitRel;
-        FDragCurrentClip.Position := FDragOrigClip.Position + SplitRel;
-        FDragCurrentClip.Length := FDragOrigClip.Length - SplitRel;
+        if ssShift in Shift then
+        begin
+          { elastic resize (the old always-on behavior, now an explicit
+            opt-in): keep playing the exact same full original source
+            window, just stretch/squeeze it to fit the new duration - Offset
+            stays put, only the far marker's TimelineFrame rescales. }
+          FDragCurrentClip.Offset := FDragOrigClip.Offset;
+          FDragCurrentClip.Length := FDragOrigClip.Position + FDragOrigClip.Length -
+            FDragCurrentClip.Position;
+          if Length(FDragOrigClip.WarpMarkers) >= 2 then
+          begin
+            FDragCurrentClip.WarpMarkers := Copy(FDragOrigClip.WarpMarkers, 0,
+              Length(FDragOrigClip.WarpMarkers));
+            FDragCurrentClip.WarpMarkers[High(FDragCurrentClip.WarpMarkers)].TimelineFrame :=
+              FDragCurrentClip.Length;
+          end
+          else
+            FDragCurrentClip.WarpMarkers := FDragOrigClip.WarpMarkers;
+        end
+        else
+        begin
+          { default: plain truncate - Offset/Position moved forward,
+            equivalent to the right half of a split at the trimmed-away
+            point, so carry the matching (rebased) warp markers across
+            instead of discarding them (which would silently drop the pitch/
+            warp on what remains). The returned split frame may differ
+            slightly from the drag position (see SplitWarpMarkers) - align
+            the clip's own geometry to it too so the markers and geometry
+            stay consistent. }
+          SplitRel := SplitWarpMarkers(FDragOrigClip.WarpMarkers,
+            FDragCurrentClip.Position - FDragOrigClip.Position, DiscardMarkers,
+            FDragCurrentClip.WarpMarkers, FDragOrigClip.WarpMode);
+          FDragCurrentClip.Offset := FDragOrigClip.Offset + SplitRel;
+          FDragCurrentClip.Position := FDragOrigClip.Position + SplitRel;
+          FDragCurrentClip.Length := FDragOrigClip.Length - SplitRel;
+        end;
         Project.Tracks[FDragTrack].Clips[FDragClip] := FDragCurrentClip;
         PushTrackToEngine(FDragTrack);
       end;
     dmResizeRight:
       begin
-        { keep the warp end marker (if any) in step with the new length,
-          equivalent to dragging the warp editor's end marker. Copy first -
-          dynamic arrays are refcounted, and mutating a shared element in
-          place would corrupt the undo snapshot and the live Project data. }
-        if Length(FDragCurrentClip.WarpMarkers) >= 2 then
+        if ssShift in Shift then
         begin
-          FDragCurrentClip.WarpMarkers := Copy(FDragCurrentClip.WarpMarkers, 0,
-            Length(FDragCurrentClip.WarpMarkers));
-          FDragCurrentClip.WarpMarkers[High(FDragCurrentClip.WarpMarkers)].TimelineFrame :=
-            FDragCurrentClip.Length;
+          { elastic resize (the old always-on behavior, now an explicit
+            opt-in): keep the warp end marker (if any) in step with the new
+            length, equivalent to dragging the warp editor's end marker -
+            stretches/squeezes the same source content to fit. Copy first -
+            dynamic arrays are refcounted, and mutating a shared element in
+            place would corrupt the undo snapshot and the live Project data. }
+          if Length(FDragCurrentClip.WarpMarkers) >= 2 then
+          begin
+            FDragCurrentClip.WarpMarkers := Copy(FDragCurrentClip.WarpMarkers, 0,
+              Length(FDragCurrentClip.WarpMarkers));
+            FDragCurrentClip.WarpMarkers[High(FDragCurrentClip.WarpMarkers)].TimelineFrame :=
+              FDragCurrentClip.Length;
+          end;
         end;
+        { default (no shift): plain truncate/extend - only the far edge
+          moves, so clip-relative frame 0 still means the same thing and the
+          existing warp markers need no rebasing at all; just leave them as
+          they already are (still FDragOrigClip's, untouched since
+          MouseMove only ever changes Length for this drag mode) and let
+          Length do the cutting/extending at whatever rate was already
+          playing. }
         Project.Tracks[FDragTrack].Clips[FDragClip] := FDragCurrentClip;
         PushTrackToEngine(FDragTrack);
       end;
