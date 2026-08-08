@@ -390,8 +390,9 @@ end;
 procedure TWarpEditor.MouseMove(Shift: TShiftState; X, Y: Integer);
 var
   Clip: TClip;
-  NewFrame, MinFrame, MaxFrame: Int64;
+  NewFrame, MinFrame, MaxFrame, Delta: Int64;
   NewMarkers: TWarpMarkerArray;
+  j: Integer;
 begin
   inherited MouseMove(Shift, X, Y);
 
@@ -417,8 +418,10 @@ begin
     NewMarkers[FDragMarkerIndex].TimelineFrame := NewFrame;
     Clip.Length := NewFrame;
   end
-  else
+  else if ssCtrl in Shift then
   begin
+    { Ctrl+drag: local edit - only the two segments adjacent to this marker
+      stretch/compress, everything else on the timeline stays put }
     MinFrame := NewMarkers[FDragMarkerIndex - 1].TimelineFrame + 1;
     MaxFrame := NewMarkers[FDragMarkerIndex + 1].TimelineFrame - 1;
     if NewFrame < MinFrame then
@@ -426,6 +429,24 @@ begin
     if NewFrame > MaxFrame then
       NewFrame := MaxFrame;
     NewMarkers[FDragMarkerIndex].TimelineFrame := NewFrame;
+  end
+  else
+  begin
+    { plain drag (Ableton's default): reposition this marker and slide every
+      later marker (including the end marker, so the clip's length follows
+      along too) by the same delta, leaving their own source/timeline
+      relationships - and therefore their pitch - completely untouched.
+      Useful for fixing a recurring timing offset (e.g. every snare landing
+      a beat late) in one drag instead of one marker at a time, since only
+      the segment before the dragged marker actually stretches. }
+    MinFrame := NewMarkers[FDragMarkerIndex - 1].TimelineFrame + 1;
+    if NewFrame < MinFrame then
+      NewFrame := MinFrame;
+    Delta := NewFrame - NewMarkers[FDragMarkerIndex].TimelineFrame;
+    NewMarkers[FDragMarkerIndex].TimelineFrame := NewFrame;
+    for j := FDragMarkerIndex + 1 to High(NewMarkers) do
+      NewMarkers[j].TimelineFrame := NewMarkers[j].TimelineFrame + Delta;
+    Clip.Length := NewMarkers[High(NewMarkers)].TimelineFrame;
   end;
 
   Clip.WarpMarkers := NewMarkers;
