@@ -1,0 +1,267 @@
+unit MainForm;
+
+{$mode objfpc}{$H+}
+
+interface
+
+uses
+  Classes, SysUtils, Forms, Controls, Graphics, Dialogs, Menus, ExtCtrls,
+  StdCtrls, ArrangementView, PrefsForm, FileBrowser, SampleTypes, WavDecoder,
+  AudioEngine;
+
+type
+  TForm1 = class(TForm)
+  private
+    FMainMenu: TMainMenu;
+    FTransportPanel: TPanel;
+    FPlayPauseButton: TButton;
+    FFileBrowser: TFileBrowser;
+    FFileBrowserSplitter: TSplitter;
+    FArrangementView: TArrangementView;
+    FSplitter: TSplitter;
+    FDevicePanel: TPanel;
+    FDevicePanelLabel: TLabel;
+    FPlaybackPollTimer: TTimer;
+    FSamplePool: array of TSample;
+
+    procedure BuildMenu;
+    procedure BuildLayout;
+    procedure AddToSamplePool(const ASample: TSample);
+
+    procedure FileExitClick(Sender: TObject);
+    procedure EditPreferencesClick(Sender: TObject);
+    procedure HelpAboutClick(Sender: TObject);
+    procedure PlayPauseClick(Sender: TObject);
+    procedure TransportPanelResize(Sender: TObject);
+    procedure ArrangementViewFileDrop(Sender: TObject; ATrackIndex: Integer;
+      const AFilePath: string);
+    procedure ArrangementViewSeek(Sender: TObject; AFrameOffset: Integer);
+    procedure PlaybackPollTimerTimer(Sender: TObject);
+  public
+    constructor Create(AOwner: TComponent); override;
+    destructor Destroy; override;
+  end;
+
+var
+  Form1: TForm1;
+
+implementation
+
+{$R *.lfm}
+
+constructor TForm1.Create(AOwner: TComponent);
+begin
+  inherited Create(AOwner);
+  Caption := 'Eris';
+  BuildMenu;
+  BuildLayout;
+  AudioEngineInit;
+end;
+
+destructor TForm1.Destroy;
+var
+  i: Integer;
+begin
+  AudioEngineShutdown;
+  for i := 0 to High(FSamplePool) do
+    if FSamplePool[i].Data <> nil then
+      FreeMem(FSamplePool[i].Data);
+  inherited Destroy;
+end;
+
+procedure TForm1.BuildMenu;
+
+  function AddMenu(const ACaption: string): TMenuItem;
+  begin
+    Result := TMenuItem.Create(Self);
+    Result.Caption := ACaption;
+    FMainMenu.Items.Add(Result);
+  end;
+
+  function AddItem(AParent: TMenuItem; const ACaption: string;
+    AOnClick: TNotifyEvent): TMenuItem;
+  begin
+    Result := TMenuItem.Create(Self);
+    Result.Caption := ACaption;
+    Result.OnClick := AOnClick;
+    AParent.Add(Result);
+  end;
+
+  procedure AddSeparator(AParent: TMenuItem);
+  begin
+    AddItem(AParent, '-', nil);
+  end;
+
+var
+  FileMenu, EditMenu, ViewMenu, TrackMenu, HelpMenu: TMenuItem;
+begin
+  FMainMenu := TMainMenu.Create(Self);
+  Menu := FMainMenu;
+
+  FileMenu := AddMenu('&File');
+  AddItem(FileMenu, '&New', nil);
+  AddItem(FileMenu, '&Open...', nil);
+  AddItem(FileMenu, '&Save', nil);
+  AddItem(FileMenu, 'Save &As...', nil);
+  AddSeparator(FileMenu);
+  AddItem(FileMenu, '&Export...', nil);
+  AddSeparator(FileMenu);
+  AddItem(FileMenu, 'E&xit', @FileExitClick);
+
+  EditMenu := AddMenu('&Edit');
+  AddItem(EditMenu, '&Undo', nil);
+  AddSeparator(EditMenu);
+  AddItem(EditMenu, '&Preferences...', @EditPreferencesClick);
+
+  ViewMenu := AddMenu('&View');
+  AddItem(ViewMenu, 'Zoom &In', nil);
+  AddItem(ViewMenu, 'Zoom &Out', nil);
+
+  TrackMenu := AddMenu('&Track');
+  AddItem(TrackMenu, '&Add Track', nil);
+
+  HelpMenu := AddMenu('&Help');
+  AddItem(HelpMenu, '&About...', @HelpAboutClick);
+end;
+
+procedure TForm1.BuildLayout;
+begin
+  Width := 900;
+  Height := 600;
+
+  FTransportPanel := TPanel.Create(Self);
+  FTransportPanel.Parent := Self;
+  FTransportPanel.Align := alTop;
+  FTransportPanel.Height := 40;
+  FTransportPanel.BevelOuter := bvNone;
+  FTransportPanel.OnResize := @TransportPanelResize;
+
+  FPlayPauseButton := TButton.Create(Self);
+  FPlayPauseButton.Parent := FTransportPanel;
+  FPlayPauseButton.Caption := 'Play';
+  FPlayPauseButton.Width := 80;
+  FPlayPauseButton.Height := 28;
+  FPlayPauseButton.OnClick := @PlayPauseClick;
+
+  FDevicePanel := TPanel.Create(Self);
+  FDevicePanel.Parent := Self;
+  FDevicePanel.Align := alBottom;
+  FDevicePanel.Height := 160;
+  FDevicePanel.BevelOuter := bvNone;
+
+  FDevicePanelLabel := TLabel.Create(Self);
+  FDevicePanelLabel.Parent := FDevicePanel;
+  FDevicePanelLabel.Caption := 'Device / instrument panel (selected track)';
+  FDevicePanelLabel.Left := 8;
+  FDevicePanelLabel.Top := 8;
+
+  FSplitter := TSplitter.Create(Self);
+  FSplitter.Parent := Self;
+  FSplitter.Align := alBottom;
+
+  FFileBrowser := TFileBrowser.Create(Self);
+  FFileBrowser.Parent := Self;
+  FFileBrowser.Align := alLeft;
+  FFileBrowser.Width := 220;
+
+  FFileBrowserSplitter := TSplitter.Create(Self);
+  FFileBrowserSplitter.Parent := Self;
+  FFileBrowserSplitter.Align := alLeft;
+
+  FArrangementView := TArrangementView.Create(Self);
+  FArrangementView.Parent := Self;
+  FArrangementView.Align := alClient;
+  FArrangementView.OnFileDrop := @ArrangementViewFileDrop;
+  FArrangementView.OnSeek := @ArrangementViewSeek;
+
+  TransportPanelResize(FTransportPanel);
+
+  FPlaybackPollTimer := TTimer.Create(Self);
+  FPlaybackPollTimer.Interval := 150;
+  FPlaybackPollTimer.OnTimer := @PlaybackPollTimerTimer;
+  FPlaybackPollTimer.Enabled := True;
+end;
+
+procedure TForm1.AddToSamplePool(const ASample: TSample);
+begin
+  SetLength(FSamplePool, Length(FSamplePool) + 1);
+  FSamplePool[High(FSamplePool)] := ASample;
+end;
+
+procedure TForm1.FileExitClick(Sender: TObject);
+begin
+  Close;
+end;
+
+procedure TForm1.EditPreferencesClick(Sender: TObject);
+var
+  Dlg: TPrefsForm;
+begin
+  Dlg := TPrefsForm.Create(Self);
+  try
+    Dlg.ShowModal;
+  finally
+    Dlg.Free;
+  end;
+end;
+
+procedure TForm1.HelpAboutClick(Sender: TObject);
+begin
+  ShowMessage('Eris' + LineEnding + 'A linear-timeline, audio-only DAW.');
+end;
+
+procedure TForm1.PlayPauseClick(Sender: TObject);
+begin
+  if not AudioEngineHasClip then
+    Exit;
+
+  if AudioEngineIsPlaying then
+  begin
+    AudioEngineStop;
+    FPlayPauseButton.Caption := 'Play';
+  end
+  else
+  begin
+    AudioEnginePlay;
+    FPlayPauseButton.Caption := 'Pause';
+  end;
+end;
+
+procedure TForm1.TransportPanelResize(Sender: TObject);
+begin
+  FPlayPauseButton.Left := (FTransportPanel.ClientWidth - FPlayPauseButton.Width) div 2;
+  FPlayPauseButton.Top := (FTransportPanel.ClientHeight - FPlayPauseButton.Height) div 2;
+end;
+
+procedure TForm1.ArrangementViewFileDrop(Sender: TObject; ATrackIndex: Integer;
+  const AFilePath: string);
+var
+  Sample: TSample;
+begin
+  if not DecodeSampleFile(AFilePath, Sample) then
+  begin
+    ShowMessage('Could not load "' + AFilePath + '" as a WAV file.');
+    Exit;
+  end;
+
+  AddToSamplePool(Sample);
+  AudioEnginePushLoadClip(Sample.Data, Sample.FrameCount, Sample.Channels);
+  FArrangementView.SetTrackClip(ATrackIndex, ExtractFileName(AFilePath),
+    Sample.FrameCount);
+  FPlayPauseButton.Caption := 'Play';
+end;
+
+procedure TForm1.ArrangementViewSeek(Sender: TObject; AFrameOffset: Integer);
+begin
+  AudioEngineSeek(AFrameOffset);
+end;
+
+procedure TForm1.PlaybackPollTimerTimer(Sender: TObject);
+begin
+  if AudioEngineIsPlaying then
+    FArrangementView.SetCursorFrame(AudioEngineGetPosition)
+  else if FPlayPauseButton.Caption = 'Pause' then
+    FPlayPauseButton.Caption := 'Play';
+end;
+
+end.
