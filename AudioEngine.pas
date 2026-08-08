@@ -45,6 +45,14 @@ function AudioEngineGetSP1200Enabled: Boolean;
 procedure AudioEngineSetMetronomeEnabled(AEnabled: Boolean);
 function AudioEngineGetMetronomeEnabled: Boolean;
 
+{ SP-1200-style per-track swing, shared by the realtime engine (FillBlock)
+  and the offline render path (ProjectFile.RenderProjectToWav) so bounced
+  audio can never drift from what was heard live. See the implementation
+  for the exact convention (50 = straight, matches the SP-1200's 50-75%
+  swing range). }
+function SwungPosition(APosition: Int64; ASwingPercent: Single;
+  ADivision: Integer; ABeatFrames: Int64): Int64;
+
 const
   RecordStateIdle = 0;
   RecordStateCountIn = 1;
@@ -455,10 +463,37 @@ begin
     Result := LoopRegionStart + (Phase - LoopLen);
 end;
 
+{ SP-1200-style swing: if APosition falls on an odd step of the given
+  division (8th or 16th notes), delay it later by a fraction of that step's
+  length. ASwingPercent follows the SP-1200's own convention - 50 = straight,
+  75 = the theoretical ceiling where the delayed step lands exactly on the
+  next one. Shared identically by the realtime engine and the offline
+  render path (ProjectFile.RenderProjectToWav) so bounced audio never
+  drifts from what was heard live. }
+function SwungPosition(APosition: Int64; ASwingPercent: Single;
+  ADivision: Integer; ABeatFrames: Int64): Int64;
+var
+  StepFrames: Int64;
+  StepIndex: Int64;
+begin
+  if ADivision = 8 then
+    StepFrames := ABeatFrames div 2
+  else
+    StepFrames := ABeatFrames div 4;
+  if StepFrames < 1 then
+    StepFrames := 1;
+
+  StepIndex := Round(APosition / StepFrames);
+  if Odd(StepIndex) then
+    Result := APosition + Round((ASwingPercent - 50) / 25 * StepFrames)
+  else
+    Result := APosition;
+end;
+
 procedure FillBlock;
 var
   Frame, t, i, e: Integer;
-  GlobalFrame, ClipRelFrame: Int64;
+  GlobalFrame, ClipRelFrame, SwungPos: Int64;
   SrcPos: Double;
   Clip: PPlaybackClip;
   L, R, TrackL, TrackR, RecL, RecR, ClickVal: Single;
@@ -487,7 +522,9 @@ begin
         for i := 0 to TrackClips[t].Count - 1 do
         begin
           Clip := @(TrackClips[t].Items[i]);
-          ClipRelFrame := GlobalFrame - Clip^.Position;
+          SwungPos := SwungPosition(Clip^.Position, Project.TrackSwingPercent[t],
+            Project.TrackSwingDivision[t], BeatFrames);
+          ClipRelFrame := GlobalFrame - SwungPos;
           if (ClipRelFrame < 0) or (ClipRelFrame >= Clip^.Length) then
             Continue;
 

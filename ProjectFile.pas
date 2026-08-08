@@ -64,6 +64,8 @@ begin
       Section := 'Track' + IntToStr(t);
       Ini.WriteInteger(Section, 'Instrument', Project.TrackInstrument[t]);
       Ini.WriteInteger(Section, 'Octave', Project.TrackOctave[t]);
+      Ini.WriteFloat(Section, 'SwingPercent', Project.TrackSwingPercent[t]);
+      Ini.WriteInteger(Section, 'SwingDivision', Project.TrackSwingDivision[t]);
       Ini.WriteInteger(Section, 'ClipCount', Length(Project.Tracks[t].Clips));
 
       for i := 0 to High(Project.Tracks[t].Clips) do
@@ -165,6 +167,8 @@ begin
       Section := 'Track' + IntToStr(t);
       Project.TrackInstrument[t] := Ini.ReadInteger(Section, 'Instrument', -1);
       Project.TrackOctave[t] := Ini.ReadInteger(Section, 'Octave', 0);
+      Project.TrackSwingPercent[t] := Ini.ReadFloat(Section, 'SwingPercent', 50);
+      Project.TrackSwingDivision[t] := Ini.ReadInteger(Section, 'SwingDivision', 16);
 
       ClipCount := Ini.ReadInteger(Section, 'ClipCount', 0);
       for i := 0 to ClipCount - 1 do
@@ -218,15 +222,19 @@ var
   MasterEffectState: array[0..Effects.MaxEffectsPerTrack - 1] of Effects.TEffectState;
   L, R: Single;
   e: Integer;
+  RenderBeatFrames, SwungPos: Int64;
 begin
   Result := False;
+  RenderBeatFrames := Round((AudioEngine.ProjectSampleRate * 60) / Project.TempoBPM);
   ProjectLengthFrames := 0;
   for t := 0 to Project.TrackCount - 1 do
     for i := 0 to High(Project.Tracks[t].Clips) do
     begin
       Clip := Project.Tracks[t].Clips[i];
-      if Clip.Position + Clip.Length > ProjectLengthFrames then
-        ProjectLengthFrames := Clip.Position + Clip.Length;
+      SwungPos := AudioEngine.SwungPosition(Clip.Position,
+        Project.TrackSwingPercent[t], Project.TrackSwingDivision[t], RenderBeatFrames);
+      if SwungPos + Clip.Length > ProjectLengthFrames then
+        ProjectLengthFrames := SwungPos + Clip.Length;
     end;
 
   if ProjectLengthFrames <= 0 then
@@ -241,6 +249,8 @@ begin
       begin
         Clip := Project.Tracks[t].Clips[i];
         Sample := Project.SamplePool[Clip.SampleID];
+        SwungPos := AudioEngine.SwungPosition(Clip.Position,
+          Project.TrackSwingPercent[t], Project.TrackSwingDivision[t], RenderBeatFrames);
 
         for Frame := 0 to Clip.Length - 1 do
         begin
@@ -250,7 +260,7 @@ begin
           if (SrcPos < 0) or (SrcPos >= Sample.FrameCount) then
             Continue;
 
-          OutIdx := (Clip.Position + Frame) * OutChannels;
+          OutIdx := (SwungPos + Frame) * OutChannels;
 
           if Sample.Channels = 1 then
           begin

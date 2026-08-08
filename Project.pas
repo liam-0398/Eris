@@ -44,6 +44,14 @@ var
   { simple mute toggle, shown on the track header in the arrangement view }
   TrackEnabled: array[0..MaxTracks - 1] of Boolean;
 
+  { SP-1200-style swing: delays every other grid step's clips later by a
+    percentage. 50 = straight/off, 54..71 mirror the SP-1200's own five
+    detents, 75 is the theoretical ceiling (off-step lands exactly on the
+    next step - see AudioEngine.SwungPosition). SwingDivision is the grid
+    unit swing pairs up (8 = 8th notes, 16 = 16th notes, the default). }
+  TrackSwingPercent: array[0..MaxTracks - 1] of Single;
+  TrackSwingDivision: array[0..MaxTracks - 1] of Integer;
+
   { per-track insert effects chain - a fixed number of ordered slots per
     track, Kind = ekNone marks an unused slot beyond TrackEffectCount }
   TrackEffects: array[0..MaxTracks - 1, 0..Effects.MaxEffectsPerTrack - 1] of
@@ -95,6 +103,8 @@ begin
     TrackInstrumentEnd[i] := 0;
     TrackEnabled[i] := True;
     TrackEffectCount[i] := 0;
+    TrackSwingPercent[i] := 50;
+    TrackSwingDivision[i] := 16;
   end;
 end;
 
@@ -231,6 +241,8 @@ begin
   TrackInstrumentEnd[TrackCount] := 0;
   TrackEnabled[TrackCount] := True;
   TrackEffectCount[TrackCount] := 0;
+  TrackSwingPercent[TrackCount] := 50;
+  TrackSwingDivision[TrackCount] := 16;
   Inc(TrackCount);
   Result := True;
 end;

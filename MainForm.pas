@@ -15,12 +15,16 @@ type
   private
     const
       TrackWidgetLeft = 8;
-      InstrumentSlotLeft = 116;
-      WarpSlotLeft = 344;
+      TrackWidgetWidth = 120; { wide enough for the swing controls below the name }
+      InstrumentSlotLeft = 136;
+      WarpSlotLeft = 364;
       DeviceScrollBarHeight = 16;
       WidgetTop = 8 + DeviceScrollBarHeight;
       WidgetHeight = 180;
       WidgetBottomMargin = 8;
+      { SP-1200's own swing settings: 50 = straight/off, then its five real
+        detents. Slider Position is an index into this array. }
+      SwingDetents: array[0..5] of Integer = (50, 54, 58, 63, 67, 71);
     var
     FMainMenu: TMainMenu;
     FTransportPanel: TPanel;
@@ -42,6 +46,10 @@ type
     FDevicePanel: TPanel;
     FTrackWidget: TPanel;
     FTrackWidgetLabel: TLabel;
+    FSwingLabel: TLabel;
+    FSwingDivisionButton: TSpeedButton;
+    FSwingSlider: TTrackBar;
+    FSwingValueLabel: TLabel;
     FInstrumentWidget: TPanel;
     FInstrumentNameLabel: TLabel;
     FInstrumentDeleteButton: TButton;
@@ -101,6 +109,9 @@ type
     procedure UpdateWarpRepitchToggleLook;
     procedure MetronomeToggleClick(Sender: TObject);
     procedure UpdateMetronomeToggleLook;
+    procedure SwingDivisionButtonClick(Sender: TObject);
+    procedure SwingSliderChange(Sender: TObject);
+    procedure UpdateSwingControls;
     procedure WarpZoomInClick(Sender: TObject);
     procedure WarpZoomOutClick(Sender: TObject);
     procedure InstrumentZoomInClick(Sender: TObject);
@@ -372,21 +383,65 @@ begin
   FDeviceScrollBar.Visible := False;
   FDeviceScrollBar.OnChange := @DeviceScrollBarChange;
 
-  { "Track N" widget - always present, identifies whose device chain this is }
+  { "Track N" widget - always present, identifies whose device chain this is.
+    Also hosts the per-track swing controls (only meaningful - and only
+    visible - for a real track, not Master/no-track). }
   FTrackWidget := TPanel.Create(Self);
   FTrackWidget.Parent := FDevicePanel;
   FTrackWidget.Left := Px(TrackWidgetLeft);
   FTrackWidget.Top := Px(WidgetTop);
-  FTrackWidget.Width := Px(100);
+  FTrackWidget.Width := Px(TrackWidgetWidth);
   FTrackWidget.Height := Px(WidgetHeight);
   FTrackWidget.BevelOuter := bvRaised;
 
   FTrackWidgetLabel := TLabel.Create(Self);
   FTrackWidgetLabel.Parent := FTrackWidget;
-  FTrackWidgetLabel.Align := alClient;
+  FTrackWidgetLabel.Align := alTop;
+  FTrackWidgetLabel.Height := Px(44);
   FTrackWidgetLabel.Alignment := taCenter;
   FTrackWidgetLabel.Layout := tlCenter;
   FTrackWidgetLabel.Caption := 'No Track';
+
+  FSwingLabel := TLabel.Create(Self);
+  FSwingLabel.Parent := FTrackWidget;
+  FSwingLabel.Left := Px(8);
+  FSwingLabel.Top := Px(52);
+  FSwingLabel.Caption := 'Swing';
+
+  { SP-1200-style swing division toggle - which grid unit swing pairs up.
+    Defaults to 16th notes; click to switch to 8th notes (or back). }
+  FSwingDivisionButton := TSpeedButton.Create(Self);
+  FSwingDivisionButton.Parent := FTrackWidget;
+  FSwingDivisionButton.Caption := '1/16';
+  FSwingDivisionButton.Left := Px(TrackWidgetWidth) - Px(44);
+  FSwingDivisionButton.Top := Px(48);
+  FSwingDivisionButton.Width := Px(36);
+  FSwingDivisionButton.Height := Px(22);
+  FSwingDivisionButton.ShowHint := True;
+  FSwingDivisionButton.Hint := 'Swing grid: click to switch between 1/8 and 1/16 notes';
+  FSwingDivisionButton.OnClick := @SwingDivisionButtonClick;
+
+  { snaps to the SP-1200's own 6 swing detents (50=straight, then its five
+    real settings 54/58/63/67/71) - Position is an index into SwingDetents,
+    not the raw percentage, so it always lands exactly on one of those }
+  FSwingSlider := TTrackBar.Create(Self);
+  FSwingSlider.Parent := FTrackWidget;
+  FSwingSlider.Left := Px(8);
+  FSwingSlider.Top := Px(74);
+  FSwingSlider.Width := Px(TrackWidgetWidth) - Px(16);
+  FSwingSlider.Height := Px(26);
+  FSwingSlider.Min := 0;
+  FSwingSlider.Max := High(SwingDetents);
+  FSwingSlider.TickStyle := tsAuto;
+  FSwingSlider.ShowHint := True;
+  FSwingSlider.Hint := 'Swing amount (SP-1200 detents: 50/54/58/63/67/71%)';
+  FSwingSlider.OnChange := @SwingSliderChange;
+
+  FSwingValueLabel := TLabel.Create(Self);
+  FSwingValueLabel.Parent := FTrackWidget;
+  FSwingValueLabel.Left := Px(8);
+  FSwingValueLabel.Top := Px(102);
+  FSwingValueLabel.Caption := '50% (straight)';
 
   { instrument widget - one "device" holding the sample dragged in for
     keyboard play on the currently selected track }
@@ -1016,6 +1071,70 @@ begin
   end;
 end;
 
+procedure TForm1.SwingDivisionButtonClick(Sender: TObject);
+var
+  Track: Integer;
+begin
+  Track := FArrangementView.KeyboardTrack;
+  if Track < 0 then
+    Exit;
+  if Project.TrackSwingDivision[Track] = 16 then
+    Project.TrackSwingDivision[Track] := 8
+  else
+    Project.TrackSwingDivision[Track] := 16;
+  UpdateSwingControls;
+end;
+
+procedure TForm1.SwingSliderChange(Sender: TObject);
+var
+  Track: Integer;
+begin
+  Track := FArrangementView.KeyboardTrack;
+  if Track < 0 then
+    Exit;
+  Project.TrackSwingPercent[Track] := SwingDetents[FSwingSlider.Position];
+  if FSwingSlider.Position = 0 then
+    FSwingValueLabel.Caption := '50% (straight)'
+  else
+    FSwingValueLabel.Caption := IntToStr(SwingDetents[FSwingSlider.Position]) + '%';
+end;
+
+procedure TForm1.UpdateSwingControls;
+var
+  Track, i, Diff, BestIdx, BestDiff: Integer;
+begin
+  Track := FArrangementView.KeyboardTrack;
+  FSwingLabel.Visible := Track >= 0;
+  FSwingDivisionButton.Visible := Track >= 0;
+  FSwingSlider.Visible := Track >= 0;
+  FSwingValueLabel.Visible := Track >= 0;
+  if Track < 0 then
+    Exit;
+
+  if Project.TrackSwingDivision[Track] = 8 then
+    FSwingDivisionButton.Caption := '1/8'
+  else
+    FSwingDivisionButton.Caption := '1/16';
+
+  BestIdx := 0;
+  BestDiff := MaxInt;
+  for i := 0 to High(SwingDetents) do
+  begin
+    Diff := Abs(SwingDetents[i] - Round(Project.TrackSwingPercent[Track]));
+    if Diff < BestDiff then
+    begin
+      BestDiff := Diff;
+      BestIdx := i;
+    end;
+  end;
+  FSwingSlider.Position := BestIdx;
+
+  if BestIdx = 0 then
+    FSwingValueLabel.Caption := '50% (straight)'
+  else
+    FSwingValueLabel.Caption := IntToStr(SwingDetents[BestIdx]) + '%';
+end;
+
 procedure TForm1.UpdateWarpRepitchToggleLook;
 begin
   FWarpRepitchToggle.Caption := 'RP';
@@ -1349,6 +1468,7 @@ var
   Track, SampleID: Integer;
 begin
   Track := FArrangementView.KeyboardTrack;
+  UpdateSwingControls;
 
   if Track = -2 then
   begin
