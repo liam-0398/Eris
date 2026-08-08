@@ -115,6 +115,7 @@ type
     procedure AddLowpassEffectClick(Sender: TObject);
     procedure AddEQ4EffectClick(Sender: TObject);
     procedure AddLimiterEffectClick(Sender: TObject);
+    procedure AddChorusEffectClick(Sender: TObject);
     procedure BuildEffectsMenu;
     procedure DevicePanelMouseDown(Sender: TObject; Button: TMouseButton;
       Shift: TShiftState; X, Y: Integer);
@@ -966,6 +967,11 @@ procedure TForm1.WarpRepitchToggleClick(Sender: TObject);
 var
   Track, ClipIdx: Integer;
 begin
+  { TSpeedButton only auto-toggles Down for grouped buttons (GroupIndex <> 0)
+    - this one is standalone (GroupIndex = 0), so a plain click never flips
+    Down on its own; flip it ourselves }
+  FWarpRepitchToggle.Down := not FWarpRepitchToggle.Down;
+
   Track := FArrangementView.SelectedTrack;
   ClipIdx := FArrangementView.SelectedClipIndex;
   if (Track < 0) or (ClipIdx < 0) or
@@ -988,6 +994,9 @@ end;
 
 procedure TForm1.MetronomeToggleClick(Sender: TObject);
 begin
+  { standalone TSpeedButton (GroupIndex = 0) never auto-toggles Down on
+    click - only grouped buttons get that for free - so flip it ourselves }
+  FMetronomeToggle.Down := not FMetronomeToggle.Down;
   AudioEngineSetMetronomeEnabled(FMetronomeToggle.Down);
   UpdateMetronomeToggleLook;
 end;
@@ -1142,6 +1151,11 @@ begin
   AddEffectToCurrentTrack(Effects.ekLimiter);
 end;
 
+procedure TForm1.AddChorusEffectClick(Sender: TObject);
+begin
+  AddEffectToCurrentTrack(Effects.ekChorus);
+end;
+
 procedure TForm1.BuildEffectsMenu;
 
   function AddCategory(const ACaption: string): TMenuItem;
@@ -1161,7 +1175,8 @@ procedure TForm1.BuildEffectsMenu;
   end;
 
 var
-  FiltersItem, EQItem, UtilityItem, MasteringItem, Placeholder: TMenuItem;
+  FiltersItem, EQItem, ModulationItem, UtilityItem, MasteringItem,
+  Placeholder: TMenuItem;
 begin
   FEffectsMenu := TPopupMenu.Create(Self);
 
@@ -1170,6 +1185,9 @@ begin
 
   EQItem := AddCategory('EQ');
   AddEffectItem(EQItem, '4', @AddEQ4EffectClick);
+
+  ModulationItem := AddCategory('Modulation');
+  AddEffectItem(ModulationItem, 'Chorus', @AddChorusEffectClick);
 
   UtilityItem := AddCategory('Utility');
   Placeholder := AddEffectItem(UtilityItem, '(none yet)', nil);

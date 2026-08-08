@@ -30,6 +30,10 @@ type
     FLimiterThresholdValueLabel: TLabel;
     FLimiterReleaseSlider: TTrackBar;
     FLimiterReleaseValueLabel: TLabel;
+    FChorusRateSlider: TTrackBar;
+    FChorusRateValueLabel: TLabel;
+    FChorusDepthSlider: TTrackBar;
+    FChorusDepthValueLabel: TLabel;
     function EffectPtr: PEffect;
     procedure DeleteClick(Sender: TObject);
     procedure LPSliderChange(Sender: TObject);
@@ -37,9 +41,12 @@ type
     procedure EQGainSliderChange(Sender: TObject);
     procedure LimiterThresholdSliderChange(Sender: TObject);
     procedure LimiterReleaseSliderChange(Sender: TObject);
+    procedure ChorusRateSliderChange(Sender: TObject);
+    procedure ChorusDepthSliderChange(Sender: TObject);
     procedure BuildLowpass;
     procedure BuildEQ4;
     procedure BuildLimiter;
+    procedure BuildChorus;
   public
     constructor CreateFor(AOwner: TComponent; AParent: TWinControl;
       ATrackIndex, AEffectIndex: Integer; AOnRackChanged: TEffectRackChangedEvent;
@@ -55,6 +62,12 @@ const
   LimiterMaxThresholdDb = 0;
   LimiterMinReleaseMs = 10;
   LimiterMaxReleaseMs = 500;
+  { Rate is stored/edited as Hz * 100 on the slider (an integer control) so a
+    sane 0.05-5 Hz musical range still gets fine-grained steps }
+  ChorusMinRateX100 = 5;
+  ChorusMaxRateX100 = 500;
+  ChorusMinDepthPercent = 0;
+  ChorusMaxDepthPercent = 100;
   { shared sizing so every effect box lines up with the others in the rack
     and with the rest of the bottom bar's widgets }
   WidgetHeight = 180;
@@ -111,6 +124,7 @@ begin
   case Kind of
     Effects.ekEQ4: TitleLabel.Caption := 'EQ 4';
     Effects.ekLimiter: TitleLabel.Caption := 'Limiter';
+    Effects.ekChorus: TitleLabel.Caption := 'Chorus';
   else
     TitleLabel.Caption := 'LP';
   end;
@@ -141,6 +155,12 @@ begin
         Width := Px(200);
         DeleteButton.Left := Width - Px(28);
         BuildLimiter;
+      end;
+    Effects.ekChorus:
+      begin
+        Width := Px(200);
+        DeleteButton.Left := Width - Px(28);
+        BuildChorus;
       end;
   end;
 end;
@@ -215,6 +235,10 @@ begin
     FEQGainSlider[b].Width := Px(EQBandWidth);
     FEQGainSlider[b].Height := Px(WidgetHeight) - Px(128) - Px(10);
     FEQGainSlider[b].Orientation := trVertical;
+    { GTK's un-inverted vertical range puts the Min value at the top, which
+      reads backwards for a gain fader - flip it so dragging up means more
+      gain, matching every real mixer/EQ }
+    FEQGainSlider[b].Reversed := True;
     FEQGainSlider[b].Min := EQMinGainDb;
     FEQGainSlider[b].Max := EQMaxGainDb;
     FEQGainSlider[b].Position := Round(EffectPtr^.EQGainDb[b]);
@@ -276,6 +300,57 @@ begin
   FLimiterReleaseValueLabel.Caption := Format('%d ms', [Round(EffectPtr^.LimiterReleaseMs)]);
 end;
 
+procedure TEffectWidget.BuildChorus;
+var
+  Lbl1, Lbl2: TLabel;
+begin
+  Lbl1 := TLabel.Create(Owner);
+  Lbl1.Parent := Self;
+  Lbl1.Left := Px(8);
+  Lbl1.Top := Px(36);
+  Lbl1.Caption := 'Rate (Hz)';
+
+  FChorusRateSlider := TTrackBar.Create(Owner);
+  FChorusRateSlider.Parent := Self;
+  FChorusRateSlider.Left := Px(8);
+  FChorusRateSlider.Top := Px(54);
+  FChorusRateSlider.Width := Width - Px(16);
+  FChorusRateSlider.Height := Px(26);
+  FChorusRateSlider.Min := ChorusMinRateX100;
+  FChorusRateSlider.Max := ChorusMaxRateX100;
+  FChorusRateSlider.Position := Round(EffectPtr^.ChorusRateHz * 100);
+  FChorusRateSlider.OnChange := @ChorusRateSliderChange;
+
+  FChorusRateValueLabel := TLabel.Create(Owner);
+  FChorusRateValueLabel.Parent := Self;
+  FChorusRateValueLabel.Left := Px(8);
+  FChorusRateValueLabel.Top := Px(82);
+  FChorusRateValueLabel.Caption := Format('%.2f Hz', [EffectPtr^.ChorusRateHz]);
+
+  Lbl2 := TLabel.Create(Owner);
+  Lbl2.Parent := Self;
+  Lbl2.Left := Px(8);
+  Lbl2.Top := Px(100);
+  Lbl2.Caption := 'Depth (%)';
+
+  FChorusDepthSlider := TTrackBar.Create(Owner);
+  FChorusDepthSlider.Parent := Self;
+  FChorusDepthSlider.Left := Px(8);
+  FChorusDepthSlider.Top := Px(118);
+  FChorusDepthSlider.Width := Width - Px(16);
+  FChorusDepthSlider.Height := Px(26);
+  FChorusDepthSlider.Min := ChorusMinDepthPercent;
+  FChorusDepthSlider.Max := ChorusMaxDepthPercent;
+  FChorusDepthSlider.Position := Round(EffectPtr^.ChorusDepthPercent);
+  FChorusDepthSlider.OnChange := @ChorusDepthSliderChange;
+
+  FChorusDepthValueLabel := TLabel.Create(Owner);
+  FChorusDepthValueLabel.Parent := Self;
+  FChorusDepthValueLabel.Left := Px(8);
+  FChorusDepthValueLabel.Top := Px(146);
+  FChorusDepthValueLabel.Caption := Format('%d%%', [Round(EffectPtr^.ChorusDepthPercent)]);
+end;
+
 procedure TEffectWidget.DeleteClick(Sender: TObject);
 begin
   if FIsMaster then
@@ -327,6 +402,21 @@ procedure TEffectWidget.LimiterReleaseSliderChange(Sender: TObject);
 begin
   EffectPtr^.LimiterReleaseMs := FLimiterReleaseSlider.Position;
   FLimiterReleaseValueLabel.Caption := Format('%d ms', [FLimiterReleaseSlider.Position]);
+end;
+
+procedure TEffectWidget.ChorusRateSliderChange(Sender: TObject);
+var
+  RateHz: Single;
+begin
+  RateHz := FChorusRateSlider.Position / 100;
+  EffectPtr^.ChorusRateHz := RateHz;
+  FChorusRateValueLabel.Caption := Format('%.2f Hz', [RateHz]);
+end;
+
+procedure TEffectWidget.ChorusDepthSliderChange(Sender: TObject);
+begin
+  EffectPtr^.ChorusDepthPercent := FChorusDepthSlider.Position;
+  FChorusDepthValueLabel.Caption := Format('%d%%', [FChorusDepthSlider.Position]);
 end;
 
 end.
