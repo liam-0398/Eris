@@ -7,7 +7,7 @@ interface
 uses
   Classes, SysUtils, Forms, Controls, Graphics, Dialogs, Menus, ExtCtrls,
   StdCtrls, LCLType, ArrangementView, PrefsForm, FileBrowser, SampleTypes,
-  WavDecoder, AudioEngine, Project;
+  WavDecoder, AudioEngine, Project, ProjectFile;
 
 type
   TForm1 = class(TForm)
@@ -33,10 +33,17 @@ type
     FOctavePlusButton: TButton;
     FDropHintLabel: TLabel;
     FPlaybackPollTimer: TTimer;
+    FCurrentProjectPath: string;
 
     procedure BuildMenu;
     procedure BuildLayout;
+    procedure RefreshAllTracksUI;
 
+    procedure FileNewClick(Sender: TObject);
+    procedure FileOpenClick(Sender: TObject);
+    procedure FileSaveClick(Sender: TObject);
+    procedure FileSaveAsClick(Sender: TObject);
+    procedure FileExportClick(Sender: TObject);
     procedure FileExitClick(Sender: TObject);
     procedure EditPreferencesClick(Sender: TObject);
     procedure EditUndoClick(Sender: TObject);
@@ -125,12 +132,12 @@ begin
   Menu := FMainMenu;
 
   FileMenu := AddMenu('&File');
-  AddItem(FileMenu, '&New', nil);
-  AddItem(FileMenu, '&Open...', nil);
-  AddItem(FileMenu, '&Save', nil);
-  AddItem(FileMenu, 'Save &As...', nil);
+  AddItem(FileMenu, '&New', @FileNewClick);
+  AddItem(FileMenu, '&Open...', @FileOpenClick);
+  AddItem(FileMenu, '&Save', @FileSaveClick);
+  AddItem(FileMenu, 'Save &As...', @FileSaveAsClick);
   AddSeparator(FileMenu);
-  AddItem(FileMenu, '&Export...', nil);
+  AddItem(FileMenu, '&Export...', @FileExportClick);
   AddSeparator(FileMenu);
   AddItem(FileMenu, 'E&xit', @FileExitClick);
 
@@ -303,6 +310,115 @@ begin
   FPlaybackPollTimer.Enabled := True;
 end;
 
+procedure TForm1.RefreshAllTracksUI;
+var
+  t: Integer;
+begin
+  AudioEngineStop;
+  AudioEngineSeek(0);
+  FArrangementView.ClearSelection;
+  FArrangementView.SetCursorFrame(0);
+  for t := 0 to Project.TrackCount - 1 do
+    FArrangementView.RefreshTrack(t);
+  FTempoEdit.Text := IntToStr(Round(Project.TempoBPM));
+  FPlayPauseButton.Caption := 'Play';
+  UpdateDevicePanel;
+end;
+
+procedure TForm1.FileNewClick(Sender: TObject);
+begin
+  Project.NewProject;
+  FCurrentProjectPath := '';
+  RefreshAllTracksUI;
+end;
+
+procedure TForm1.FileOpenClick(Sender: TObject);
+var
+  Dlg: TOpenDialog;
+begin
+  Dlg := TOpenDialog.Create(Self);
+  try
+    Dlg.Title := 'Open Eris Project';
+    Dlg.Filter := 'Eris Project (*.er)|*.er';
+    if not Dlg.Execute then
+      Exit;
+
+    if not LoadProject(Dlg.FileName) then
+    begin
+      ShowMessage('Could not load project "' + Dlg.FileName + '".');
+      Exit;
+    end;
+
+    FCurrentProjectPath := Dlg.FileName;
+    RefreshAllTracksUI;
+  finally
+    Dlg.Free;
+  end;
+end;
+
+procedure TForm1.FileSaveClick(Sender: TObject);
+begin
+  if FCurrentProjectPath = '' then
+    FileSaveAsClick(Sender)
+  else if not SaveProject(FCurrentProjectPath) then
+    ShowMessage('Could not save project "' + FCurrentProjectPath + '".');
+end;
+
+procedure TForm1.FileSaveAsClick(Sender: TObject);
+var
+  Dlg: TSaveDialog;
+  Path: string;
+begin
+  Dlg := TSaveDialog.Create(Self);
+  try
+    Dlg.Title := 'Save Eris Project As';
+    Dlg.Filter := 'Eris Project (*.er)|*.er';
+    Dlg.DefaultExt := '.er';
+    if not Dlg.Execute then
+      Exit;
+
+    Path := Dlg.FileName;
+    if LowerCase(ExtractFileExt(Path)) <> '.er' then
+      Path := Path + '.er';
+
+    if not SaveProject(Path) then
+    begin
+      ShowMessage('Could not save project "' + Path + '".');
+      Exit;
+    end;
+
+    FCurrentProjectPath := Path;
+  finally
+    Dlg.Free;
+  end;
+end;
+
+procedure TForm1.FileExportClick(Sender: TObject);
+var
+  Dlg: TSaveDialog;
+  Path: string;
+begin
+  Dlg := TSaveDialog.Create(Self);
+  try
+    Dlg.Title := 'Export Arrangement to WAV';
+    Dlg.Filter := 'WAV audio (*.wav)|*.wav';
+    Dlg.DefaultExt := '.wav';
+    if not Dlg.Execute then
+      Exit;
+
+    Path := Dlg.FileName;
+    if LowerCase(ExtractFileExt(Path)) <> '.wav' then
+      Path := Path + '.wav';
+
+    if not RenderProjectToWav(Path) then
+      ShowMessage('Nothing to export - the arrangement is empty.')
+    else
+      ShowMessage('Exported to "' + Path + '".');
+  finally
+    Dlg.Free;
+  end;
+end;
+
 procedure TForm1.FileExitClick(Sender: TObject);
 begin
   Close;
@@ -404,7 +520,8 @@ begin
     Exit;
   end;
 
-  Clip.SampleID := Project.AddSampleToPool(Sample, ExtractFileName(AFilePath));
+  Clip.SampleID := Project.AddSampleToPool(Sample, ExtractFileName(AFilePath),
+    AFilePath);
   Clip.Offset := 0;
   Clip.Length := Sample.FrameCount;
   Clip.Position := AFramePosition;
@@ -469,7 +586,7 @@ begin
   end;
 
   Project.TrackInstrument[Track] := Project.AddSampleToPool(Sample,
-    ExtractFileName(APath));
+    ExtractFileName(APath), APath);
   UpdateDevicePanel;
 end;
 

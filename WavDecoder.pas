@@ -16,6 +16,8 @@ type
 
 function DecodeWav(const APath: string; out ASample: TSample): Boolean;
 function DecodeSampleFile(const APath: string; out ASample: TSample): Boolean;
+function EncodeWav(const APath: string; AData: PSingle; AFrameCount, AChannels,
+  ASampleRate: Integer): Boolean;
 
 implementation
 
@@ -32,6 +34,16 @@ end;
 function ReadU16(AStream: TStream): UInt16;
 begin
   AStream.ReadBuffer(Result, SizeOf(Result));
+end;
+
+procedure WriteU16(AStream: TStream; AValue: UInt16);
+begin
+  AStream.WriteBuffer(AValue, SizeOf(AValue));
+end;
+
+procedure WriteU32(AStream: TStream; AValue: UInt32);
+begin
+  AStream.WriteBuffer(AValue, SizeOf(AValue));
 end;
 
 function DecodeWav(const APath: string; out ASample: TSample): Boolean;
@@ -171,6 +183,57 @@ begin
     ASample.Channels := NumChannels;
     ASample.SampleRate := SampleRate;
     ASample.BaseNote := 60.0;
+
+    Result := True;
+  finally
+    Stream.Free;
+  end;
+end;
+
+function EncodeWav(const APath: string; AData: PSingle; AFrameCount, AChannels,
+  ASampleRate: Integer): Boolean;
+var
+  Stream: TFileStream;
+  DataBytes, RiffSize, ByteRate: UInt32;
+  BlockAlign: UInt16;
+  i: Integer;
+  Value: Single;
+  Sample16: SmallInt;
+begin
+  Result := False;
+  DataBytes := AFrameCount * AChannels * 2;
+  BlockAlign := AChannels * 2;
+  ByteRate := UInt32(ASampleRate) * BlockAlign;
+  RiffSize := 4 + (8 + 16) + (8 + DataBytes);
+
+  Stream := TFileStream.Create(APath, fmCreate);
+  try
+    Stream.WriteBuffer('RIFF', 4);
+    WriteU32(Stream, RiffSize);
+    Stream.WriteBuffer('WAVE', 4);
+
+    Stream.WriteBuffer('fmt ', 4);
+    WriteU32(Stream, 16);
+    WriteU16(Stream, FormatPCM);
+    WriteU16(Stream, AChannels);
+    WriteU32(Stream, ASampleRate);
+    WriteU32(Stream, ByteRate);
+    WriteU16(Stream, BlockAlign);
+    WriteU16(Stream, 16);
+
+    Stream.WriteBuffer('data', 4);
+    WriteU32(Stream, DataBytes);
+
+    for i := 0 to (AFrameCount * AChannels) - 1 do
+    begin
+      Value := AData[i];
+      if Value > 1.0 then
+        Value := 1.0
+      else if Value < -1.0 then
+        Value := -1.0;
+      Sample16 := Round(Value * 32767.0);
+      Stream.WriteBuffer(Sample16, 2);
+    end;
 
     Result := True;
   finally

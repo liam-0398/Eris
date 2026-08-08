@@ -20,6 +20,7 @@ var
   Tracks: array[0..TrackCount - 1] of TTrack;
   SamplePool: array of TSample;
   SampleNames: array of string;
+  SamplePaths: array of string;
   TempoBPM: Single = DefaultTempoBPM;
 
   { keyboard-play instrument assigned to each track via the device panel;
@@ -27,13 +28,15 @@ var
   TrackInstrument: array[0..TrackCount - 1] of Integer;
   TrackOctave: array[0..TrackCount - 1] of Integer;
 
-function AddSampleToPool(const ASample: TSample; const AName: string): Integer;
+function AddSampleToPool(const ASample: TSample; const AName, APath: string): Integer;
 procedure CommitClipToTrack(ATrackIndex: Integer; const ANewClip: TClip);
 procedure ReplaceTrackClips(ATrackIndex: Integer; const AClips: TClipArray);
 procedure RemoveClipAt(ATrackIndex, AClipIndex: Integer);
 
 procedure PushUndoSnapshot(ATrackIndex: Integer);
 function PopUndo(out ATrackIndex: Integer): Boolean;
+
+procedure NewProject;
 
 implementation
 
@@ -51,16 +54,21 @@ var
   i: Integer;
 begin
   for i := 0 to TrackCount - 1 do
+  begin
     TrackInstrument[i] := -1;
+    TrackOctave[i] := 0;
+  end;
 end;
 
-function AddSampleToPool(const ASample: TSample; const AName: string): Integer;
+function AddSampleToPool(const ASample: TSample; const AName, APath: string): Integer;
 begin
   SetLength(SamplePool, Length(SamplePool) + 1);
   SetLength(SampleNames, Length(SampleNames) + 1);
+  SetLength(SamplePaths, Length(SamplePaths) + 1);
   Result := High(SamplePool);
   SamplePool[Result] := ASample;
   SampleNames[Result] := AName;
+  SamplePaths[Result] := APath;
 end;
 
 procedure CommitClipToTrack(ATrackIndex: Integer; const ANewClip: TClip);
@@ -117,6 +125,25 @@ begin
   Tracks[Snap.TrackIndex].Clips := Snap.Clips;
   ATrackIndex := Snap.TrackIndex;
   Result := True;
+end;
+
+procedure NewProject;
+var
+  i: Integer;
+begin
+  for i := 0 to High(SamplePool) do
+    if SamplePool[i].Data <> nil then
+      FreeMem(SamplePool[i].Data);
+  SetLength(SamplePool, 0);
+  SetLength(SampleNames, 0);
+  SetLength(SamplePaths, 0);
+  SetLength(UndoStack, 0);
+
+  for i := 0 to TrackCount - 1 do
+    Tracks[i].Clips := nil;
+
+  InitTrackInstruments;
+  TempoBPM := DefaultTempoBPM;
 end;
 
 initialization

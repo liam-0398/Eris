@@ -361,6 +361,8 @@ var
   x: Integer;
 begin
   x := FrameToX(FCursorFrame);
+  if (x < 0) or (x >= LaneWidth) then
+    Exit;
   Canvas.Pen.Color := clRed;
   Canvas.Line(x, 0, x, Height);
 end;

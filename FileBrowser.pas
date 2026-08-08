@@ -13,6 +13,7 @@ type
   TFileBrowser = class(TPanel)
   private
     FPathLabel: TLabel;
+    FDividerPanel: TPanel;
     FListBox: TListBox;
     FCurrentDir: string;
     FOnFileActivate: TFileActivateEvent;
@@ -42,8 +43,15 @@ begin
   FPathLabel.Parent := Self;
   FPathLabel.Align := alTop;
   FPathLabel.AutoSize := False;
-  FPathLabel.Height := 20;
+  FPathLabel.Height := 24;
   FPathLabel.Layout := tlCenter;
+
+  FDividerPanel := TPanel.Create(Self);
+  FDividerPanel.Parent := Self;
+  FDividerPanel.Align := alTop;
+  FDividerPanel.Height := 3;
+  FDividerPanel.BevelOuter := bvNone;
+  FDividerPanel.Color := clBlack;
 
   FListBox := TListBox.Create(Self);
   FListBox.Parent := Self;
