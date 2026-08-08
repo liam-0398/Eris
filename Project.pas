@@ -33,6 +33,8 @@ var
     -1 means no instrument loaded }
   TrackInstrument: array[0..MaxTracks - 1] of Integer;
   TrackOctave: array[0..MaxTracks - 1] of Integer;
+  { linear gain multiplier applied on top of each clip's own Gain; 1.0 = unity/default }
+  TrackVolume: array[0..MaxTracks - 1] of Single;
 
 function AddSampleToPool(const ASample: TSample; const AName, APath: string): Integer;
 procedure CommitClipToTrack(ATrackIndex: Integer; const ANewClip: TClip);
@@ -64,6 +66,7 @@ begin
   begin
     TrackInstrument[i] := -1;
     TrackOctave[i] := 0;
+    TrackVolume[i] := 1.0;
   end;
 end;
 
@@ -143,6 +146,7 @@ begin
   Tracks[TrackCount].Clips := nil;
   TrackInstrument[TrackCount] := -1;
   TrackOctave[TrackCount] := 0;
+  TrackVolume[TrackCount] := 1.0;
   Inc(TrackCount);
   Result := True;
 end;

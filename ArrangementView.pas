@@ -5,8 +5,8 @@ unit ArrangementView;
 interface
 
 uses
-  Classes, SysUtils, Math, Controls, Graphics, LCLType, FileBrowser, SampleTypes,
-  Project, AudioEngine, Waveform;
+  Classes, SysUtils, Math, Forms, Controls, Graphics, LCLType, StdCtrls,
+  FileBrowser, SampleTypes, Project, AudioEngine, Waveform;
 
 type
   TFileDropEvent = procedure(Sender: TObject; ATrackIndex: Integer;
@@ -28,6 +28,14 @@ type
       ZoomFactor = 1.25;
       MinGridPixelWidth = 16;
       EdgeGrabPixels = 6;
+      ScrollBarHeight = 16;
+      AutoScrollMarginPixels = 40;
+      ContentEndPaddingSeconds = 10;
+      VolumeSliderY = 44;
+      VolumeSliderMargin = 10;
+      VolumeSliderRadius = 5;
+      VolumeSliderGrabPixels = 8;
+      TrackVolumeMax = 2.0;
     var
       FOnFileDrop: TFileDropEvent;
       FOnSeek: TSeekEvent;
@@ -36,6 +44,8 @@ type
       FTrackColors: array[0..Project.MaxTracks - 1] of TColor;
       FPixelsPerSecond: Double;
       FCursorFrame: Int64;
+      FScrollFrame: Int64;
+      FHScrollBar: TScrollBar;
       FSelectedTrack: Integer;
       FSelectedClip: Integer;
       FKeyboardTrack: Integer;
@@ -48,8 +58,12 @@ type
       FDragCurrentClip: TClip;
       FLoopStart: Int64;
       FLoopEnd: Int64;
+      FDraggingVolumeTrack: Integer;
     function LaneWidth: Integer;
+    function ContentHeight: Integer;
+    function ContentEndFrame: Int64;
     function TrackIndexAtY(Y: Integer): Integer;
+    function FrameToAbsoluteX(AFrame: Int64): Integer;
     function FrameToX(AFrame: Int64): Integer;
     function XToFrame(AX: Integer): Int64;
     function BeatFrames: Int64;
@@ -58,9 +72,15 @@ type
     function ClipPixelRect(ATrackIndex: Integer; const AClip: TClip): TRect;
     function HitTestClip(ATrackIndex: Integer; X: Integer; out AClipIndex: Integer;
       out AMode: TDragMode): Boolean;
+    function VolumeKnobX(ATrackIndex: Integer): Integer;
+    function XToVolume(X: Integer): Single;
+    function HitTestVolumeSlider(ATrackIndex, Y: Integer): Boolean;
     procedure SelectClip(ATrack, AClip: Integer);
     procedure PushTrackToEngine(ATrackIndex: Integer);
     procedure UpdateEngineLoop;
+    procedure SetScrollFrame(AFrame: Int64);
+    procedure UpdateScrollBarRange;
+    procedure HScrollBarChange(Sender: TObject);
     procedure DrawLanes;
     procedure DrawRuler;
     procedure DrawLoopMarkers;
@@ -114,11 +134,17 @@ begin
   FKeyboardTrack := -1;
   FLoopStart := -1;
   FLoopEnd := -1;
+  FDraggingVolumeTrack := -1;
 
   Randomize;
   for i := 0 to Project.MaxTracks - 1 do
     FTrackColors[i] := RGBToColor(100 + Random(120), 100 + Random(120),
       100 + Random(120));
+
+  FHScrollBar := TScrollBar.Create(Self);
+  FHScrollBar.Parent := Self;
+  FHScrollBar.Kind := sbHorizontal;
+  FHScrollBar.OnChange := @HScrollBarChange;
 end;
 
 function TArrangementView.LaneWidth: Integer;
@@ -126,23 +152,51 @@ begin
   Result := Width - HeaderWidth;
 end;
 
+function TArrangementView.ContentHeight: Integer;
+begin
+  Result := Height - ScrollBarHeight;
+end;
+
+function TArrangementView.ContentEndFrame: Int64;
+var
+  t, i: Integer;
+  EndFrame, ClipEnd: Int64;
+begin
+  EndFrame := 0;
+  for t := 0 to Project.TrackCount - 1 do
+    for i := 0 to High(Project.Tracks[t].Clips) do
+    begin
+      ClipEnd := Project.Tracks[t].Clips[i].Position + Project.Tracks[t].Clips[i].Length;
+      if ClipEnd > EndFrame then
+        EndFrame := ClipEnd;
+    end;
+  { pad past the furthest clip so there's always room to keep scrolling,
+    like Ableton's effectively-endless arrangement canvas }
+  Result := EndFrame + (Int64(ContentEndPaddingSeconds) * AudioEngine.ProjectSampleRate);
+end;
+
 function TArrangementView.TrackIndexAtY(Y: Integer): Integer;
 begin
-  if Y < RulerHeight then
+  if (Y < RulerHeight) or (Y >= ContentHeight) then
     Exit(-1);
   Result := (Y - RulerHeight) div TrackHeight;
   if Result >= Project.TrackCount then
     Result := -1;
 end;
 
-function TArrangementView.FrameToX(AFrame: Int64): Integer;
+function TArrangementView.FrameToAbsoluteX(AFrame: Int64): Integer;
 begin
   Result := Round((AFrame * FPixelsPerSecond) / AudioEngine.ProjectSampleRate);
 end;
 
+function TArrangementView.FrameToX(AFrame: Int64): Integer;
+begin
+  Result := FrameToAbsoluteX(AFrame - FScrollFrame);
+end;
+
 function TArrangementView.XToFrame(AX: Integer): Int64;
 begin
-  Result := Round((Int64(AX) * AudioEngine.ProjectSampleRate) / FPixelsPerSecond);
+  Result := FScrollFrame + Round((Int64(AX) * AudioEngine.ProjectSampleRate) / FPixelsPerSecond);
 end;
 
 procedure TArrangementView.ZoomIn;
@@ -150,6 +204,7 @@ begin
   FPixelsPerSecond := FPixelsPerSecond * ZoomFactor;
   if FPixelsPerSecond > MaxPixelsPerSecond then
     FPixelsPerSecond := MaxPixelsPerSecond;
+  UpdateScrollBarRange;
   Invalidate;
 end;
 
@@ -158,6 +213,7 @@ begin
   FPixelsPerSecond := FPixelsPerSecond / ZoomFactor;
   if FPixelsPerSecond < MinPixelsPerSecond then
     FPixelsPerSecond := MinPixelsPerSecond;
+  UpdateScrollBarRange;
   Invalidate;
 end;
 
@@ -236,6 +292,44 @@ begin
   end;
 end;
 
+function TArrangementView.VolumeKnobX(ATrackIndex: Integer): Integer;
+var
+  Range: Integer;
+  Value: Single;
+begin
+  Range := (Width - VolumeSliderMargin) - (LaneWidth + VolumeSliderMargin);
+  Value := Project.TrackVolume[ATrackIndex] / TrackVolumeMax;
+  if Value < 0 then
+    Value := 0;
+  if Value > 1 then
+    Value := 1;
+  Result := (LaneWidth + VolumeSliderMargin) + Round(Value * Range);
+end;
+
+function TArrangementView.XToVolume(X: Integer): Single;
+var
+  Range: Integer;
+  Frac: Single;
+begin
+  Range := (Width - VolumeSliderMargin) - (LaneWidth + VolumeSliderMargin);
+  if Range <= 0 then
+    Exit(1.0);
+  Frac := (X - (LaneWidth + VolumeSliderMargin)) / Range;
+  if Frac < 0 then
+    Frac := 0;
+  if Frac > 1 then
+    Frac := 1;
+  Result := Frac * TrackVolumeMax;
+end;
+
+function TArrangementView.HitTestVolumeSlider(ATrackIndex, Y: Integer): Boolean;
+var
+  SliderY: Integer;
+begin
+  SliderY := RulerHeight + ATrackIndex * TrackHeight + VolumeSliderY;
+  Result := Abs(Y - SliderY) <= VolumeSliderGrabPixels;
+end;
+
 procedure TArrangementView.SelectClip(ATrack, AClip: Integer);
 begin
   if (ATrack = FSelectedTrack) and (AClip = FSelectedClip) then
@@ -270,7 +364,7 @@ begin
     Items[i].Offset := Clip.Offset;
     Items[i].Length := Clip.Length;
     Items[i].Position := Clip.Position;
-    Items[i].Gain := Clip.Gain;
+    Items[i].Gain := Clip.Gain * Project.TrackVolume[ATrackIndex];
 
     MarkerCount := Length(Clip.WarpMarkers);
     if MarkerCount > MaxClipWarpMarkers then
@@ -294,6 +388,52 @@ begin
     AudioEngineClearLoop;
 end;
 
+procedure TArrangementView.SetScrollFrame(AFrame: Int64);
+var
+  MaxFrame: Int64;
+begin
+  if AFrame < 0 then
+    AFrame := 0;
+  MaxFrame := ContentEndFrame;
+  if AFrame > MaxFrame then
+    AFrame := MaxFrame;
+  if AFrame = FScrollFrame then
+    Exit;
+  FScrollFrame := AFrame;
+  UpdateScrollBarRange;
+  Invalidate;
+end;
+
+procedure TArrangementView.UpdateScrollBarRange;
+var
+  TotalPixels, Page: Integer;
+begin
+  if not Assigned(FHScrollBar) then
+    Exit;
+  TotalPixels := FrameToAbsoluteX(ContentEndFrame);
+  Page := LaneWidth;
+  if Page < 1 then
+    Page := 1;
+  if TotalPixels < Page then
+    TotalPixels := Page;
+
+  FHScrollBar.Min := 0;
+  FHScrollBar.Max := TotalPixels;
+  FHScrollBar.PageSize := Page;
+  FHScrollBar.SmallChange := AutoScrollMarginPixels;
+  FHScrollBar.LargeChange := Page;
+  FHScrollBar.Position := FrameToAbsoluteX(FScrollFrame);
+end;
+
+procedure TArrangementView.HScrollBarChange(Sender: TObject);
+var
+  NewFrame: Int64;
+begin
+  NewFrame := Round((Int64(FHScrollBar.Position) * AudioEngine.ProjectSampleRate) /
+    FPixelsPerSecond);
+  SetScrollFrame(NewFrame);
+end;
+
 procedure TArrangementView.DrawLanes;
 var
   i, x: Integer;
@@ -301,7 +441,7 @@ var
   Grid, Frame: Int64;
 begin
   Canvas.Brush.Color := clWindow;
-  Canvas.FillRect(Rect(0, RulerHeight, LaneWidth, Height));
+  Canvas.FillRect(Rect(0, RulerHeight, LaneWidth, ContentHeight));
 
   Canvas.Pen.Color := clSilver;
   for i := 0 to Project.TrackCount do
@@ -317,14 +457,14 @@ begin
     x := FrameToX(Frame);
     while x < LaneWidth do
     begin
-      Canvas.Line(x, RulerHeight, x, Height);
+      Canvas.Line(x, RulerHeight, x, ContentHeight);
       Frame := Frame + Grid;
       x := FrameToX(Frame);
     end;
   end;
 
   Canvas.Pen.Color := clBtnShadow;
-  Canvas.Line(LaneWidth, 0, LaneWidth, Height);
+  Canvas.Line(LaneWidth, 0, LaneWidth, ContentHeight);
 end;
 
 procedure TArrangementView.DrawRuler;
@@ -376,7 +516,7 @@ begin
     begin
       Canvas.Pen.Color := clGreen;
       Canvas.Pen.Width := 2;
-      Canvas.Line(xs, 0, xs, Height);
+      Canvas.Line(xs, 0, xs, ContentHeight);
       Canvas.Pen.Width := 1;
       Canvas.Brush.Color := clGreen;
       Canvas.Polygon([Point(xs - 5, 0), Point(xs + 5, 0), Point(xs, 8)]);
@@ -390,7 +530,7 @@ begin
     begin
       Canvas.Pen.Color := $0080FF;
       Canvas.Pen.Width := 2;
-      Canvas.Line(xe, 0, xe, Height);
+      Canvas.Line(xe, 0, xe, ContentHeight);
       Canvas.Pen.Width := 1;
       Canvas.Brush.Color := $0080FF;
       Canvas.Polygon([Point(xe - 5, 0), Point(xe + 5, 0), Point(xe, 8)]);
@@ -400,7 +540,7 @@ end;
 
 procedure TArrangementView.DrawTrackHeaders;
 var
-  i, y: Integer;
+  i, y, SliderY, kx: Integer;
 begin
   for i := 0 to Project.TrackCount - 1 do
   begin
@@ -415,6 +555,16 @@ begin
     Canvas.Brush.Style := bsClear;
     Canvas.TextOut(LaneWidth + 8, y + 8, 'Track ' + IntToStr(i + 1));
     Canvas.Brush.Style := bsSolid;
+
+    { simple volume slider - a plain line with a draggable knob, no readout }
+    SliderY := y + VolumeSliderY;
+    Canvas.Pen.Color := clBtnShadow;
+    Canvas.Line(LaneWidth + VolumeSliderMargin, SliderY, Width - VolumeSliderMargin, SliderY);
+    kx := VolumeKnobX(i);
+    Canvas.Brush.Color := clHighlight;
+    Canvas.Pen.Color := clWindowFrame;
+    Canvas.Ellipse(kx - VolumeSliderRadius, SliderY - VolumeSliderRadius,
+      kx + VolumeSliderRadius, SliderY + VolumeSliderRadius);
   end;
 end;
 
@@ -483,13 +633,14 @@ begin
   if (x < 0) or (x >= LaneWidth) then
     Exit;
   Canvas.Pen.Color := clRed;
-  Canvas.Line(x, 0, x, Height);
+  Canvas.Line(x, 0, x, ContentHeight);
 end;
 
 procedure TArrangementView.Paint;
 begin
   Canvas.Brush.Color := clBtnFace;
   Canvas.FillRect(Rect(LaneWidth, 0, Width, RulerHeight));
+  Canvas.FillRect(Rect(0, ContentHeight, Width, Height));
   DrawLanes;
   DrawClips;
   DrawCursor;
@@ -501,20 +652,38 @@ end;
 procedure TArrangementView.Resize;
 begin
   inherited Resize;
+  if Assigned(FHScrollBar) then
+  begin
+    FHScrollBar.SetBounds(0, ContentHeight, LaneWidth, ScrollBarHeight);
+    UpdateScrollBarRange;
+  end;
   Invalidate;
 end;
 
 procedure TArrangementView.RefreshTrack(ATrackIndex: Integer);
 begin
   PushTrackToEngine(ATrackIndex);
+  UpdateScrollBarRange;
   Invalidate;
 end;
 
 procedure TArrangementView.SetCursorFrame(AFrameOffset: Int64);
+var
+  x: Integer;
+  MarginFrames: Int64;
 begin
   if AFrameOffset = FCursorFrame then
     Exit;
   FCursorFrame := AFrameOffset;
+
+  x := FrameToX(AFrameOffset);
+  if (x < 0) or (x >= LaneWidth) then
+  begin
+    MarginFrames := Round(Int64(AutoScrollMarginPixels) * AudioEngine.ProjectSampleRate /
+      FPixelsPerSecond);
+    SetScrollFrame(AFrameOffset - MarginFrames);
+  end;
+
   Invalidate;
 end;
 
@@ -601,6 +770,15 @@ begin
 
   TrackIndex := TrackIndexAtY(Y);
 
+  if (TrackIndex >= 0) and (X >= LaneWidth) and HitTestVolumeSlider(TrackIndex, Y) then
+  begin
+    FDraggingVolumeTrack := TrackIndex;
+    Project.TrackVolume[TrackIndex] := XToVolume(X);
+    PushTrackToEngine(TrackIndex);
+    Invalidate;
+    Exit;
+  end;
+
   if TrackIndex < 0 then
   begin
     SelectClip(-1, -1);
@@ -655,6 +833,14 @@ var
   TargetTrack: Integer;
 begin
   inherited MouseMove(Shift, X, Y);
+
+  if FDraggingVolumeTrack >= 0 then
+  begin
+    Project.TrackVolume[FDraggingVolumeTrack] := XToVolume(X);
+    PushTrackToEngine(FDraggingVolumeTrack);
+    Invalidate;
+    Exit;
+  end;
 
   if not FDragActive then
     Exit;
@@ -720,6 +906,8 @@ var
   OrigTrack: Integer;
 begin
   inherited MouseUp(Button, Shift, X, Y);
+
+  FDraggingVolumeTrack := -1;
 
   if not FDragActive then
     Exit;

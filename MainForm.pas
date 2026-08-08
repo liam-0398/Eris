@@ -512,6 +512,8 @@ end;
 
 procedure TForm1.StopClick(Sender: TObject);
 begin
+  if AudioEngineRecordState <> RecordStateIdle then
+    FinalizeRecording;
   AudioEngineStop;
   AudioEngineSeek(0);
   FArrangementView.SetCursorFrame(0);
@@ -520,19 +522,20 @@ end;
 
 procedure TForm1.PlayPauseClick(Sender: TObject);
 begin
+  if AudioEngineIsPlaying then
+  begin
+    if AudioEngineRecordState <> RecordStateIdle then
+      FinalizeRecording;
+    AudioEngineStop;
+    FPlayPauseButton.Caption := 'Play';
+    Exit;
+  end;
+
   if not AudioEngineHasClip then
     Exit;
 
-  if AudioEngineIsPlaying then
-  begin
-    AudioEngineStop;
-    FPlayPauseButton.Caption := 'Play';
-  end
-  else
-  begin
-    AudioEnginePlay;
-    FPlayPauseButton.Caption := 'Pause';
-  end;
+  AudioEnginePlay;
+  FPlayPauseButton.Caption := 'Pause';
 end;
 
 procedure TForm1.RecordClick(Sender: TObject);
@@ -827,7 +830,7 @@ begin
   Sample := Project.SamplePool[SampleID];
   TotalOffset := ASemitoneOffset + Project.TrackOctave[Track] * 12;
   AudioEngineTriggerNote(Track, Sample.Data, Sample.FrameCount, Sample.Channels,
-    TotalOffset, 1.0);
+    TotalOffset, Project.TrackVolume[Track]);
 end;
 
 procedure TForm1.PlaybackPollTimerTimer(Sender: TObject);
