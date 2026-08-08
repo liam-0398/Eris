@@ -97,6 +97,7 @@ type
     procedure WarpEditorClipChanged(Sender: TObject);
     procedure InstrumentEditorChanged(Sender: TObject);
     procedure WarpRepitchToggleClick(Sender: TObject);
+    procedure UpdateWarpRepitchToggleLook;
     procedure WarpZoomInClick(Sender: TObject);
     procedure WarpZoomOutClick(Sender: TObject);
     procedure InstrumentZoomInClick(Sender: TObject);
@@ -436,15 +437,19 @@ begin
   FWarpWidget.Caption := '';
 
   WarpButtonsPanel := AddZoomButtons(FWarpWidget, @WarpZoomInClick, @WarpZoomOutClick);
+  WarpButtonsPanel.Width := 34; { a bit wider than the plain zoom column, so the toggle isn't tiny }
 
   { Re-Pitch toggle - the classic continuous vari-speed warp (same tech as
     keyboard pitch-shifting), as an alternative to the default Beats mode.
-    Lives in the same left-side handle as the zoom +/- buttons. }
+    Lives in the same left-side handle as the zoom +/- buttons. State is
+    shown by color/caption, not just the native pressed-look, which is too
+    subtle to notice at a glance. }
   FWarpRepitchToggle := TSpeedButton.Create(Self);
   FWarpRepitchToggle.Parent := WarpButtonsPanel;
   FWarpRepitchToggle.Caption := 'RP';
   FWarpRepitchToggle.Align := alBottom;
-  FWarpRepitchToggle.Height := 24;
+  FWarpRepitchToggle.Height := 40;
+  FWarpRepitchToggle.Font.Style := [fsBold];
   FWarpRepitchToggle.ShowHint := True;
   FWarpRepitchToggle.Hint := 'Re-Pitch warp mode (continuous vari-speed, changes pitch)' +
     LineEnding + 'instead of the default Beats mode (preserves pitch)';
@@ -903,6 +908,7 @@ begin
     FWarpRepitchToggle.Down :=
       Project.Tracks[FArrangementView.SelectedTrack].Clips[FArrangementView.SelectedClipIndex].WarpMode
       = SampleTypes.WarpModeRePitch;
+    UpdateWarpRepitchToggleLook;
   end
   else
     FWarpWidget.Visible := False;
@@ -932,6 +938,7 @@ begin
     (ClipIdx > High(Project.Tracks[Track].Clips)) then
   begin
     FWarpRepitchToggle.Down := False; { nothing selected - nothing to toggle }
+    UpdateWarpRepitchToggleLook;
     Exit;
   end;
 
@@ -940,8 +947,23 @@ begin
   else
     Project.Tracks[Track].Clips[ClipIdx].WarpMode := SampleTypes.WarpModeBeats;
 
+  UpdateWarpRepitchToggleLook;
   FArrangementView.RefreshTrack(Track);
   FWarpEditor.Invalidate;
+end;
+
+procedure TForm1.UpdateWarpRepitchToggleLook;
+begin
+  if FWarpRepitchToggle.Down then
+  begin
+    FWarpRepitchToggle.Caption := 'RP';
+    FWarpRepitchToggle.Font.Color := clRed;
+  end
+  else
+  begin
+    FWarpRepitchToggle.Caption := 'RP';
+    FWarpRepitchToggle.Font.Color := clWindowText;
+  end;
 end;
 
 procedure TForm1.WarpZoomInClick(Sender: TObject);

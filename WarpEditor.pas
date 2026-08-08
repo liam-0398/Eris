@@ -106,8 +106,22 @@ function TWarpEditor.GetClip(out AClip: TClip): Boolean;
 begin
   Result := (FTrackIndex >= 0) and (FTrackIndex < Project.TrackCount) and
     (FClipIndex >= 0) and (FClipIndex <= High(Project.Tracks[FTrackIndex].Clips));
-  if Result then
-    AClip := Project.Tracks[FTrackIndex].Clips[FClipIndex];
+  if not Result then
+    Exit;
+  AClip := Project.Tracks[FTrackIndex].Clips[FClipIndex];
+
+  { self-healing default: every fetch (not just the first SetClip after
+    selection) guarantees at least a start and end marker, so nothing else
+    touching WarpMarkers can leave the editor with none to show/drag }
+  if Length(AClip.WarpMarkers) < 2 then
+  begin
+    SetLength(AClip.WarpMarkers, 2);
+    AClip.WarpMarkers[0].SourceFrame := 0;
+    AClip.WarpMarkers[0].TimelineFrame := 0;
+    AClip.WarpMarkers[1].SourceFrame := AClip.Length;
+    AClip.WarpMarkers[1].TimelineFrame := AClip.Length;
+    Project.Tracks[FTrackIndex].Clips[FClipIndex] := AClip;
+  end;
 end;
 
 procedure TWarpEditor.SetClipData(const AClip: TClip);
@@ -278,7 +292,7 @@ begin
   begin
     x := FrameToX(AClip.WarpMarkers[i].TimelineFrame);
     if i = 0 then
-      Canvas.Pen.Color := clGray
+      Canvas.Pen.Color := clBlue
     else if i = High(AClip.WarpMarkers) then
       Canvas.Pen.Color := clRed
     else
@@ -333,20 +347,7 @@ begin
   FTrackIndex := ATrackIndex;
   FClipIndex := AClipIndex;
   FDragMarkerIndex := -1;
-
-  if GetClip(Clip) then
-  begin
-    if Length(Clip.WarpMarkers) < 2 then
-    begin
-      SetLength(Clip.WarpMarkers, 2);
-      Clip.WarpMarkers[0].SourceFrame := 0;
-      Clip.WarpMarkers[0].TimelineFrame := 0;
-      Clip.WarpMarkers[1].SourceFrame := Clip.Length;
-      Clip.WarpMarkers[1].TimelineFrame := Clip.Length;
-      Project.Tracks[FTrackIndex].Clips[FClipIndex] := Clip;
-    end;
-  end;
-
+  GetClip(Clip); { triggers GetClip's own default-marker repair }
   Invalidate;
 end;
 

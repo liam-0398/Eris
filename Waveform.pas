@@ -24,12 +24,15 @@ function ComputeWaveformPeaks(const ASample: TSample): TWaveformPeaks;
   relative to the clip's Offset; an empty/short AMarkers means unwarped 1:1
   playback.
 
-  Each marker-to-marker segment always plays back at 1:1 (pitch untouched):
-  if the segment needs to be longer than its natural length, the tail is
-  looped to fill the extra time; if shorter, the tail is simply skipped.
-  This matches Ableton's "Beats" warp mode rather than a continuous
-  vari-speed/Re-Pitch resample across the whole segment - nudging one marker
-  no longer detunes the whole span, only the one adjusted segment.
+  Each marker-to-marker segment is subdivided into small grains (roughly
+  WarpGrainMs each, approximating transient-bounded slices) that all play
+  back at 1:1 (pitch untouched): a grain that needs more time than it
+  naturally has plays forward to its end, then ping-pongs (back-and-forth)
+  near its own midpoint to fill the rest, matching Ableton's "Beats" mode
+  "Loop Back-and-Forth" transient loop - a grain that needs less time just
+  gets cut short. This is a world apart from a continuous vari-speed/Re-Pitch
+  resample across the whole segment - nudging one marker only affects the
+  one adjusted segment's grains, not the whole clip's pitch.
 
   AData/AFrameCount/AChannels are optional: when supplied, loop and
   truncation cut points are snapped to nearby zero crossings to avoid
@@ -67,11 +70,13 @@ function WarpedSourcePosition(const AMarkers: TWarpMarkerArray;
   by the segment's full natural length, so truncating the segment for the
   right half would shrink that reference and reconstruct a different (wrong)
   loop - there's no marker pair that reproduces a partial loop exactly. This
-  snap-forward only applies in Beats mode; in RePitch mode a segment is a
-  plain linear resample and can be split cleanly anywhere. }
+  snap-forward only applies in Beats mode (and only pushes forward to the
+  grain's own end, not the whole segment's, now that segments are subdivided
+  into small grains); in RePitch mode a segment is a plain linear resample
+  and can be split cleanly anywhere. }
 function SplitWarpMarkers(const AMarkers: TWarpMarkerArray; ASplitFrame: Int64;
   out ALeftMarkers, ARightMarkers: TWarpMarkerArray;
-  AWarpMode: Integer = WarpModeBeats): Int64;
+  AWarpMode: Integer = WarpModeBeats; ASampleRate: Integer = 44100): Int64;
 
 { Draws the waveform for [AStartFrame, AEndFrame) of a sample (out of
   ATotalFrameCount frames covered by APeaks) into ARect. When AMarkers has
@@ -137,7 +142,7 @@ begin
 end;
 
 const
-  WarpLoopWindowMs = 50;
+  WarpGrainMs = 120;
   WarpZeroCrossSearchFrames = 32;
 
 function FindNearestZeroCrossing(AData: PSingle; AFrameCount, AChannels: Integer;
@@ -184,7 +189,10 @@ var
   k: Integer;
   SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen: Int64;
   OffsetIntoSeg, StopPoint, SnappedStop, CandidatePos: Int64;
-  Overflow, LoopWindow, LoopStart, LoopEnd, ActualLoopWindow: Int64;
+  GrainSourceLen, GrainCount, GrainIndex: Int64;
+  GrainTimelineLenF: Double;
+  GrainStartTimeline, GrainStartSource, GrainOffsetIntoGrain: Int64;
+  Overflow, LoopRegionStart, LoopRegionEnd, LoopLen, Period, Phase: Int64;
 begin
   if Length(AMarkers) < 2 then
     Exit(ATimelineFrame);
@@ -212,46 +220,75 @@ begin
   if SegSourceLen <= 0 then
     Exit(SegStartSource);
 
-  if OffsetIntoSeg < SegSourceLen then
+  { Beats: subdivide into small grains and distribute the stretch/compression
+    evenly across them - see AudioEngine.ClipSourcePosition for the full
+    rationale (this is the shared/offline-safe copy of the same algorithm). }
+  GrainSourceLen := (WarpGrainMs * ASampleRate) div 1000;
+  if GrainSourceLen > SegSourceLen then
+    GrainSourceLen := SegSourceLen;
+  if GrainSourceLen < 1 then
+    GrainSourceLen := 1;
+  GrainCount := SegSourceLen div GrainSourceLen;
+  if GrainCount < 1 then
+    GrainCount := 1;
+  GrainSourceLen := SegSourceLen div GrainCount;
+
+  GrainTimelineLenF := SegTimelineLen / GrainCount;
+  GrainIndex := Trunc(OffsetIntoSeg / GrainTimelineLenF);
+  if GrainIndex >= GrainCount then
+    GrainIndex := GrainCount - 1;
+  GrainStartTimeline := Trunc(GrainIndex * GrainTimelineLenF);
+  GrainStartSource := SegStartSource + GrainIndex * GrainSourceLen;
+  GrainOffsetIntoGrain := OffsetIntoSeg - GrainStartTimeline;
+
+  if GrainOffsetIntoGrain < GrainSourceLen then
   begin
-    if SegTimelineLen < SegSourceLen then
+    if GrainTimelineLenF < GrainSourceLen then
     begin
-      StopPoint := SegStartSource + SegTimelineLen;
+      StopPoint := GrainStartSource + Trunc(GrainTimelineLenF);
       SnappedStop := FindNearestZeroCrossing(AData, AFrameCount, AChannels,
         StopPoint, WarpZeroCrossSearchFrames);
-      CandidatePos := SegStartSource + OffsetIntoSeg;
+      CandidatePos := GrainStartSource + GrainOffsetIntoGrain;
       if CandidatePos >= SnappedStop then
         Exit(SnappedStop);
       Exit(CandidatePos);
     end;
-    Exit(SegStartSource + OffsetIntoSeg);
+    Exit(GrainStartSource + GrainOffsetIntoGrain);
   end;
 
-  Overflow := OffsetIntoSeg - SegSourceLen;
-  LoopWindow := (WarpLoopWindowMs * ASampleRate) div 1000;
-  if LoopWindow > SegSourceLen then
-    LoopWindow := SegSourceLen;
-  if LoopWindow < 1 then
-    LoopWindow := 1;
+  { ping-pong (Ableton's "Loop Back-and-Forth") within the back half of this
+    grain to fill extra time, instead of a forward-repeat that tends to
+    sound like an obvious loop }
+  Overflow := GrainOffsetIntoGrain - GrainSourceLen;
+  LoopRegionStart := FindNearestZeroCrossing(AData, AFrameCount, AChannels,
+    GrainStartSource + GrainSourceLen div 2, WarpZeroCrossSearchFrames);
+  LoopRegionEnd := FindNearestZeroCrossing(AData, AFrameCount, AChannels,
+    GrainStartSource + GrainSourceLen, WarpZeroCrossSearchFrames);
+  { never snap PAST the grain's own natural boundary - only earlier, so the
+    loop can never read into the next grain (or past the segment's end) }
+  if LoopRegionEnd > GrainStartSource + GrainSourceLen then
+    LoopRegionEnd := GrainStartSource + GrainSourceLen;
 
-  LoopStart := FindNearestZeroCrossing(AData, AFrameCount, AChannels,
-    SegStartSource + SegSourceLen - LoopWindow, WarpZeroCrossSearchFrames);
-  LoopEnd := FindNearestZeroCrossing(AData, AFrameCount, AChannels,
-    SegStartSource + SegSourceLen, WarpZeroCrossSearchFrames);
-
-  ActualLoopWindow := LoopEnd - LoopStart;
-  if ActualLoopWindow < 1 then
-    ActualLoopWindow := 1;
-
-  Result := LoopStart + (Overflow mod ActualLoopWindow);
+  LoopLen := LoopRegionEnd - LoopRegionStart;
+  if LoopLen < 1 then
+    LoopLen := 1;
+  Period := 2 * LoopLen;
+  Phase := Overflow mod Period;
+  if Phase < LoopLen then
+    Result := LoopRegionEnd - Phase
+  else
+    Result := LoopRegionStart + (Phase - LoopLen);
 end;
 
 function SplitWarpMarkers(const AMarkers: TWarpMarkerArray; ASplitFrame: Int64;
-  out ALeftMarkers, ARightMarkers: TWarpMarkerArray; AWarpMode: Integer): Int64;
+  out ALeftMarkers, ARightMarkers: TWarpMarkerArray; AWarpMode: Integer;
+  ASampleRate: Integer): Int64;
 var
   i, cnt, k: Integer;
   SplitSource: Int64;
   SegStartTimeline, SegSourceLen, SegTimelineLen, OffsetIntoSeg: Int64;
+  GrainSourceLen, GrainCount, GrainIndex, GrainStartTimeline, GrainOffsetIntoGrain: Int64;
+  GrainTimelineLenF: Double;
 begin
   ALeftMarkers := nil;
   ARightMarkers := nil;
@@ -263,14 +300,6 @@ begin
   if ASplitFrame > AMarkers[High(AMarkers)].TimelineFrame then
     ASplitFrame := AMarkers[High(AMarkers)].TimelineFrame;
 
-  { a cut strictly inside a stretched (looped) segment can't be represented
-    by simply rebasing that segment's end marker: the loop-fill math is
-    driven by the segment's full natural length, and truncating the segment
-    for the right half would shrink that reference and reconstruct a
-    completely different (and wrong) loop window. Snap forward to that
-    segment's own end instead - splitting is still exact for every other
-    case (natural-rate segments, compressed segments, or a cut already
-    sitting on an existing marker). }
   k := 0;
   while (k < Length(AMarkers) - 2) and (ASplitFrame >= AMarkers[k + 1].TimelineFrame) do
     Inc(k);
@@ -278,9 +307,42 @@ begin
   SegTimelineLen := AMarkers[k + 1].TimelineFrame - SegStartTimeline;
   SegSourceLen := AMarkers[k + 1].SourceFrame - AMarkers[k].SourceFrame;
   OffsetIntoSeg := ASplitFrame - SegStartTimeline;
+
   if (AWarpMode = WarpModeBeats) and (OffsetIntoSeg > 0) and
-    (OffsetIntoSeg < SegTimelineLen) and (SegTimelineLen > SegSourceLen) then
-    ASplitFrame := AMarkers[k + 1].TimelineFrame;
+    (OffsetIntoSeg < SegTimelineLen) and (SegTimelineLen > SegSourceLen) and
+    (SegSourceLen > 0) then
+  begin
+    { a cut strictly inside one grain's ping-pong loop zone can't be
+      represented by simply rebasing markers there: the loop math is driven
+      by that grain's own natural length, and truncating it for the right
+      half would reconstruct a different (wrong) loop. Snap forward to that
+      GRAIN's own end (not the whole segment's, now that segments are
+      subdivided into small grains - see WarpedSourcePosition) - a much
+      smaller nudge than the old whole-segment snap. }
+    GrainSourceLen := (WarpGrainMs * ASampleRate) div 1000;
+    if GrainSourceLen > SegSourceLen then
+      GrainSourceLen := SegSourceLen;
+    if GrainSourceLen < 1 then
+      GrainSourceLen := 1;
+    GrainCount := SegSourceLen div GrainSourceLen;
+    if GrainCount < 1 then
+      GrainCount := 1;
+    GrainSourceLen := SegSourceLen div GrainCount;
+
+    GrainTimelineLenF := SegTimelineLen / GrainCount;
+    GrainIndex := Trunc(OffsetIntoSeg / GrainTimelineLenF);
+    if GrainIndex >= GrainCount then
+      GrainIndex := GrainCount - 1;
+    GrainStartTimeline := Trunc(GrainIndex * GrainTimelineLenF);
+    GrainOffsetIntoGrain := OffsetIntoSeg - GrainStartTimeline;
+
+    if GrainOffsetIntoGrain >= GrainSourceLen then
+    begin
+      ASplitFrame := SegStartTimeline + Trunc((GrainIndex + 1) * GrainTimelineLenF);
+      if ASplitFrame > AMarkers[k + 1].TimelineFrame then
+        ASplitFrame := AMarkers[k + 1].TimelineFrame;
+    end;
+  end;
 
   Result := ASplitFrame;
 
@@ -291,7 +353,7 @@ begin
     SplitSource := AMarkers[High(AMarkers)].SourceFrame
   else
     SplitSource := Round(WarpedSourcePosition(AMarkers, ASplitFrame, nil, 0, 0,
-      44100, AWarpMode));
+      ASampleRate, AWarpMode));
 
   cnt := 0;
   for i := 0 to High(AMarkers) do

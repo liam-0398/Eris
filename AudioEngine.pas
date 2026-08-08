@@ -283,10 +283,12 @@ begin
 end;
 
 const
-  { how much of a stretched segment's tail gets looped to fill extra time,
-    rather than slowing the whole segment down - keeps pitch untouched,
-    matching Ableton's "Beats" warp mode rather than vari-speed/Re-Pitch }
-  WarpLoopWindowMs = 50;
+  { Beats mode subdivides a warp segment into grains roughly this long
+    (approximating transient-bounded slices without real onset detection),
+    each independently looped/truncated to fill its share of the
+    stretch/compression - keeps pitch untouched, matching Ableton's "Beats"
+    warp mode rather than vari-speed/Re-Pitch }
+  WarpGrainMs = 120;
   { small local search window used to land loop/truncate cut points on a
     near-silent sample, so the splice doesn't click }
   WarpZeroCrossSearchFrames = 32;
@@ -333,7 +335,10 @@ var
   k: Integer;
   SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen: Int64;
   OffsetIntoSeg, StopPoint, SnappedStop, CandidatePos: Int64;
-  Overflow, LoopWindow, LoopStart, LoopEnd, ActualLoopWindow: Int64;
+  GrainSourceLen, GrainCount, GrainIndex: Int64;
+  GrainTimelineLenF: Double;
+  GrainStartTimeline, GrainStartSource, GrainOffsetIntoGrain: Int64;
+  Overflow, LoopRegionStart, LoopRegionEnd, LoopLen, Period, Phase: Int64;
 begin
   if Clip^.MarkerCount < 2 then
     Exit(AClipRelativeFrame);
@@ -366,48 +371,76 @@ begin
   if SegSourceLen <= 0 then
     Exit(SegStartSource);
 
-  if OffsetIntoSeg < SegSourceLen then
+  { Beats: subdivide the segment into many small grains (roughly WarpGrainMs
+    each) instead of treating the whole marker-to-marker span as one
+    loop/truncate unit, and distribute the stretch/compression evenly across
+    all of them. This is what real transient-preserving time-stretch does
+    (Ableton's Beats mode slices at every transient, not just at the two
+    warp markers you placed) - one big loop repeat at the tail of a long
+    segment is what makes a stretch sound like an obvious loop; many small
+    grains is what makes it sound natural. }
+  GrainSourceLen := (WarpGrainMs * ProjectSampleRate) div 1000;
+  if GrainSourceLen > SegSourceLen then
+    GrainSourceLen := SegSourceLen;
+  if GrainSourceLen < 1 then
+    GrainSourceLen := 1;
+  GrainCount := SegSourceLen div GrainSourceLen;
+  if GrainCount < 1 then
+    GrainCount := 1;
+  GrainSourceLen := SegSourceLen div GrainCount; { re-tile evenly, no remainder grain }
+
+  GrainTimelineLenF := SegTimelineLen / GrainCount;
+  GrainIndex := Trunc(OffsetIntoSeg / GrainTimelineLenF);
+  if GrainIndex >= GrainCount then
+    GrainIndex := GrainCount - 1;
+  GrainStartTimeline := Trunc(GrainIndex * GrainTimelineLenF);
+  GrainStartSource := SegStartSource + GrainIndex * GrainSourceLen;
+  GrainOffsetIntoGrain := OffsetIntoSeg - GrainStartTimeline;
+
+  if GrainOffsetIntoGrain < GrainSourceLen then
   begin
-    { natural, un-stretched playback - always straight 1:1 through the
-      source, pitch untouched, rather than a continuous vari-speed resample
-      across the whole segment }
-    if SegTimelineLen < SegSourceLen then
+    { natural, un-stretched playback within this grain }
+    if GrainTimelineLenF < GrainSourceLen then
     begin
-      { this segment needs to end up SHORTER than its natural length - land
-        on a nearby zero crossing instead of hard-cutting exactly at the
-        marker, so the handover to the next segment doesn't click }
-      StopPoint := SegStartSource + SegTimelineLen;
+      { this grain needs to end up SHORTER than its natural length - land on
+        a nearby zero crossing instead of hard-cutting, so the handover to
+        the next grain doesn't click }
+      StopPoint := GrainStartSource + Trunc(GrainTimelineLenF);
       SnappedStop := FindNearestZeroCrossing(Clip^.Data, Clip^.FrameCount,
         Clip^.Channels, StopPoint, WarpZeroCrossSearchFrames);
-      CandidatePos := SegStartSource + OffsetIntoSeg;
+      CandidatePos := GrainStartSource + GrainOffsetIntoGrain;
       if CandidatePos >= SnappedStop then
         Exit(SnappedStop);
       Exit(CandidatePos);
     end;
-    Exit(SegStartSource + OffsetIntoSeg);
+    Exit(GrainStartSource + GrainOffsetIntoGrain);
   end;
 
-  { past the natural end but the segment needs to be LONGER - loop a short
-    tail window (snapped to zero crossings on both ends) to fill the extra
-    time instead of slowing playback down }
-  Overflow := OffsetIntoSeg - SegSourceLen;
-  LoopWindow := (WarpLoopWindowMs * ProjectSampleRate) div 1000;
-  if LoopWindow > SegSourceLen then
-    LoopWindow := SegSourceLen;
-  if LoopWindow < 1 then
-    LoopWindow := 1;
+  { this grain needs to be LONGER - ping-pong (play forward to the grain's
+    end, then backward to a zero crossing near its middle, then forward
+    again) to fill the extra time, rather than a crude forward-repeat which
+    tends to sound like an obvious loop. Matches Ableton's "Loop
+    Back-and-Forth" transient loop mode, the one their own docs call out as
+    giving the highest-quality result. }
+  Overflow := GrainOffsetIntoGrain - GrainSourceLen;
+  LoopRegionStart := FindNearestZeroCrossing(Clip^.Data, Clip^.FrameCount,
+    Clip^.Channels, GrainStartSource + GrainSourceLen div 2, WarpZeroCrossSearchFrames);
+  LoopRegionEnd := FindNearestZeroCrossing(Clip^.Data, Clip^.FrameCount,
+    Clip^.Channels, GrainStartSource + GrainSourceLen, WarpZeroCrossSearchFrames);
+  { never snap PAST the grain's own natural boundary - only earlier, so the
+    loop can never read into the next grain (or past the segment's end) }
+  if LoopRegionEnd > GrainStartSource + GrainSourceLen then
+    LoopRegionEnd := GrainStartSource + GrainSourceLen;
 
-  LoopStart := FindNearestZeroCrossing(Clip^.Data, Clip^.FrameCount,
-    Clip^.Channels, SegStartSource + SegSourceLen - LoopWindow,
-    WarpZeroCrossSearchFrames);
-  LoopEnd := FindNearestZeroCrossing(Clip^.Data, Clip^.FrameCount,
-    Clip^.Channels, SegStartSource + SegSourceLen, WarpZeroCrossSearchFrames);
-
-  ActualLoopWindow := LoopEnd - LoopStart;
-  if ActualLoopWindow < 1 then
-    ActualLoopWindow := 1;
-
-  Result := LoopStart + (Overflow mod ActualLoopWindow);
+  LoopLen := LoopRegionEnd - LoopRegionStart;
+  if LoopLen < 1 then
+    LoopLen := 1;
+  Period := 2 * LoopLen;
+  Phase := Overflow mod Period;
+  if Phase < LoopLen then
+    Result := LoopRegionEnd - Phase
+  else
+    Result := LoopRegionStart + (Phase - LoopLen);
 end;
 
 procedure FillBlock;
