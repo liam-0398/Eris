@@ -22,6 +22,8 @@ type
     Gain: Single;
   end;
 
+  TClipArray = array of TClip;
+
 implementation
 
 end.

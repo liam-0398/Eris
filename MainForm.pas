@@ -7,7 +7,7 @@ interface
 uses
   Classes, SysUtils, Forms, Controls, Graphics, Dialogs, Menus, ExtCtrls,
   StdCtrls, ArrangementView, PrefsForm, FileBrowser, SampleTypes, WavDecoder,
-  AudioEngine;
+  AudioEngine, Project;
 
 type
   TForm1 = class(TForm)
@@ -15,6 +15,8 @@ type
     FMainMenu: TMainMenu;
     FTransportPanel: TPanel;
     FPlayPauseButton: TButton;
+    FTempoLabel: TLabel;
+    FTempoEdit: TEdit;
     FFileBrowser: TFileBrowser;
     FFileBrowserSplitter: TSplitter;
     FArrangementView: TArrangementView;
@@ -22,20 +24,20 @@ type
     FDevicePanel: TPanel;
     FDevicePanelLabel: TLabel;
     FPlaybackPollTimer: TTimer;
-    FSamplePool: array of TSample;
 
     procedure BuildMenu;
     procedure BuildLayout;
-    procedure AddToSamplePool(const ASample: TSample);
 
     procedure FileExitClick(Sender: TObject);
     procedure EditPreferencesClick(Sender: TObject);
+    procedure EditUndoClick(Sender: TObject);
     procedure HelpAboutClick(Sender: TObject);
     procedure PlayPauseClick(Sender: TObject);
     procedure TransportPanelResize(Sender: TObject);
+    procedure TempoEditEditingDone(Sender: TObject);
     procedure ArrangementViewFileDrop(Sender: TObject; ATrackIndex: Integer;
-      const AFilePath: string);
-    procedure ArrangementViewSeek(Sender: TObject; AFrameOffset: Integer);
+      AFramePosition: Int64; const AFilePath: string);
+    procedure ArrangementViewSeek(Sender: TObject; AFrameOffset: Int64);
     procedure PlaybackPollTimerTimer(Sender: TObject);
   public
     constructor Create(AOwner: TComponent); override;
@@ -63,9 +65,9 @@ var
   i: Integer;
 begin
   AudioEngineShutdown;
-  for i := 0 to High(FSamplePool) do
-    if FSamplePool[i].Data <> nil then
-      FreeMem(FSamplePool[i].Data);
+  for i := 0 to High(Project.SamplePool) do
+    if Project.SamplePool[i].Data <> nil then
+      FreeMem(Project.SamplePool[i].Data);
   inherited Destroy;
 end;
 
@@ -93,7 +95,7 @@ procedure TForm1.BuildMenu;
   end;
 
 var
-  FileMenu, EditMenu, ViewMenu, TrackMenu, HelpMenu: TMenuItem;
+  FileMenu, EditMenu, ViewMenu, TrackMenu, HelpMenu, UndoItem: TMenuItem;
 begin
   FMainMenu := TMainMenu.Create(Self);
   Menu := FMainMenu;
@@ -109,7 +111,8 @@ begin
   AddItem(FileMenu, 'E&xit', @FileExitClick);
 
   EditMenu := AddMenu('&Edit');
-  AddItem(EditMenu, '&Undo', nil);
+  UndoItem := AddItem(EditMenu, '&Undo', @EditUndoClick);
+  UndoItem.ShortCut := Menus.ShortCut(Ord('Z'), [ssCtrl]);
   AddSeparator(EditMenu);
   AddItem(EditMenu, '&Preferences...', @EditPreferencesClick);
 
@@ -135,6 +138,20 @@ begin
   FTransportPanel.Height := 40;
   FTransportPanel.BevelOuter := bvNone;
   FTransportPanel.OnResize := @TransportPanelResize;
+
+  FTempoLabel := TLabel.Create(Self);
+  FTempoLabel.Parent := FTransportPanel;
+  FTempoLabel.Caption := 'Tempo:';
+  FTempoLabel.Left := 8;
+  FTempoLabel.Top := 12;
+
+  FTempoEdit := TEdit.Create(Self);
+  FTempoEdit.Parent := FTransportPanel;
+  FTempoEdit.Text := IntToStr(Round(Project.DefaultTempoBPM));
+  FTempoEdit.Left := 56;
+  FTempoEdit.Top := 8;
+  FTempoEdit.Width := 50;
+  FTempoEdit.OnEditingDone := @TempoEditEditingDone;
 
   FPlayPauseButton := TButton.Create(Self);
   FPlayPauseButton.Parent := FTransportPanel;
@@ -182,12 +199,6 @@ begin
   FPlaybackPollTimer.Enabled := True;
 end;
 
-procedure TForm1.AddToSamplePool(const ASample: TSample);
-begin
-  SetLength(FSamplePool, Length(FSamplePool) + 1);
-  FSamplePool[High(FSamplePool)] := ASample;
-end;
-
 procedure TForm1.FileExitClick(Sender: TObject);
 begin
   Close;
@@ -202,6 +213,17 @@ begin
     Dlg.ShowModal;
   finally
     Dlg.Free;
+  end;
+end;
+
+procedure TForm1.EditUndoClick(Sender: TObject);
+var
+  TrackIndex: Integer;
+begin
+  if Project.PopUndo(TrackIndex) then
+  begin
+    FArrangementView.ClearSelection;
+    FArrangementView.RefreshTrack(TrackIndex);
   end;
 end;
 
@@ -233,10 +255,26 @@ begin
   FPlayPauseButton.Top := (FTransportPanel.ClientHeight - FPlayPauseButton.Height) div 2;
 end;
 
+procedure TForm1.TempoEditEditingDone(Sender: TObject);
+var
+  Value: Integer;
+begin
+  if not TryStrToInt(Trim(FTempoEdit.Text), Value) then
+    Value := Round(Project.DefaultTempoBPM);
+  if Value < 20 then
+    Value := 20
+  else if Value > 999 then
+    Value := 999;
+  FTempoEdit.Text := IntToStr(Value);
+  Project.TempoBPM := Value;
+  FArrangementView.Invalidate;
+end;
+
 procedure TForm1.ArrangementViewFileDrop(Sender: TObject; ATrackIndex: Integer;
-  const AFilePath: string);
+  AFramePosition: Int64; const AFilePath: string);
 var
   Sample: TSample;
+  Clip: TClip;
 begin
   if not DecodeSampleFile(AFilePath, Sample) then
   begin
@@ -244,14 +282,20 @@ begin
     Exit;
   end;
 
-  AddToSamplePool(Sample);
-  AudioEnginePushLoadClip(Sample.Data, Sample.FrameCount, Sample.Channels);
-  FArrangementView.SetTrackClip(ATrackIndex, ExtractFileName(AFilePath),
-    Sample.FrameCount);
-  FPlayPauseButton.Caption := 'Play';
+  Clip.SampleID := Project.AddSampleToPool(Sample, ExtractFileName(AFilePath));
+  Clip.Offset := 0;
+  Clip.Length := Sample.FrameCount;
+  Clip.Position := AFramePosition;
+  Clip.TrackID := ATrackIndex;
+  Clip.PitchSemitones := 0;
+  Clip.Gain := 1.0;
+
+  Project.PushUndoSnapshot(ATrackIndex);
+  Project.CommitClipToTrack(ATrackIndex, Clip);
+  FArrangementView.RefreshTrack(ATrackIndex);
 end;
 
-procedure TForm1.ArrangementViewSeek(Sender: TObject; AFrameOffset: Integer);
+procedure TForm1.ArrangementViewSeek(Sender: TObject; AFrameOffset: Int64);
 begin
   AudioEngineSeek(AFrameOffset);
 end;

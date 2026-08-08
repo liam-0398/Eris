@@ -4,15 +4,31 @@ unit AudioEngine;
 
 interface
 
+const
+  ProjectSampleRate = 44100;
+
+type
+  TPlaybackClip = record
+    Data: PSingle;
+    FrameCount: Integer;
+    Channels: Integer;
+    Offset: Int64;
+    Length: Int64;
+    Position: Int64;
+    Gain: Single;
+  end;
+  PPlaybackClip = ^TPlaybackClip;
+
 procedure AudioEngineInit;
 procedure AudioEngineShutdown;
-procedure AudioEnginePushLoadClip(AData: PSingle; AFrameCount, AChannels: Integer);
+procedure AudioEngineSetTrackClips(ATrackIndex: Integer; AItems: PPlaybackClip;
+  ACount: Integer);
 procedure AudioEnginePlay;
 procedure AudioEngineStop;
-procedure AudioEngineSeek(AFrame: Integer);
+procedure AudioEngineSeek(AFrame: Int64);
 function AudioEngineIsPlaying: Boolean;
 function AudioEngineHasClip: Boolean;
-function AudioEngineGetPosition: Integer;
+function AudioEngineGetPosition: Int64;
 
 implementation
 
@@ -22,18 +38,23 @@ uses
 const
   BlockFrames = 512;
   OutputChannels = 2;
-  OutputSampleRate = 44100;
   RingBufferCapacity = 32;
+  MaxTracks = 4;
 
 type
-  TCommandKind = (ckLoadClip, ckPlay, ckStop, ckSeek);
+  TCommandKind = (ckSetTrackClips, ckPlay, ckStop, ckSeek);
 
   TCommand = record
     Kind: TCommandKind;
-    Data: PSingle;
-    FrameCount: Integer;
-    Channels: Integer;
-    Param: Integer;
+    TrackIndex: Integer;
+    Items: PPlaybackClip;
+    Count: Integer;
+    Param: Int64;
+  end;
+
+  TTrackClips = record
+    Items: PPlaybackClip;
+    Count: Integer;
   end;
 
   TPlaybackThread = class(TThread)
@@ -50,10 +71,8 @@ var
   RingHead: Integer;
   RingTail: Integer;
 
-  ClipData: PSingle;
-  ClipFrameCount: Integer;
-  ClipChannels: Integer;
-  ReadPos: Integer;
+  TrackClips: array[0..MaxTracks - 1] of TTrackClips;
+  Playhead: Int64;
   Playing: Boolean;
 
 function PushCommand(const ACmd: TCommand): Boolean;
@@ -83,69 +102,75 @@ var
 begin
   while PopCommand(Cmd) do
     case Cmd.Kind of
-      ckLoadClip:
+      ckSetTrackClips:
         begin
-          ClipData := Cmd.Data;
-          ClipFrameCount := Cmd.FrameCount;
-          ClipChannels := Cmd.Channels;
-          ReadPos := 0;
-          Playing := False;
+          TrackClips[Cmd.TrackIndex].Items := Cmd.Items;
+          TrackClips[Cmd.TrackIndex].Count := Cmd.Count;
         end;
       ckPlay:
-        if ClipData <> nil then
-        begin
-          if ReadPos >= ClipFrameCount then
-            ReadPos := 0;
-          Playing := True;
-        end;
+        Playing := True;
       ckStop:
         Playing := False;
       ckSeek:
-        if ClipData <> nil then
         begin
-          ReadPos := Cmd.Param;
-          if ReadPos < 0 then
-            ReadPos := 0
-          else if ReadPos >= ClipFrameCount then
-            ReadPos := ClipFrameCount - 1;
+          Playhead := Cmd.Param;
+          if Playhead < 0 then
+            Playhead := 0;
         end;
     end;
 end;
 
 procedure FillBlock;
 var
-  Frame, FramesLeft, SrcIdx: Integer;
+  Frame, t, i: Integer;
+  GlobalFrame, SrcFrame: Int64;
+  Clip: PPlaybackClip;
+  L, R: Single;
+  SrcIdx: Integer;
 begin
   FillChar(MixBuffer^, BlockFrames * OutputChannels * SizeOf(Single), 0);
 
   if not Playing then
     Exit;
 
-  FramesLeft := ClipFrameCount - ReadPos;
-  if FramesLeft > BlockFrames then
-    FramesLeft := BlockFrames;
-
-  for Frame := 0 to FramesLeft - 1 do
+  for Frame := 0 to BlockFrames - 1 do
   begin
-    SrcIdx := (ReadPos + Frame) * ClipChannels;
-    if ClipChannels = 1 then
-    begin
-      MixBuffer[Frame * OutputChannels] := ClipData[SrcIdx];
-      MixBuffer[Frame * OutputChannels + 1] := ClipData[SrcIdx];
-    end
-    else
-    begin
-      MixBuffer[Frame * OutputChannels] := ClipData[SrcIdx];
-      MixBuffer[Frame * OutputChannels + 1] := ClipData[SrcIdx + 1];
-    end;
+    GlobalFrame := Playhead + Frame;
+    L := 0;
+    R := 0;
+
+    for t := 0 to MaxTracks - 1 do
+      for i := 0 to TrackClips[t].Count - 1 do
+      begin
+        Clip := @(TrackClips[t].Items[i]);
+        if (GlobalFrame < Clip^.Position) or
+          (GlobalFrame >= Clip^.Position + Clip^.Length) then
+          Continue;
+
+        SrcFrame := Clip^.Offset + (GlobalFrame - Clip^.Position);
+        if (SrcFrame < 0) or (SrcFrame >= Clip^.FrameCount) then
+          Continue;
+
+        SrcIdx := SrcFrame * Clip^.Channels;
+        if Clip^.Channels = 1 then
+        begin
+          L := L + Clip^.Data[SrcIdx] * Clip^.Gain;
+          R := R + Clip^.Data[SrcIdx] * Clip^.Gain;
+        end
+        else
+        begin
+          L := L + Clip^.Data[SrcIdx] * Clip^.Gain;
+          R := R + Clip^.Data[SrcIdx + 1] * Clip^.Gain;
+        end;
+      end;
+
+    if L > 1.0 then L := 1.0 else if L < -1.0 then L := -1.0;
+    if R > 1.0 then R := 1.0 else if R < -1.0 then R := -1.0;
+    MixBuffer[Frame * OutputChannels] := L;
+    MixBuffer[Frame * OutputChannels + 1] := R;
   end;
 
-  Inc(ReadPos, FramesLeft);
-  if ReadPos >= ClipFrameCount then
-  begin
-    Playing := False;
-    ReadPos := 0;
-  end;
+  Inc(Playhead, BlockFrames);
 end;
 
 procedure TPlaybackThread.Execute;
@@ -164,19 +189,23 @@ begin
 end;
 
 procedure AudioEngineInit;
+var
+  i: Integer;
 begin
   RingHead := 0;
   RingTail := 0;
-  ClipData := nil;
-  ClipFrameCount := 0;
-  ClipChannels := 0;
-  ReadPos := 0;
+  Playhead := 0;
   Playing := False;
+  for i := 0 to MaxTracks - 1 do
+  begin
+    TrackClips[i].Items := nil;
+    TrackClips[i].Count := 0;
+  end;
 
   GetMem(MixBuffer, BlockFrames * OutputChannels * SizeOf(Single));
 
   Backend := CreateALSABackend;
-  Backend.Open(OutputSampleRate, OutputChannels, BlockFrames);
+  Backend.Open(ProjectSampleRate, OutputChannels, BlockFrames);
 
   PlaybackThread := TPlaybackThread.Create(False);
   PlaybackThread.FreeOnTerminate := False;
@@ -200,14 +229,15 @@ begin
   end;
 end;
 
-procedure AudioEnginePushLoadClip(AData: PSingle; AFrameCount, AChannels: Integer);
+procedure AudioEngineSetTrackClips(ATrackIndex: Integer; AItems: PPlaybackClip;
+  ACount: Integer);
 var
   Cmd: TCommand;
 begin
-  Cmd.Kind := ckLoadClip;
-  Cmd.Data := AData;
-  Cmd.FrameCount := AFrameCount;
-  Cmd.Channels := AChannels;
+  Cmd.Kind := ckSetTrackClips;
+  Cmd.TrackIndex := ATrackIndex;
+  Cmd.Items := AItems;
+  Cmd.Count := ACount;
   PushCommand(Cmd);
 end;
 
@@ -227,7 +257,7 @@ begin
   PushCommand(Cmd);
 end;
 
-procedure AudioEngineSeek(AFrame: Integer);
+procedure AudioEngineSeek(AFrame: Int64);
 var
   Cmd: TCommand;
 begin
@@ -242,13 +272,18 @@ begin
 end;
 
 function AudioEngineHasClip: Boolean;
+var
+  i: Integer;
 begin
-  Result := ClipData <> nil;
+  Result := False;
+  for i := 0 to MaxTracks - 1 do
+    if TrackClips[i].Count > 0 then
+      Exit(True);
 end;
 
-function AudioEngineGetPosition: Integer;
+function AudioEngineGetPosition: Int64;
 begin
-  Result := ReadPos;
+  Result := Playhead;
 end;
 
 end.
