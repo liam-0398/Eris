@@ -12,7 +12,8 @@ type
   TWarpEditor = class(TCustomControl)
   private
     const
-      PixelsPerSecond = 200;
+      DefaultPixelsPerSecond = 200;
+      MinPixelsPerSecond = 20;
       MarkerGrabPixels = 6;
       MinMarkerGapFrames = 100;
     var
@@ -20,17 +21,22 @@ type
       FClipIndex: Integer;
       FDragMarkerIndex: Integer;
       FLastMouseX: Integer;
+      FZoomPixelsPerSecond: Double;
+      FPlayheadFrame: Int64;
+      FIsPlaying: Boolean;
       FOnClipChanged: TNotifyEvent;
     function GetClip(out AClip: TClip): Boolean;
     procedure SetClipData(const AClip: TClip);
+    procedure RecomputeZoom(const AClip: TClip);
     function FrameToX(AFrame: Int64): Integer;
     function XToFrame(AX: Integer): Int64;
     function EighthNoteFrames: Int64;
-    function SourceFrameAt(const AClip: TClip; ATimelineFrame: Int64): Int64;
     function HitTestMarker(const AClip: TClip; X: Integer): Integer;
+    procedure DeleteMarker(const AClip: TClip; AIndex: Integer);
     procedure DrawGrid;
     procedure DrawClipWaveform(const AClip: TClip);
     procedure DrawMarkers(const AClip: TClip);
+    procedure DrawPlayhead(const AClip: TClip);
   protected
     procedure Paint; override;
     procedure MouseDown(Button: TMouseButton; Shift: TShiftState;
@@ -42,6 +48,7 @@ type
   public
     constructor Create(AOwner: TComponent); override;
     procedure SetClip(ATrackIndex, AClipIndex: Integer);
+    procedure SetPlayheadState(AGlobalFrame: Int64; APlaying: Boolean);
     property OnClipChanged: TNotifyEvent read FOnClipChanged write FOnClipChanged;
   end;
 
@@ -55,6 +62,7 @@ begin
   FTrackIndex := -1;
   FClipIndex := -1;
   FDragMarkerIndex := -1;
+  FZoomPixelsPerSecond := DefaultPixelsPerSecond;
 end;
 
 function TWarpEditor.GetClip(out AClip: TClip): Boolean;
@@ -75,14 +83,26 @@ begin
   Invalidate;
 end;
 
+procedure TWarpEditor.RecomputeZoom(const AClip: TClip);
+begin
+  { fit the whole clip to the widget's width, so the end marker (used to
+    adjust length) is never dragged off-screen for longer clips }
+  if (AClip.Length > 0) and (Width > 0) then
+    FZoomPixelsPerSecond := (Width * AudioEngine.ProjectSampleRate) / AClip.Length
+  else
+    FZoomPixelsPerSecond := DefaultPixelsPerSecond;
+  if FZoomPixelsPerSecond < MinPixelsPerSecond then
+    FZoomPixelsPerSecond := MinPixelsPerSecond;
+end;
+
 function TWarpEditor.FrameToX(AFrame: Int64): Integer;
 begin
-  Result := (AFrame * PixelsPerSecond) div AudioEngine.ProjectSampleRate;
+  Result := Round(AFrame * FZoomPixelsPerSecond / AudioEngine.ProjectSampleRate);
 end;
 
 function TWarpEditor.XToFrame(AX: Integer): Int64;
 begin
-  Result := (Int64(AX) * AudioEngine.ProjectSampleRate) div PixelsPerSecond;
+  Result := Round(AX * AudioEngine.ProjectSampleRate / FZoomPixelsPerSecond);
 end;
 
 function TWarpEditor.EighthNoteFrames: Int64;
@@ -91,28 +111,6 @@ var
 begin
   BeatFrames := Round((AudioEngine.ProjectSampleRate * 60) / Project.TempoBPM);
   Result := BeatFrames div 2;
-end;
-
-function TWarpEditor.SourceFrameAt(const AClip: TClip; ATimelineFrame: Int64): Int64;
-var
-  k: Integer;
-  SegTime, SegSrc: Int64;
-begin
-  if Length(AClip.WarpMarkers) < 2 then
-    Exit(ATimelineFrame);
-
-  k := 0;
-  while (k < Length(AClip.WarpMarkers) - 2) and
-    (ATimelineFrame >= AClip.WarpMarkers[k + 1].TimelineFrame) do
-    Inc(k);
-
-  SegTime := AClip.WarpMarkers[k + 1].TimelineFrame - AClip.WarpMarkers[k].TimelineFrame;
-  SegSrc := AClip.WarpMarkers[k + 1].SourceFrame - AClip.WarpMarkers[k].SourceFrame;
-  if SegTime = 0 then
-    Result := AClip.WarpMarkers[k].SourceFrame
-  else
-    Result := AClip.WarpMarkers[k].SourceFrame +
-      Round((ATimelineFrame - AClip.WarpMarkers[k].TimelineFrame) * (SegSrc / SegTime));
 end;
 
 function TWarpEditor.HitTestMarker(const AClip: TClip; X: Integer): Integer;
@@ -126,6 +124,29 @@ begin
     if Abs(X - mx) <= MarkerGrabPixels then
       Exit(i);
   end;
+end;
+
+procedure TWarpEditor.DeleteMarker(const AClip: TClip; AIndex: Integer);
+var
+  NewMarkers: TWarpMarkerArray;
+  Clip: TClip;
+  InsertAt, i: Integer;
+begin
+  if (AIndex <= 0) or (AIndex >= High(AClip.WarpMarkers)) then
+    Exit; { start and end markers can't be removed }
+
+  SetLength(NewMarkers, Length(AClip.WarpMarkers) - 1);
+  InsertAt := 0;
+  for i := 0 to High(AClip.WarpMarkers) do
+    if i <> AIndex then
+    begin
+      NewMarkers[InsertAt] := AClip.WarpMarkers[i];
+      Inc(InsertAt);
+    end;
+
+  Clip := AClip;
+  Clip.WarpMarkers := NewMarkers;
+  SetClipData(Clip);
 end;
 
 procedure TWarpEditor.DrawGrid;
@@ -155,7 +176,8 @@ begin
     Exit;
   Sample := Project.SamplePool[AClip.SampleID];
   DrawWaveform(Canvas, Rect(0, 0, Width, Height), Project.SamplePeaks[AClip.SampleID],
-    Sample.FrameCount, AClip.Offset, AClip.Offset + AClip.Length, clBlack);
+    Sample.FrameCount, AClip.Offset, AClip.Offset + AClip.Length,
+    AClip.WarpMarkers, clAqua);
 end;
 
 procedure TWarpEditor.DrawMarkers(const AClip: TClip);
@@ -179,6 +201,23 @@ begin
   end;
 end;
 
+procedure TWarpEditor.DrawPlayhead(const AClip: TClip);
+var
+  ClipRelFrame: Int64;
+  x: Integer;
+begin
+  if not FIsPlaying then
+    Exit;
+  ClipRelFrame := FPlayheadFrame - AClip.Position;
+  if (ClipRelFrame < 0) or (ClipRelFrame >= AClip.Length) then
+    Exit;
+  x := FrameToX(ClipRelFrame);
+  Canvas.Pen.Color := clYellow;
+  Canvas.Pen.Width := 2;
+  Canvas.Line(x, 0, x, Height);
+  Canvas.Pen.Width := 1;
+end;
+
 procedure TWarpEditor.Paint;
 var
   Clip: TClip;
@@ -192,6 +231,7 @@ begin
   DrawClipWaveform(Clip);
   DrawGrid;
   DrawMarkers(Clip);
+  DrawPlayhead(Clip);
 end;
 
 procedure TWarpEditor.SetClip(ATrackIndex, AClipIndex: Integer);
@@ -202,16 +242,29 @@ begin
   FClipIndex := AClipIndex;
   FDragMarkerIndex := -1;
 
-  if GetClip(Clip) and (Length(Clip.WarpMarkers) < 2) then
+  if GetClip(Clip) then
   begin
-    SetLength(Clip.WarpMarkers, 2);
-    Clip.WarpMarkers[0].SourceFrame := 0;
-    Clip.WarpMarkers[0].TimelineFrame := 0;
-    Clip.WarpMarkers[1].SourceFrame := Clip.Length;
-    Clip.WarpMarkers[1].TimelineFrame := Clip.Length;
-    Project.Tracks[FTrackIndex].Clips[FClipIndex] := Clip;
+    if Length(Clip.WarpMarkers) < 2 then
+    begin
+      SetLength(Clip.WarpMarkers, 2);
+      Clip.WarpMarkers[0].SourceFrame := 0;
+      Clip.WarpMarkers[0].TimelineFrame := 0;
+      Clip.WarpMarkers[1].SourceFrame := Clip.Length;
+      Clip.WarpMarkers[1].TimelineFrame := Clip.Length;
+      Project.Tracks[FTrackIndex].Clips[FClipIndex] := Clip;
+    end;
+    RecomputeZoom(Clip);
   end;
 
+  Invalidate;
+end;
+
+procedure TWarpEditor.SetPlayheadState(AGlobalFrame: Int64; APlaying: Boolean);
+begin
+  if (AGlobalFrame = FPlayheadFrame) and (APlaying = FIsPlaying) then
+    Exit;
+  FPlayheadFrame := AGlobalFrame;
+  FIsPlaying := APlaying;
   Invalidate;
 end;
 
@@ -219,14 +272,26 @@ procedure TWarpEditor.MouseDown(Button: TMouseButton; Shift: TShiftState;
   X, Y: Integer);
 var
   Clip: TClip;
+  HitIndex: Integer;
 begin
   inherited MouseDown(Button, Shift, X, Y);
   FLastMouseX := X;
 
-  if (Button <> mbLeft) or not GetClip(Clip) then
+  if not GetClip(Clip) then
     Exit;
 
-  FDragMarkerIndex := HitTestMarker(Clip, X);
+  HitIndex := HitTestMarker(Clip, X);
+
+  if Button = mbRight then
+  begin
+    DeleteMarker(Clip, HitIndex);
+    Exit;
+  end;
+
+  if Button <> mbLeft then
+    Exit;
+
+  FDragMarkerIndex := HitIndex;
   if FDragMarkerIndex = 0 then
     FDragMarkerIndex := -1; { start marker is fixed }
 end;
@@ -278,9 +343,14 @@ end;
 
 procedure TWarpEditor.MouseUp(Button: TMouseButton; Shift: TShiftState;
   X, Y: Integer);
+var
+  Clip: TClip;
 begin
   inherited MouseUp(Button, Shift, X, Y);
   FDragMarkerIndex := -1;
+  if GetClip(Clip) then
+    RecomputeZoom(Clip); { snap the view back to fit after an edit completes }
+  Invalidate;
 end;
 
 procedure TWarpEditor.DblClick;
@@ -297,26 +367,8 @@ begin
     Exit;
 
   HitIndex := HitTestMarker(Clip, FLastMouseX);
-
-  if (HitIndex > 0) and (HitIndex < High(Clip.WarpMarkers)) then
-  begin
-    { remove an existing user-added marker }
-    NewMarkers := nil;
-    SetLength(NewMarkers, Length(Clip.WarpMarkers) - 1);
-    InsertAt := 0;
-    for i := 0 to High(Clip.WarpMarkers) do
-      if i <> HitIndex then
-      begin
-        NewMarkers[InsertAt] := Clip.WarpMarkers[i];
-        Inc(InsertAt);
-      end;
-    Clip.WarpMarkers := NewMarkers;
-    SetClipData(Clip);
-    Exit;
-  end;
-
   if HitIndex >= 0 then
-    Exit; { double-clicked the fixed start or end marker - nothing to do }
+    Exit; { hit an existing marker - use right-click to remove one instead }
 
   { add a new marker at the clicked point, pinned to wherever it currently
     maps in the source under the existing warp - inserting it changes
@@ -342,7 +394,7 @@ begin
   SetLength(NewMarkers, Length(Clip.WarpMarkers) + 1);
   for i := 0 to InsertAt - 1 do
     NewMarkers[i] := Clip.WarpMarkers[i];
-  NewMarkers[InsertAt].SourceFrame := SourceFrameAt(Clip, ClickFrame);
+  NewMarkers[InsertAt].SourceFrame := Round(WarpedSourcePosition(Clip.WarpMarkers, ClickFrame));
   NewMarkers[InsertAt].TimelineFrame := ClickFrame;
   for i := InsertAt to High(Clip.WarpMarkers) do
     NewMarkers[i + 1] := Clip.WarpMarkers[i];

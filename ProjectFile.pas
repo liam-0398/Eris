@@ -12,7 +12,7 @@ implementation
 
 uses
   SysUtils, Classes, IniFiles, SampleTypes, Project, WavDecoder, AudioEngine,
-  Resample;
+  Resample, Waveform;
 
 function SaveProject(const APath: string): Boolean;
 var
@@ -151,28 +151,6 @@ begin
   end;
 end;
 
-function ClipSourcePosition(const AClip: TClip; AClipRelativeFrame: Int64): Double;
-var
-  k: Integer;
-  SegTime, SegSrc: Int64;
-begin
-  if Length(AClip.WarpMarkers) < 2 then
-    Exit(AClipRelativeFrame);
-
-  k := 0;
-  while (k < Length(AClip.WarpMarkers) - 2) and
-    (AClipRelativeFrame >= AClip.WarpMarkers[k + 1].TimelineFrame) do
-    Inc(k);
-
-  SegTime := AClip.WarpMarkers[k + 1].TimelineFrame - AClip.WarpMarkers[k].TimelineFrame;
-  SegSrc := AClip.WarpMarkers[k + 1].SourceFrame - AClip.WarpMarkers[k].SourceFrame;
-  if SegTime = 0 then
-    Result := AClip.WarpMarkers[k].SourceFrame
-  else
-    Result := AClip.WarpMarkers[k].SourceFrame +
-      (AClipRelativeFrame - AClip.WarpMarkers[k].TimelineFrame) * (SegSrc / SegTime);
-end;
-
 function RenderProjectToWav(const AOutputPath: string): Boolean;
 const
   OutChannels = 2;
@@ -210,7 +188,7 @@ begin
 
         for Frame := 0 to Clip.Length - 1 do
         begin
-          SrcPos := Clip.Offset + ClipSourcePosition(Clip, Frame);
+          SrcPos := Clip.Offset + WarpedSourcePosition(Clip.WarpMarkers, Frame);
           if (SrcPos < 0) or (SrcPos >= Sample.FrameCount) then
             Continue;
 

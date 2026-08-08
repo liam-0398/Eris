@@ -575,6 +575,7 @@ begin
   end
   else
     FWarpWidget.Visible := False;
+  UpdateDevicePanel;
 end;
 
 procedure TForm1.WarpEditorClipChanged(Sender: TObject);
@@ -640,7 +641,7 @@ begin
     FTrackWidgetLabel.Caption := 'No Track';
     FInstrumentWidget.Visible := False;
     FDropHintLabel.Caption := 'Select a track to load an instrument';
-    FDropHintLabel.Visible := True;
+    FDropHintLabel.Visible := not FWarpWidget.Visible;
     Exit;
   end;
 
@@ -651,7 +652,7 @@ begin
   begin
     FInstrumentWidget.Visible := False;
     FDropHintLabel.Caption := 'Drag a WAV file here to sample it';
-    FDropHintLabel.Visible := True;
+    FDropHintLabel.Visible := not FWarpWidget.Visible;
   end
   else
   begin
@@ -722,6 +723,8 @@ begin
     FArrangementView.SetCursorFrame(AudioEngineGetPosition)
   else if FPlayPauseButton.Caption = 'Pause' then
     FPlayPauseButton.Caption := 'Play';
+
+  FWarpEditor.SetPlayheadState(AudioEngineGetPosition, AudioEngineIsPlaying);
 end;
 
 function KeyToSemitoneOffset(AKey: Word; out AOffset: Integer): Boolean;

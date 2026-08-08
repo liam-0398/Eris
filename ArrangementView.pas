@@ -357,32 +357,35 @@ begin
 
       IsSelected := (t = FSelectedTrack) and (i = FSelectedClip);
 
-      Canvas.Brush.Color := FTrackColors[t];
+      { neutral dark interior so the waveform (drawn in the track's color)
+        reads clearly against it, full width - no horizontal border/inset }
+      Canvas.Brush.Color := clBlack;
       Canvas.FillRect(R);
       if Clip.SampleID <= High(Project.SamplePeaks) then
         DrawWaveform(Canvas, Rect(R.Left, R.Top + 14, R.Right, R.Bottom),
           Project.SamplePeaks[Clip.SampleID],
           Project.SamplePool[Clip.SampleID].FrameCount, Clip.Offset,
-          Clip.Offset + Clip.Length, clBlack);
+          Clip.Offset + Clip.Length, Clip.WarpMarkers, FTrackColors[t]);
+
+      { border only (Frame, not Rectangle - Rectangle also fills the
+        interior with the current brush, which would erase the waveform
+        just drawn) }
       if IsSelected then
-      begin
-        Canvas.Pen.Color := clRed;
-        Canvas.Pen.Width := 2;
-      end
+        Canvas.Pen.Color := clRed
       else
-      begin
-        Canvas.Pen.Color := clBtnShadow;
-        Canvas.Pen.Width := 1;
-      end;
-      Canvas.Rectangle(R);
+        Canvas.Pen.Color := FTrackColors[t];
+      Canvas.Pen.Width := 2;
+      Canvas.Frame(R);
       Canvas.Pen.Width := 1;
 
       Canvas.Brush.Style := bsClear;
+      Canvas.Font.Color := clWhite;
       if Clip.SampleID <= High(Project.SampleNames) then
         ClipName := Project.SampleNames[Clip.SampleID]
       else
         ClipName := '';
-      Canvas.TextOut(R.Left + 4, R.Top + 4, ClipName);
+      Canvas.TextOut(R.Left + 4, R.Top + 2, ClipName);
+      Canvas.Font.Color := clWindowText;
       Canvas.Brush.Style := bsSolid;
     end;
 end;
