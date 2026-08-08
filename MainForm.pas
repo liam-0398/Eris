@@ -53,6 +53,8 @@ type
     procedure FileExitClick(Sender: TObject);
     procedure EditPreferencesClick(Sender: TObject);
     procedure EditUndoClick(Sender: TObject);
+    procedure ViewZoomInClick(Sender: TObject);
+    procedure ViewZoomOutClick(Sender: TObject);
     procedure TrackAddClick(Sender: TObject);
     procedure HelpAboutClick(Sender: TObject);
     procedure StopClick(Sender: TObject);
@@ -137,7 +139,8 @@ procedure TForm1.BuildMenu;
   end;
 
 var
-  FileMenu, EditMenu, ViewMenu, TrackMenu, HelpMenu, UndoItem: TMenuItem;
+  FileMenu, EditMenu, ViewMenu, TrackMenu, HelpMenu, UndoItem,
+  ZoomInItem, ZoomOutItem: TMenuItem;
 begin
   FMainMenu := TMainMenu.Create(Self);
   Menu := FMainMenu;
@@ -159,8 +162,10 @@ begin
   AddItem(EditMenu, '&Preferences...', @EditPreferencesClick);
 
   ViewMenu := AddMenu('&View');
-  AddItem(ViewMenu, 'Zoom &In', nil);
-  AddItem(ViewMenu, 'Zoom &Out', nil);
+  ZoomInItem := AddItem(ViewMenu, 'Zoom &In', @ViewZoomInClick);
+  ZoomInItem.ShortCut := Menus.ShortCut(VK_OEM_PLUS, [ssCtrl]);
+  ZoomOutItem := AddItem(ViewMenu, 'Zoom &Out', @ViewZoomOutClick);
+  ZoomOutItem.ShortCut := Menus.ShortCut(VK_OEM_MINUS, [ssCtrl]);
 
   TrackMenu := AddMenu('&Track');
   AddItem(TrackMenu, '&Add Track', @TrackAddClick);
@@ -482,6 +487,16 @@ begin
   end;
 end;
 
+procedure TForm1.ViewZoomInClick(Sender: TObject);
+begin
+  FArrangementView.ZoomIn;
+end;
+
+procedure TForm1.ViewZoomOutClick(Sender: TObject);
+begin
+  FArrangementView.ZoomOut;
+end;
+
 procedure TForm1.TrackAddClick(Sender: TObject);
 begin
   if Project.AddTrack then
@@ -659,6 +674,8 @@ procedure TForm1.ArrangementViewClipSelectionChanged(Sender: TObject);
 begin
   if FArrangementView.SelectedClipIndex >= 0 then
   begin
+    FWarpWidget.Width := WarpWidthForFrames(
+      Project.Tracks[FArrangementView.SelectedTrack].Clips[FArrangementView.SelectedClipIndex].Length);
     FWarpEditor.SetClip(FArrangementView.SelectedTrack,
       FArrangementView.SelectedClipIndex);
     FWarpWidget.Visible := True;
@@ -671,7 +688,13 @@ end;
 procedure TForm1.WarpEditorClipChanged(Sender: TObject);
 begin
   if FArrangementView.SelectedTrack >= 0 then
+  begin
+    if (FArrangementView.SelectedClipIndex >= 0) and
+      (FArrangementView.SelectedClipIndex <= High(Project.Tracks[FArrangementView.SelectedTrack].Clips)) then
+      FWarpWidget.Width := WarpWidthForFrames(
+        Project.Tracks[FArrangementView.SelectedTrack].Clips[FArrangementView.SelectedClipIndex].Length);
     FArrangementView.RefreshTrack(FArrangementView.SelectedTrack);
+  end;
 end;
 
 procedure TForm1.DevicePanelDragOver(Sender, Source: TObject; X, Y: Integer;
@@ -882,7 +905,19 @@ begin
   end;
 
   if ssCtrl in Shift then
+  begin
+    if Key = VK_ADD then
+    begin
+      FArrangementView.ZoomIn;
+      Key := 0;
+    end
+    else if Key = VK_SUBTRACT then
+    begin
+      FArrangementView.ZoomOut;
+      Key := 0;
+    end;
     Exit;
+  end;
 
   if KeyToSemitoneOffset(Key, Offset) then
   begin

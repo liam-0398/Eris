@@ -30,6 +30,8 @@ procedure AudioEngineSetTrackClips(ATrackIndex: Integer; AItems: PPlaybackClip;
 procedure AudioEnginePlay;
 procedure AudioEngineStop;
 procedure AudioEngineSeek(AFrame: Int64);
+procedure AudioEngineSetLoop(AStart, AEnd: Int64);
+procedure AudioEngineClearLoop;
 procedure AudioEngineTriggerNote(ATrackIndex: Integer; AData: PSingle;
   AFrameCount, AChannels: Integer; ASemitoneOffset: Single; AGain: Single);
 function AudioEngineIsPlaying: Boolean;
@@ -63,7 +65,7 @@ const
 
 type
   TCommandKind = (ckSetTrackClips, ckPlay, ckStop, ckSeek, ckTriggerNote,
-    ckStartCountIn, ckStopRecording);
+    ckStartCountIn, ckStopRecording, ckSetLoop, ckClearLoop);
 
   TCommand = record
     Kind: TCommandKind;
@@ -71,6 +73,7 @@ type
     Items: PPlaybackClip;
     Count: Integer;
     Param: Int64;
+    Param2: Int64;
     NoteData: PSingle;
     NoteFrameCount: Integer;
     NoteChannels: Integer;
@@ -112,6 +115,9 @@ var
   TrackClips: array[0..MaxTracks - 1] of TTrackClips;
   Playhead: Int64;
   Playing: Boolean;
+  LoopStart: Int64;
+  LoopEnd: Int64;
+  LoopActive: Boolean;
 
   LiveNotes: array[0..MaxTracks - 1] of TLiveNote;
   FadingNotes: array[0..MaxTracks - 1] of TLiveNote;
@@ -212,6 +218,14 @@ begin
           RecordState := RecordStateIdle;
           Playing := False;
         end;
+      ckSetLoop:
+        begin
+          LoopStart := Cmd.Param;
+          LoopEnd := Cmd.Param2;
+          LoopActive := LoopEnd > LoopStart;
+        end;
+      ckClearLoop:
+        LoopActive := False;
     end;
 end;
 
@@ -278,6 +292,7 @@ var
 begin
   FillChar(MixBuffer^, BlockFrames * OutputChannels * SizeOf(Single), 0);
   BeatFrames := Round((ProjectSampleRate * 60) / Project.TempoBPM);
+  GlobalFrame := Playhead;
 
   for Frame := 0 to BlockFrames - 1 do
   begin
@@ -286,7 +301,6 @@ begin
 
     if Playing then
     begin
-      GlobalFrame := Playhead + Frame;
       for t := 0 to MaxTracks - 1 do
         for i := 0 to TrackClips[t].Count - 1 do
         begin
@@ -351,11 +365,14 @@ begin
       begin
         if CountInBeatsRemaining > 0 then
         begin
+          { plays this beat's click; recording starts a full beat after
+            the 4th one, not on the same frame as it - matching a normal
+            1-2-3-4 count-in where the take begins on the beat after "4" }
           ClickPlayPos := 0;
           Dec(CountInBeatsRemaining);
           CountInFramesUntilNextBeat := BeatFrames;
-        end;
-        if CountInBeatsRemaining = 0 then
+        end
+        else
         begin
           RecordState := RecordStateRecording;
           RecordWritePos := 0;
@@ -395,10 +412,17 @@ begin
     if R > 1.0 then R := 1.0 else if R < -1.0 then R := -1.0;
     MixBuffer[Frame * OutputChannels] := L;
     MixBuffer[Frame * OutputChannels + 1] := R;
+
+    if Playing then
+    begin
+      Inc(GlobalFrame);
+      if LoopActive and (GlobalFrame >= LoopEnd) then
+        GlobalFrame := LoopStart;
+    end;
   end;
 
   if Playing then
-    Inc(Playhead, BlockFrames);
+    Playhead := GlobalFrame;
 end;
 
 procedure TPlaybackThread.Execute;
@@ -438,6 +462,7 @@ begin
   RingTail := 0;
   Playhead := 0;
   Playing := False;
+  LoopActive := False;
   RecordState := RecordStateIdle;
   RecordWritePos := 0;
   ClickPlayPos := -1;
@@ -521,6 +546,24 @@ var
 begin
   Cmd.Kind := ckSeek;
   Cmd.Param := AFrame;
+  PushCommand(Cmd);
+end;
+
+procedure AudioEngineSetLoop(AStart, AEnd: Int64);
+var
+  Cmd: TCommand;
+begin
+  Cmd.Kind := ckSetLoop;
+  Cmd.Param := AStart;
+  Cmd.Param2 := AEnd;
+  PushCommand(Cmd);
+end;
+
+procedure AudioEngineClearLoop;
+var
+  Cmd: TCommand;
+begin
+  Cmd.Kind := ckClearLoop;
   PushCommand(Cmd);
 end;
 

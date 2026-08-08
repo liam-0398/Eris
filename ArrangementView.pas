@@ -5,7 +5,7 @@ unit ArrangementView;
 interface
 
 uses
-  Classes, SysUtils, Controls, Graphics, LCLType, FileBrowser, SampleTypes,
+  Classes, SysUtils, Math, Controls, Graphics, LCLType, FileBrowser, SampleTypes,
   Project, AudioEngine, Waveform;
 
 type
@@ -22,7 +22,10 @@ type
       HeaderWidth = 160;
       RulerHeight = 24;
       TrackHeight = 80;
-      PixelsPerSecond = 100;
+      DefaultPixelsPerSecond = 100;
+      MinPixelsPerSecond = 5;
+      MaxPixelsPerSecond = 3000;
+      ZoomFactor = 1.25;
       MinGridPixelWidth = 16;
       EdgeGrabPixels = 6;
     var
@@ -31,6 +34,7 @@ type
       FOnKeyboardTrackChanged: TNotifyEvent;
       FOnClipSelectionChanged: TNotifyEvent;
       FTrackColors: array[0..Project.MaxTracks - 1] of TColor;
+      FPixelsPerSecond: Double;
       FCursorFrame: Int64;
       FSelectedTrack: Integer;
       FSelectedClip: Integer;
@@ -42,6 +46,8 @@ type
       FDragGrabOffsetFrames: Int64;
       FDragOrigClip: TClip;
       FDragCurrentClip: TClip;
+      FLoopStart: Int64;
+      FLoopEnd: Int64;
     function LaneWidth: Integer;
     function TrackIndexAtY(Y: Integer): Integer;
     function FrameToX(AFrame: Int64): Integer;
@@ -54,8 +60,10 @@ type
       out AMode: TDragMode): Boolean;
     procedure SelectClip(ATrack, AClip: Integer);
     procedure PushTrackToEngine(ATrackIndex: Integer);
+    procedure UpdateEngineLoop;
     procedure DrawLanes;
     procedure DrawRuler;
+    procedure DrawLoopMarkers;
     procedure DrawTrackHeaders;
     procedure DrawClips;
     procedure DrawCursor;
@@ -76,6 +84,8 @@ type
     procedure RefreshTrack(ATrackIndex: Integer);
     procedure SetCursorFrame(AFrameOffset: Int64);
     procedure ClearSelection;
+    procedure ZoomIn;
+    procedure ZoomOut;
     property KeyboardTrack: Integer read FKeyboardTrack;
     property SelectedTrack: Integer read FSelectedTrack;
     property SelectedClipIndex: Integer read FSelectedClip;
@@ -98,9 +108,12 @@ begin
   DoubleBuffered := True;
   ControlStyle := ControlStyle + [csOpaque];
   TabStop := True;
+  FPixelsPerSecond := DefaultPixelsPerSecond;
   FSelectedTrack := -1;
   FSelectedClip := -1;
   FKeyboardTrack := -1;
+  FLoopStart := -1;
+  FLoopEnd := -1;
 
   Randomize;
   for i := 0 to Project.MaxTracks - 1 do
@@ -124,12 +137,28 @@ end;
 
 function TArrangementView.FrameToX(AFrame: Int64): Integer;
 begin
-  Result := (AFrame * PixelsPerSecond) div AudioEngine.ProjectSampleRate;
+  Result := Round((AFrame * FPixelsPerSecond) / AudioEngine.ProjectSampleRate);
 end;
 
 function TArrangementView.XToFrame(AX: Integer): Int64;
 begin
-  Result := (Int64(AX) * AudioEngine.ProjectSampleRate) div PixelsPerSecond;
+  Result := Round((Int64(AX) * AudioEngine.ProjectSampleRate) / FPixelsPerSecond);
+end;
+
+procedure TArrangementView.ZoomIn;
+begin
+  FPixelsPerSecond := FPixelsPerSecond * ZoomFactor;
+  if FPixelsPerSecond > MaxPixelsPerSecond then
+    FPixelsPerSecond := MaxPixelsPerSecond;
+  Invalidate;
+end;
+
+procedure TArrangementView.ZoomOut;
+begin
+  FPixelsPerSecond := FPixelsPerSecond / ZoomFactor;
+  if FPixelsPerSecond < MinPixelsPerSecond then
+    FPixelsPerSecond := MinPixelsPerSecond;
+  Invalidate;
 end;
 
 function TArrangementView.BeatFrames: Int64;
@@ -257,6 +286,14 @@ begin
   AudioEngineSetTrackClips(ATrackIndex, Items, Count);
 end;
 
+procedure TArrangementView.UpdateEngineLoop;
+begin
+  if (FLoopStart >= 0) and (FLoopEnd >= 0) and (FLoopEnd > FLoopStart) then
+    AudioEngineSetLoop(FLoopStart, FLoopEnd)
+  else
+    AudioEngineClearLoop;
+end;
+
 procedure TArrangementView.DrawLanes;
 var
   i, x: Integer;
@@ -311,6 +348,53 @@ begin
     Canvas.TextOut(x + 4, 4, IntToStr(BarNum + 1));
     Inc(BarNum);
     x := FrameToX(BarNum * BarF);
+  end;
+end;
+
+procedure TArrangementView.DrawLoopMarkers;
+var
+  xs, xe: Integer;
+begin
+  if (FLoopStart >= 0) and (FLoopEnd >= 0) then
+  begin
+    xs := FrameToX(FLoopStart);
+    xe := FrameToX(FLoopEnd);
+    if (xe >= 0) and (xs <= LaneWidth) then
+    begin
+      Canvas.Brush.Color := clYellow;
+      Canvas.Brush.Style := bsSolid;
+      Canvas.Pen.Style := psClear;
+      Canvas.Rectangle(Max(xs, 0), 2, Min(xe, LaneWidth), 6);
+      Canvas.Pen.Style := psSolid;
+    end;
+  end;
+
+  if FLoopStart >= 0 then
+  begin
+    xs := FrameToX(FLoopStart);
+    if (xs >= 0) and (xs <= LaneWidth) then
+    begin
+      Canvas.Pen.Color := clGreen;
+      Canvas.Pen.Width := 2;
+      Canvas.Line(xs, 0, xs, Height);
+      Canvas.Pen.Width := 1;
+      Canvas.Brush.Color := clGreen;
+      Canvas.Polygon([Point(xs - 5, 0), Point(xs + 5, 0), Point(xs, 8)]);
+    end;
+  end;
+
+  if FLoopEnd >= 0 then
+  begin
+    xe := FrameToX(FLoopEnd);
+    if (xe >= 0) and (xe <= LaneWidth) then
+    begin
+      Canvas.Pen.Color := $0080FF;
+      Canvas.Pen.Width := 2;
+      Canvas.Line(xe, 0, xe, Height);
+      Canvas.Pen.Width := 1;
+      Canvas.Brush.Color := $0080FF;
+      Canvas.Polygon([Point(xe - 5, 0), Point(xe + 5, 0), Point(xe, 8)]);
+    end;
   end;
 end;
 
@@ -410,6 +494,7 @@ begin
   DrawClips;
   DrawCursor;
   DrawRuler;
+  DrawLoopMarkers;
   DrawTrackHeaders;
 end;
 
@@ -475,6 +560,41 @@ begin
 
   if CanFocus then
     SetFocus;
+
+  if Button = mbRight then
+  begin
+    if Y < RulerHeight then
+    begin
+      if (FLoopStart >= 0) and (FLoopEnd >= 0) then
+      begin
+        FLoopStart := -1;
+        FLoopEnd := -1;
+      end
+      else if FLoopStart < 0 then
+      begin
+        Frame := SnapFrame(XToFrame(X));
+        if Frame < 0 then
+          Frame := 0;
+        FLoopStart := Frame;
+      end
+      else
+      begin
+        Frame := SnapFrame(XToFrame(X));
+        if Frame < 0 then
+          Frame := 0;
+        if Frame < FLoopStart then
+        begin
+          FLoopEnd := FLoopStart;
+          FLoopStart := Frame;
+        end
+        else if Frame > FLoopStart then
+          FLoopEnd := Frame;
+      end;
+      UpdateEngineLoop;
+      Invalidate;
+    end;
+    Exit;
+  end;
 
   if Button <> mbLeft then
     Exit;

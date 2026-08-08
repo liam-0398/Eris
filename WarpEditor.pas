@@ -8,12 +8,18 @@ uses
   Classes, SysUtils, Controls, Graphics, LCLType, SampleTypes, Project,
   AudioEngine, Waveform;
 
+const
+  WarpPixelsPerSecond = 150;
+  WarpRulerHeight = 18;
+  WarpMinWidgetWidth = 120;
+  WarpMaxWidgetWidth = 4000;
+
+function WarpWidthForFrames(AFrames: Int64): Integer;
+
 type
   TWarpEditor = class(TCustomControl)
   private
     const
-      DefaultPixelsPerSecond = 200;
-      MinPixelsPerSecond = 20;
       MarkerGrabPixels = 6;
       MinMarkerGapFrames = 100;
     var
@@ -21,18 +27,19 @@ type
       FClipIndex: Integer;
       FDragMarkerIndex: Integer;
       FLastMouseX: Integer;
-      FZoomPixelsPerSecond: Double;
       FPlayheadFrame: Int64;
       FIsPlaying: Boolean;
       FOnClipChanged: TNotifyEvent;
     function GetClip(out AClip: TClip): Boolean;
     procedure SetClipData(const AClip: TClip);
-    procedure RecomputeZoom(const AClip: TClip);
     function FrameToX(AFrame: Int64): Integer;
     function XToFrame(AX: Integer): Int64;
+    function BeatFrames: Int64;
     function EighthNoteFrames: Int64;
+    function BarBeatLabel(AFrame: Int64): string;
     function HitTestMarker(const AClip: TClip; X: Integer): Integer;
     procedure DeleteMarker(const AClip: TClip; AIndex: Integer);
+    procedure DrawRulerStrip;
     procedure DrawGrid;
     procedure DrawClipWaveform(const AClip: TClip);
     procedure DrawMarkers(const AClip: TClip);
@@ -54,6 +61,15 @@ type
 
 implementation
 
+function WarpWidthForFrames(AFrames: Int64): Integer;
+begin
+  Result := Round(AFrames * WarpPixelsPerSecond / AudioEngine.ProjectSampleRate);
+  if Result < WarpMinWidgetWidth then
+    Result := WarpMinWidgetWidth;
+  if Result > WarpMaxWidgetWidth then
+    Result := WarpMaxWidgetWidth;
+end;
+
 constructor TWarpEditor.Create(AOwner: TComponent);
 begin
   inherited Create(AOwner);
@@ -62,7 +78,6 @@ begin
   FTrackIndex := -1;
   FClipIndex := -1;
   FDragMarkerIndex := -1;
-  FZoomPixelsPerSecond := DefaultPixelsPerSecond;
 end;
 
 function TWarpEditor.GetClip(out AClip: TClip): Boolean;
@@ -83,34 +98,37 @@ begin
   Invalidate;
 end;
 
-procedure TWarpEditor.RecomputeZoom(const AClip: TClip);
-begin
-  { fit the whole clip to the widget's width, so the end marker (used to
-    adjust length) is never dragged off-screen for longer clips }
-  if (AClip.Length > 0) and (Width > 0) then
-    FZoomPixelsPerSecond := (Width * AudioEngine.ProjectSampleRate) / AClip.Length
-  else
-    FZoomPixelsPerSecond := DefaultPixelsPerSecond;
-  if FZoomPixelsPerSecond < MinPixelsPerSecond then
-    FZoomPixelsPerSecond := MinPixelsPerSecond;
-end;
-
 function TWarpEditor.FrameToX(AFrame: Int64): Integer;
 begin
-  Result := Round(AFrame * FZoomPixelsPerSecond / AudioEngine.ProjectSampleRate);
+  Result := Round(AFrame * WarpPixelsPerSecond / AudioEngine.ProjectSampleRate);
 end;
 
 function TWarpEditor.XToFrame(AX: Integer): Int64;
 begin
-  Result := Round(AX * AudioEngine.ProjectSampleRate / FZoomPixelsPerSecond);
+  Result := Round(AX * AudioEngine.ProjectSampleRate / WarpPixelsPerSecond);
+end;
+
+function TWarpEditor.BeatFrames: Int64;
+begin
+  Result := Round((AudioEngine.ProjectSampleRate * 60) / Project.TempoBPM);
 end;
 
 function TWarpEditor.EighthNoteFrames: Int64;
-var
-  BeatFrames: Int64;
 begin
-  BeatFrames := Round((AudioEngine.ProjectSampleRate * 60) / Project.TempoBPM);
   Result := BeatFrames div 2;
+end;
+
+function TWarpEditor.BarBeatLabel(AFrame: Int64): string;
+var
+  BF, TotalBeats, BarNum, BeatInBar: Int64;
+begin
+  BF := BeatFrames;
+  if BF <= 0 then
+    Exit('1.1');
+  TotalBeats := AFrame div BF;
+  BarNum := TotalBeats div 4;
+  BeatInBar := TotalBeats mod 4;
+  Result := IntToStr(BarNum + 1) + '.' + IntToStr(BeatInBar + 1);
 end;
 
 function TWarpEditor.HitTestMarker(const AClip: TClip; X: Integer): Integer;
@@ -149,23 +167,73 @@ begin
   SetClipData(Clip);
 end;
 
-procedure TWarpEditor.DrawGrid;
+procedure TWarpEditor.DrawRulerStrip;
 var
-  Grid, Frame: Int64;
+  Beat, BarLen, Frame: Int64;
   x: Integer;
 begin
-  Grid := EighthNoteFrames;
-  if Grid <= 0 then
+  Canvas.Brush.Color := clBtnFace;
+  Canvas.FillRect(Rect(0, 0, Width, WarpRulerHeight));
+  Canvas.Pen.Color := clBtnShadow;
+  Canvas.Line(0, WarpRulerHeight - 1, Width, WarpRulerHeight - 1);
+
+  Beat := BeatFrames;
+  if Beat <= 0 then
     Exit;
-  Canvas.Pen.Color := clSilver;
+  BarLen := Beat * 4;
+
   Frame := 0;
   x := FrameToX(Frame);
   while x < Width do
   begin
-    Canvas.Line(x, 0, x, Height);
-    Frame := Frame + Grid;
+    if Frame mod BarLen = 0 then
+      Canvas.Pen.Color := clBlack
+    else
+      Canvas.Pen.Color := clBtnShadow;
+    Canvas.Line(x, WarpRulerHeight - 6, x, WarpRulerHeight);
+    Canvas.Brush.Style := bsClear;
+    Canvas.TextOut(x + 2, 2, BarBeatLabel(Frame));
+    Canvas.Brush.Style := bsSolid;
+    Frame := Frame + Beat;
     x := FrameToX(Frame);
   end;
+end;
+
+procedure TWarpEditor.DrawGrid;
+var
+  Eighth, Beat, BarLen, Frame: Int64;
+  x: Integer;
+begin
+  Eighth := EighthNoteFrames;
+  if Eighth <= 0 then
+    Exit;
+  Beat := Eighth * 2;
+  BarLen := Beat * 4;
+
+  Frame := 0;
+  x := FrameToX(Frame);
+  while x < Width do
+  begin
+    if Frame mod BarLen = 0 then
+    begin
+      Canvas.Pen.Color := clBlack;
+      Canvas.Pen.Width := 2;
+    end
+    else if Frame mod Beat = 0 then
+    begin
+      Canvas.Pen.Color := clGray;
+      Canvas.Pen.Width := 1;
+    end
+    else
+    begin
+      Canvas.Pen.Color := clSilver;
+      Canvas.Pen.Width := 1;
+    end;
+    Canvas.Line(x, WarpRulerHeight, x, Height);
+    Frame := Frame + Eighth;
+    x := FrameToX(Frame);
+  end;
+  Canvas.Pen.Width := 1;
 end;
 
 procedure TWarpEditor.DrawClipWaveform(const AClip: TClip);
@@ -175,9 +243,9 @@ begin
   if AClip.SampleID > High(Project.SamplePeaks) then
     Exit;
   Sample := Project.SamplePool[AClip.SampleID];
-  DrawWaveform(Canvas, Rect(0, 0, Width, Height), Project.SamplePeaks[AClip.SampleID],
-    Sample.FrameCount, AClip.Offset, AClip.Offset + AClip.Length,
-    AClip.WarpMarkers, clAqua);
+  DrawWaveform(Canvas, Rect(0, WarpRulerHeight, Width, Height),
+    Project.SamplePeaks[AClip.SampleID], Sample.FrameCount, AClip.Offset,
+    AClip.Offset + AClip.Length, AClip.WarpMarkers, clAqua);
 end;
 
 procedure TWarpEditor.DrawMarkers(const AClip: TClip);
@@ -197,7 +265,8 @@ begin
     Canvas.Line(x, 0, x, Height);
     Canvas.Pen.Width := 1;
     Canvas.Brush.Color := Canvas.Pen.Color;
-    Canvas.Polygon([Point(x - 5, 0), Point(x + 5, 0), Point(x, 8)]);
+    Canvas.Polygon([Point(x - 5, WarpRulerHeight), Point(x + 5, WarpRulerHeight),
+      Point(x, WarpRulerHeight + 8)]);
   end;
 end;
 
@@ -230,6 +299,7 @@ begin
 
   DrawClipWaveform(Clip);
   DrawGrid;
+  DrawRulerStrip;
   DrawMarkers(Clip);
   DrawPlayhead(Clip);
 end;
@@ -253,7 +323,6 @@ begin
       Clip.WarpMarkers[1].TimelineFrame := Clip.Length;
       Project.Tracks[FTrackIndex].Clips[FClipIndex] := Clip;
     end;
-    RecomputeZoom(Clip);
   end;
 
   Invalidate;
@@ -343,13 +412,9 @@ end;
 
 procedure TWarpEditor.MouseUp(Button: TMouseButton; Shift: TShiftState;
   X, Y: Integer);
-var
-  Clip: TClip;
 begin
   inherited MouseUp(Button, Shift, X, Y);
   FDragMarkerIndex := -1;
-  if GetClip(Clip) then
-    RecomputeZoom(Clip); { snap the view back to fit after an edit completes }
   Invalidate;
 end;
 
