@@ -28,6 +28,8 @@ type
     var
       FOnFileDrop: TFileDropEvent;
       FOnSeek: TSeekEvent;
+      FOnPlayPauseToggle: TNotifyEvent;
+      FTrackColors: array[0..Project.TrackCount - 1] of TColor;
       FCursorFrame: Int64;
       FSelectedTrack: Integer;
       FSelectedClip: Integer;
@@ -73,11 +75,15 @@ type
     procedure ClearSelection;
     property OnFileDrop: TFileDropEvent read FOnFileDrop write FOnFileDrop;
     property OnSeek: TSeekEvent read FOnSeek write FOnSeek;
+    property OnPlayPauseToggle: TNotifyEvent read FOnPlayPauseToggle
+      write FOnPlayPauseToggle;
   end;
 
 implementation
 
 constructor TArrangementView.Create(AOwner: TComponent);
+var
+  i: Integer;
 begin
   inherited Create(AOwner);
   DoubleBuffered := True;
@@ -85,6 +91,11 @@ begin
   TabStop := True;
   FSelectedTrack := -1;
   FSelectedClip := -1;
+
+  Randomize;
+  for i := 0 to Project.TrackCount - 1 do
+    FTrackColors[i] := RGBToColor(100 + Random(120), 100 + Random(120),
+      100 + Random(120));
 end;
 
 function TArrangementView.LaneWidth: Integer;
@@ -314,7 +325,7 @@ begin
 
       IsSelected := (t = FSelectedTrack) and (i = FSelectedClip);
 
-      Canvas.Brush.Color := clAqua;
+      Canvas.Brush.Color := FTrackColors[t];
       Canvas.FillRect(R);
       if IsSelected then
       begin
@@ -473,7 +484,7 @@ end;
 
 procedure TArrangementView.MouseMove(Shift: TShiftState; X, Y: Integer);
 var
-  MouseFrame, NewPosition, NewEnd, MinPos, MaxPos, MinEnd, MaxEnd, Delta: Int64;
+  MouseFrame, NewPosition, NewEnd, MinPos, MaxPos, MinEnd, Delta: Int64;
   FreePlacement: Boolean;
   TargetTrack: Integer;
 begin
@@ -518,16 +529,15 @@ begin
       end;
     dmResizeRight:
       begin
+        { no upper bound: dragging past the end of the underlying sample data
+          just extends the clip into silence, useful for lining clips up
+          without needing extra source audio }
         NewEnd := MouseFrame;
         if not FreePlacement then
           NewEnd := SnapFrame(NewEnd);
         MinEnd := FDragOrigClip.Position + 1;
-        MaxEnd := FDragOrigClip.Position +
-          (Project.SamplePool[FDragOrigClip.SampleID].FrameCount - FDragOrigClip.Offset);
         if NewEnd < MinEnd then
           NewEnd := MinEnd;
-        if NewEnd > MaxEnd then
-          NewEnd := MaxEnd;
 
         FDragCurrentClip.Length := NewEnd - FDragOrigClip.Position;
       end;
@@ -584,6 +594,29 @@ var
   j, k: Integer;
 begin
   inherited KeyDown(Key, Shift);
+
+  if Key = VK_SPACE then
+  begin
+    if Assigned(FOnPlayPauseToggle) then
+      FOnPlayPauseToggle(Self);
+    Key := 0;
+    Exit;
+  end;
+
+  if Key = VK_DELETE then
+  begin
+    if (FSelectedTrack >= 0) and (FSelectedClip >= 0) and
+      (FSelectedClip <= High(Project.Tracks[FSelectedTrack].Clips)) then
+    begin
+      Project.PushUndoSnapshot(FSelectedTrack);
+      Project.RemoveClipAt(FSelectedTrack, FSelectedClip);
+      PushTrackToEngine(FSelectedTrack);
+      FSelectedClip := -1;
+      Invalidate;
+    end;
+    Key := 0;
+    Exit;
+  end;
 
   if not (ssCtrl in Shift) then
     Exit;

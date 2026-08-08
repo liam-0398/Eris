@@ -14,6 +14,7 @@ type
   private
     FMainMenu: TMainMenu;
     FTransportPanel: TPanel;
+    FStopButton: TButton;
     FPlayPauseButton: TButton;
     FTempoLabel: TLabel;
     FTempoEdit: TEdit;
@@ -32,6 +33,7 @@ type
     procedure EditPreferencesClick(Sender: TObject);
     procedure EditUndoClick(Sender: TObject);
     procedure HelpAboutClick(Sender: TObject);
+    procedure StopClick(Sender: TObject);
     procedure PlayPauseClick(Sender: TObject);
     procedure TransportPanelResize(Sender: TObject);
     procedure TempoEditEditingDone(Sender: TObject);
@@ -129,13 +131,13 @@ end;
 
 procedure TForm1.BuildLayout;
 begin
-  Width := 900;
-  Height := 600;
+  Width := 1280;
+  Height := 800;
 
   FTransportPanel := TPanel.Create(Self);
   FTransportPanel.Parent := Self;
   FTransportPanel.Align := alTop;
-  FTransportPanel.Height := 40;
+  FTransportPanel.Height := 52;
   FTransportPanel.BevelOuter := bvNone;
   FTransportPanel.OnResize := @TransportPanelResize;
 
@@ -143,21 +145,28 @@ begin
   FTempoLabel.Parent := FTransportPanel;
   FTempoLabel.Caption := 'Tempo:';
   FTempoLabel.Left := 8;
-  FTempoLabel.Top := 12;
+  FTempoLabel.Top := 19;
 
   FTempoEdit := TEdit.Create(Self);
   FTempoEdit.Parent := FTransportPanel;
   FTempoEdit.Text := IntToStr(Round(Project.DefaultTempoBPM));
   FTempoEdit.Left := 56;
-  FTempoEdit.Top := 8;
-  FTempoEdit.Width := 50;
+  FTempoEdit.Top := 14;
+  FTempoEdit.Width := 64;
   FTempoEdit.OnEditingDone := @TempoEditEditingDone;
+
+  FStopButton := TButton.Create(Self);
+  FStopButton.Parent := FTransportPanel;
+  FStopButton.Caption := 'Stop';
+  FStopButton.Width := 80;
+  FStopButton.Height := 32;
+  FStopButton.OnClick := @StopClick;
 
   FPlayPauseButton := TButton.Create(Self);
   FPlayPauseButton.Parent := FTransportPanel;
   FPlayPauseButton.Caption := 'Play';
   FPlayPauseButton.Width := 80;
-  FPlayPauseButton.Height := 28;
+  FPlayPauseButton.Height := 32;
   FPlayPauseButton.OnClick := @PlayPauseClick;
 
   FDevicePanel := TPanel.Create(Self);
@@ -190,6 +199,7 @@ begin
   FArrangementView.Align := alClient;
   FArrangementView.OnFileDrop := @ArrangementViewFileDrop;
   FArrangementView.OnSeek := @ArrangementViewSeek;
+  FArrangementView.OnPlayPauseToggle := @PlayPauseClick;
 
   TransportPanelResize(FTransportPanel);
 
@@ -232,6 +242,14 @@ begin
   ShowMessage('Eris' + LineEnding + 'A linear-timeline, audio-only DAW.');
 end;
 
+procedure TForm1.StopClick(Sender: TObject);
+begin
+  AudioEngineStop;
+  AudioEngineSeek(0);
+  FArrangementView.SetCursorFrame(0);
+  FPlayPauseButton.Caption := 'Play';
+end;
+
 procedure TForm1.PlayPauseClick(Sender: TObject);
 begin
   if not AudioEngineHasClip then
@@ -250,9 +268,19 @@ begin
 end;
 
 procedure TForm1.TransportPanelResize(Sender: TObject);
+const
+  Gap = 8;
+var
+  GroupWidth, GroupLeft, ButtonTop: Integer;
 begin
-  FPlayPauseButton.Left := (FTransportPanel.ClientWidth - FPlayPauseButton.Width) div 2;
-  FPlayPauseButton.Top := (FTransportPanel.ClientHeight - FPlayPauseButton.Height) div 2;
+  GroupWidth := FStopButton.Width + Gap + FPlayPauseButton.Width;
+  GroupLeft := (FTransportPanel.ClientWidth - GroupWidth) div 2;
+  ButtonTop := (FTransportPanel.ClientHeight - FPlayPauseButton.Height) div 2;
+
+  FStopButton.Left := GroupLeft;
+  FStopButton.Top := ButtonTop;
+  FPlayPauseButton.Left := GroupLeft + FStopButton.Width + Gap;
+  FPlayPauseButton.Top := ButtonTop;
 end;
 
 procedure TForm1.TempoEditEditingDone(Sender: TObject);

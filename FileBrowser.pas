@@ -26,6 +26,7 @@ implementation
 
 const
   WavExtension = '.wav';
+  DefaultBrowseDir = '/NFS/Music/Production/';
 
 constructor TFileBrowser.Create(AOwner: TComponent);
 begin
@@ -45,7 +46,10 @@ begin
   FListBox.DragMode := dmAutomatic;
   FListBox.OnDblClick := @ListBoxDblClick;
 
-  SetDirectory(GetEnvironmentVariable('HOME'));
+  if DirectoryExists(DefaultBrowseDir) then
+    SetDirectory(DefaultBrowseDir)
+  else
+    SetDirectory(GetEnvironmentVariable('HOME'));
 end;
 
 function TFileBrowser.HasWavExtension(const AName: string): Boolean;
