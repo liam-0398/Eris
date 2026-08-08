@@ -116,6 +116,7 @@ type
     procedure AddEQ4EffectClick(Sender: TObject);
     procedure AddLimiterEffectClick(Sender: TObject);
     procedure AddChorusEffectClick(Sender: TObject);
+    procedure AddReverbEffectClick(Sender: TObject);
     procedure BuildEffectsMenu;
     procedure DevicePanelMouseDown(Sender: TObject; Button: TMouseButton;
       Shift: TShiftState; X, Y: Integer);
@@ -1156,6 +1157,11 @@ begin
   AddEffectToCurrentTrack(Effects.ekChorus);
 end;
 
+procedure TForm1.AddReverbEffectClick(Sender: TObject);
+begin
+  AddEffectToCurrentTrack(Effects.ekReverb);
+end;
+
 procedure TForm1.BuildEffectsMenu;
 
   function AddCategory(const ACaption: string): TMenuItem;
@@ -1175,7 +1181,7 @@ procedure TForm1.BuildEffectsMenu;
   end;
 
 var
-  FiltersItem, EQItem, ModulationItem, UtilityItem, MasteringItem,
+  FiltersItem, EQItem, ModulationItem, ReverbItem, UtilityItem, MasteringItem,
   Placeholder: TMenuItem;
 begin
   FEffectsMenu := TPopupMenu.Create(Self);
@@ -1188,6 +1194,9 @@ begin
 
   ModulationItem := AddCategory('Modulation');
   AddEffectItem(ModulationItem, 'Chorus', @AddChorusEffectClick);
+
+  ReverbItem := AddCategory('Reverb');
+  AddEffectItem(ReverbItem, 'Basic Reverb', @AddReverbEffectClick);
 
   UtilityItem := AddCategory('Utility');
   Placeholder := AddEffectItem(UtilityItem, '(none yet)', nil);

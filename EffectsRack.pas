@@ -34,6 +34,9 @@ type
     FChorusRateValueLabel: TLabel;
     FChorusDepthSlider: TTrackBar;
     FChorusDepthValueLabel: TLabel;
+    FReverbPresetCombo: TComboBox;
+    FReverbMixSlider: TTrackBar;
+    FReverbMixValueLabel: TLabel;
     function EffectPtr: PEffect;
     procedure DeleteClick(Sender: TObject);
     procedure LPSliderChange(Sender: TObject);
@@ -43,10 +46,13 @@ type
     procedure LimiterReleaseSliderChange(Sender: TObject);
     procedure ChorusRateSliderChange(Sender: TObject);
     procedure ChorusDepthSliderChange(Sender: TObject);
+    procedure ReverbPresetChange(Sender: TObject);
+    procedure ReverbMixSliderChange(Sender: TObject);
     procedure BuildLowpass;
     procedure BuildEQ4;
     procedure BuildLimiter;
     procedure BuildChorus;
+    procedure BuildReverb;
   public
     constructor CreateFor(AOwner: TComponent; AParent: TWinControl;
       ATrackIndex, AEffectIndex: Integer; AOnRackChanged: TEffectRackChangedEvent;
@@ -68,6 +74,8 @@ const
   ChorusMaxRateX100 = 500;
   ChorusMinDepthPercent = 0;
   ChorusMaxDepthPercent = 100;
+  ReverbMinMixPercent = 0;
+  ReverbMaxMixPercent = 100;
   { shared sizing so every effect box lines up with the others in the rack
     and with the rest of the bottom bar's widgets }
   WidgetHeight = 180;
@@ -125,6 +133,7 @@ begin
     Effects.ekEQ4: TitleLabel.Caption := 'EQ 4';
     Effects.ekLimiter: TitleLabel.Caption := 'Limiter';
     Effects.ekChorus: TitleLabel.Caption := 'Chorus';
+    Effects.ekReverb: TitleLabel.Caption := 'Basic Reverb';
   else
     TitleLabel.Caption := 'LP';
   end;
@@ -161,6 +170,12 @@ begin
         Width := Px(200);
         DeleteButton.Left := Width - Px(28);
         BuildChorus;
+      end;
+    Effects.ekReverb:
+      begin
+        Width := Px(220); { a bit wider - "Basic Reverb" needs the room }
+        DeleteButton.Left := Width - Px(28);
+        BuildReverb;
       end;
   end;
 end;
@@ -351,6 +366,52 @@ begin
   FChorusDepthValueLabel.Caption := Format('%d%%', [Round(EffectPtr^.ChorusDepthPercent)]);
 end;
 
+procedure TEffectWidget.BuildReverb;
+var
+  Lbl1, Lbl2: TLabel;
+  p: Integer;
+begin
+  Lbl1 := TLabel.Create(Owner);
+  Lbl1.Parent := Self;
+  Lbl1.Left := Px(8);
+  Lbl1.Top := Px(36);
+  Lbl1.Caption := 'Type';
+
+  FReverbPresetCombo := TComboBox.Create(Owner);
+  FReverbPresetCombo.Parent := Self;
+  FReverbPresetCombo.Style := csDropDownList;
+  FReverbPresetCombo.Left := Px(8);
+  FReverbPresetCombo.Top := Px(54);
+  FReverbPresetCombo.Width := Width - Px(16);
+  for p := 0 to Effects.ReverbPresetCount - 1 do
+    FReverbPresetCombo.Items.Add(Effects.ReverbPresetNames[p]);
+  FReverbPresetCombo.ItemIndex := EffectPtr^.ReverbPreset;
+  FReverbPresetCombo.OnChange := @ReverbPresetChange;
+
+  Lbl2 := TLabel.Create(Owner);
+  Lbl2.Parent := Self;
+  Lbl2.Left := Px(8);
+  Lbl2.Top := Px(100);
+  Lbl2.Caption := 'Dry / Wet';
+
+  FReverbMixSlider := TTrackBar.Create(Owner);
+  FReverbMixSlider.Parent := Self;
+  FReverbMixSlider.Left := Px(8);
+  FReverbMixSlider.Top := Px(118);
+  FReverbMixSlider.Width := Width - Px(16);
+  FReverbMixSlider.Height := Px(26);
+  FReverbMixSlider.Min := ReverbMinMixPercent;
+  FReverbMixSlider.Max := ReverbMaxMixPercent;
+  FReverbMixSlider.Position := Round(EffectPtr^.ReverbMixPercent);
+  FReverbMixSlider.OnChange := @ReverbMixSliderChange;
+
+  FReverbMixValueLabel := TLabel.Create(Owner);
+  FReverbMixValueLabel.Parent := Self;
+  FReverbMixValueLabel.Left := Px(8);
+  FReverbMixValueLabel.Top := Px(146);
+  FReverbMixValueLabel.Caption := Format('%d%% wet', [Round(EffectPtr^.ReverbMixPercent)]);
+end;
+
 procedure TEffectWidget.DeleteClick(Sender: TObject);
 begin
   if FIsMaster then
@@ -417,6 +478,17 @@ procedure TEffectWidget.ChorusDepthSliderChange(Sender: TObject);
 begin
   EffectPtr^.ChorusDepthPercent := FChorusDepthSlider.Position;
   FChorusDepthValueLabel.Caption := Format('%d%%', [FChorusDepthSlider.Position]);
+end;
+
+procedure TEffectWidget.ReverbPresetChange(Sender: TObject);
+begin
+  EffectPtr^.ReverbPreset := FReverbPresetCombo.ItemIndex;
+end;
+
+procedure TEffectWidget.ReverbMixSliderChange(Sender: TObject);
+begin
+  EffectPtr^.ReverbMixPercent := FReverbMixSlider.Position;
+  FReverbMixValueLabel.Caption := Format('%d%% wet', [FReverbMixSlider.Position]);
 end;
 
 end.
