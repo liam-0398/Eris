@@ -11,8 +11,8 @@ function RenderProjectToWav(const AOutputPath: string): Boolean;
 implementation
 
 uses
-  SysUtils, Classes, IniFiles, SampleTypes, Project, WavDecoder, AudioEngine,
-  Resample, Waveform, SP1200;
+  SysUtils, Classes, IniFiles, FileUtil, SampleTypes, Project, WavDecoder,
+  AudioEngine, Resample, Waveform, SP1200, TarArchive;
 
 function SaveProject(const APath: string): Boolean;
 var
@@ -22,14 +22,17 @@ var
   Clip: TClip;
 begin
   Result := False;
-  Dir := ExcludeTrailingPathDelimiter(APath);
-  if not DirectoryExists(Dir) then
-    if not CreateDir(Dir) then
-      Exit;
+
+  { build the bundle in a scratch directory, then pack it into a single
+    .er tar file - a real file (not a directory) is what makes a standard
+    Open dialog able to select it instead of just navigating into it }
+  Dir := IncludeTrailingPathDelimiter(GetTempDir(False)) + 'eris_save_tmp';
+  if DirectoryExists(Dir) then
+    DeleteDirectory(Dir, False);
+  if not ForceDirectories(Dir) then
+    Exit;
 
   IniPath := IncludeTrailingPathDelimiter(Dir) + 'project.ini';
-  if FileExists(IniPath) then
-    DeleteFile(IniPath);
 
   Ini := TIniFile.Create(IniPath);
   try
@@ -68,10 +71,20 @@ begin
       end;
     end;
 
-    Result := True;
   finally
     Ini.Free;
   end;
+
+  if not Result then
+  begin
+    DeleteDirectory(Dir, False);
+    Exit;
+  end;
+
+  if FileExists(APath) then
+    DeleteFile(APath);
+  Result := CreateTarFromDirectory(Dir, APath);
+  DeleteDirectory(Dir, False);
 end;
 
 function LoadProject(const APath: string): Boolean;
@@ -83,7 +96,23 @@ var
   Clip: TClip;
 begin
   Result := False;
-  Dir := ExcludeTrailingPathDelimiter(APath);
+
+  Dir := IncludeTrailingPathDelimiter(GetTempDir(False)) + 'eris_load_tmp';
+  if DirectoryExists(Dir) then
+    DeleteDirectory(Dir, False);
+
+  if DirectoryExists(APath) then
+    { backward compatible with older projects saved as a loose directory
+      bundle rather than a packed .er tar file }
+    Dir := ExcludeTrailingPathDelimiter(APath)
+  else if FileExists(APath) then
+  begin
+    if not ExtractTarToDirectory(APath, Dir) then
+      Exit;
+  end
+  else
+    Exit;
+
   IniPath := IncludeTrailingPathDelimiter(Dir) + 'project.ini';
   if not FileExists(IniPath) then
     Exit;
@@ -149,6 +178,9 @@ begin
   finally
     Ini.Free;
   end;
+
+  if not DirectoryExists(APath) then
+    DeleteDirectory(Dir, False);
 end;
 
 function RenderProjectToWav(const AOutputPath: string): Boolean;

@@ -19,6 +19,7 @@ type
     FEffectIndex: Integer;
     FOnRackChanged: TEffectRackChangedEvent;
     FLPSlider: TTrackBar;
+    FLPValueLabel: TLabel;
     FEQFreqEdit: array[0..Effects.MaxEQBands - 1] of TEdit;
     FEQGainSlider: array[0..Effects.MaxEQBands - 1] of TTrackBar;
     procedure DeleteClick(Sender: TObject);
@@ -37,6 +38,12 @@ const
   LPMaxHz = 20000.0;
   EQMinGainDb = -12;
   EQMaxGainDb = 12;
+  { shared sizing so every effect box lines up with the others in the rack
+    and with the rest of the bottom bar's widgets }
+  WidgetHeight = 180;
+  EQBandWidth = 56;
+  EQBandGap = 6;
+  EQLeftMargin = 8;
 
 implementation
 
@@ -65,38 +72,39 @@ begin
   FOnRackChanged := AOnRackChanged;
   Parent := AParent;
   BevelOuter := bvRaised;
-  Height := 144;
+  Height := WidgetHeight;
 
   Kind := Project.TrackEffects[ATrackIndex][AEffectIndex].Kind;
 
   TitleLabel := TLabel.Create(AOwner);
   TitleLabel.Parent := Self;
-  TitleLabel.Left := 6;
-  TitleLabel.Top := 6;
+  TitleLabel.Left := 8;
+  TitleLabel.Top := 8;
+  TitleLabel.Font.Style := [fsBold];
   if Kind = Effects.ekEQ4 then
-    TitleLabel.Caption := '4'
+    TitleLabel.Caption := 'EQ 4'
   else
     TitleLabel.Caption := 'LP';
 
   DeleteButton := TButton.Create(AOwner);
   DeleteButton.Parent := Self;
   DeleteButton.Caption := 'X';
-  DeleteButton.Width := 20;
-  DeleteButton.Height := 20;
-  DeleteButton.Top := 4;
+  DeleteButton.Width := 22;
+  DeleteButton.Height := 22;
+  DeleteButton.Top := 6;
   DeleteButton.OnClick := @DeleteClick;
 
   case Kind of
     Effects.ekLowpass:
       begin
-        Width := 140;
-        DeleteButton.Left := Width - 24;
+        Width := 200;
+        DeleteButton.Left := Width - 28;
         BuildLowpass;
       end;
     Effects.ekEQ4:
       begin
-        Width := 200;
-        DeleteButton.Left := Width - 24;
+        Width := EQLeftMargin + Effects.MaxEQBands * (EQBandWidth + EQBandGap) + EQLeftMargin;
+        DeleteButton.Left := Width - 28;
         BuildEQ4;
       end;
   end;
@@ -106,39 +114,62 @@ procedure TEffectWidget.BuildLowpass;
 var
   Lbl: TLabel;
 begin
+  { row 1 (title/delete) already placed by CreateFor; everything below is
+    one clean top-to-bottom flow: description -> slider -> live readout }
   Lbl := TLabel.Create(Owner);
   Lbl.Parent := Self;
   Lbl.Left := 8;
-  Lbl.Top := 32;
-  Lbl.Caption := 'Cutoff';
+  Lbl.Top := 40;
+  Lbl.Caption := 'Cutoff frequency';
 
   FLPSlider := TTrackBar.Create(Owner);
   FLPSlider.Parent := Self;
-  FLPSlider.Left := 4;
-  FLPSlider.Top := 52;
-  FLPSlider.Width := Width - 12;
-  FLPSlider.Height := 40;
+  FLPSlider.Left := 8;
+  FLPSlider.Top := 64;
+  FLPSlider.Width := Width - 16;
+  FLPSlider.Height := 60;
   FLPSlider.Min := 0;
   FLPSlider.Max := 100;
   FLPSlider.Position := FreqToLogSlider(Project.TrackEffects[FTrackIndex][FEffectIndex].LowpassFreqHz);
-  FLPSlider.ShowHint := True;
-  FLPSlider.Hint := 'Lowpass cutoff frequency';
   FLPSlider.OnChange := @LPSliderChange;
+
+  FLPValueLabel := TLabel.Create(Owner);
+  FLPValueLabel.Parent := Self;
+  FLPValueLabel.Left := 8;
+  FLPValueLabel.Top := 132;
+  FLPValueLabel.Caption := Format('%d Hz',
+    [Round(Project.TrackEffects[FTrackIndex][FEffectIndex].LowpassFreqHz)]);
 end;
 
 procedure TEffectWidget.BuildEQ4;
 var
   b, bx: Integer;
+  FreqRowLabel, GainRowLabel: TLabel;
 begin
+  { logical top-to-bottom flow: a labeled row of frequency inputs, then a
+    labeled row of vertical gain sliders directly below their own band }
+  FreqRowLabel := TLabel.Create(Owner);
+  FreqRowLabel.Parent := Self;
+  FreqRowLabel.Left := EQLeftMargin;
+  FreqRowLabel.Top := 38;
+  FreqRowLabel.Caption := 'Freq (Hz)';
+
+  GainRowLabel := TLabel.Create(Owner);
+  GainRowLabel.Parent := Self;
+  GainRowLabel.Left := EQLeftMargin;
+  GainRowLabel.Top := 92;
+  GainRowLabel.Caption := 'Gain (dB)';
+
   for b := 0 to Effects.MaxEQBands - 1 do
   begin
-    bx := 6 + b * 46;
+    bx := EQLeftMargin + b * (EQBandWidth + EQBandGap);
 
     FEQFreqEdit[b] := TEdit.Create(Owner);
     FEQFreqEdit[b].Parent := Self;
     FEQFreqEdit[b].Left := bx;
-    FEQFreqEdit[b].Top := 30;
-    FEQFreqEdit[b].Width := 42;
+    FEQFreqEdit[b].Top := 58;
+    FEQFreqEdit[b].Width := EQBandWidth;
+    FEQFreqEdit[b].Height := 26;
     FEQFreqEdit[b].Text := IntToStr(Round(Project.TrackEffects[FTrackIndex][FEffectIndex].EQFreqHz[b]));
     FEQFreqEdit[b].Tag := b;
     FEQFreqEdit[b].OnEditingDone := @EQFreqEditDone;
@@ -146,9 +177,9 @@ begin
     FEQGainSlider[b] := TTrackBar.Create(Owner);
     FEQGainSlider[b].Parent := Self;
     FEQGainSlider[b].Left := bx;
-    FEQGainSlider[b].Top := 56;
-    FEQGainSlider[b].Width := 42;
-    FEQGainSlider[b].Height := 84;
+    FEQGainSlider[b].Top := 112;
+    FEQGainSlider[b].Width := EQBandWidth;
+    FEQGainSlider[b].Height := WidgetHeight - 112 - 10;
     FEQGainSlider[b].Orientation := trVertical;
     FEQGainSlider[b].Min := EQMinGainDb;
     FEQGainSlider[b].Max := EQMaxGainDb;
@@ -168,9 +199,12 @@ begin
 end;
 
 procedure TEffectWidget.LPSliderChange(Sender: TObject);
+var
+  Freq: Single;
 begin
-  Project.TrackEffects[FTrackIndex][FEffectIndex].LowpassFreqHz :=
-    LogSliderToFreq(FLPSlider.Position);
+  Freq := LogSliderToFreq(FLPSlider.Position);
+  Project.TrackEffects[FTrackIndex][FEffectIndex].LowpassFreqHz := Freq;
+  FLPValueLabel.Caption := Format('%d Hz', [Round(Freq)]);
 end;
 
 procedure TEffectWidget.EQFreqEditDone(Sender: TObject);

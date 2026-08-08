@@ -19,6 +19,8 @@ type
       WarpSlotLeft = 344;
       DeviceScrollBarHeight = 16;
       WidgetTop = 8 + DeviceScrollBarHeight;
+      WidgetHeight = 180;
+      WidgetBottomMargin = 8;
     var
     FMainMenu: TMainMenu;
     FTransportPanel: TPanel;
@@ -69,6 +71,11 @@ type
     procedure FileExitClick(Sender: TObject);
     procedure EditPreferencesClick(Sender: TObject);
     procedure EditUndoClick(Sender: TObject);
+    procedure EditCopyClick(Sender: TObject);
+    procedure EditPasteClick(Sender: TObject);
+    procedure EditDuplicateClick(Sender: TObject);
+    procedure EditSplitClick(Sender: TObject);
+    procedure EditDeleteClick(Sender: TObject);
     procedure ViewZoomInClick(Sender: TObject);
     procedure ViewZoomOutClick(Sender: TObject);
     procedure TrackAddClick(Sender: TObject);
@@ -179,7 +186,8 @@ procedure TForm1.BuildMenu;
 
 var
   FileMenu, EditMenu, ViewMenu, TrackMenu, HelpMenu, UndoItem,
-  ZoomInItem, ZoomOutItem: TMenuItem;
+  ZoomInItem, ZoomOutItem, CopyItem, PasteItem, DuplicateItem, SplitItem,
+  DeleteItem: TMenuItem;
 begin
   FMainMenu := TMainMenu.Create(Self);
   Menu := FMainMenu;
@@ -197,6 +205,17 @@ begin
   EditMenu := AddMenu('&Edit');
   UndoItem := AddItem(EditMenu, '&Undo', @EditUndoClick);
   UndoItem.ShortCut := Menus.ShortCut(Ord('Z'), [ssCtrl]);
+  AddSeparator(EditMenu);
+  CopyItem := AddItem(EditMenu, '&Copy', @EditCopyClick);
+  CopyItem.ShortCut := Menus.ShortCut(Ord('C'), [ssCtrl]);
+  PasteItem := AddItem(EditMenu, '&Paste', @EditPasteClick);
+  PasteItem.ShortCut := Menus.ShortCut(Ord('V'), [ssCtrl]);
+  DuplicateItem := AddItem(EditMenu, 'D&uplicate', @EditDuplicateClick);
+  DuplicateItem.ShortCut := Menus.ShortCut(Ord('D'), [ssCtrl]);
+  SplitItem := AddItem(EditMenu, 'S&plit', @EditSplitClick);
+  SplitItem.ShortCut := Menus.ShortCut(Ord('E'), [ssCtrl]);
+  DeleteItem := AddItem(EditMenu, 'D&elete', @EditDeleteClick);
+  DeleteItem.ShortCut := Menus.ShortCut(VK_DELETE, []);
   AddSeparator(EditMenu);
   AddItem(EditMenu, '&Preferences...', @EditPreferencesClick);
 
@@ -308,7 +327,7 @@ begin
   FDevicePanel := TPanel.Create(Self);
   FDevicePanel.Parent := Self;
   FDevicePanel.Align := alBottom;
-  FDevicePanel.Height := 160 + DeviceScrollBarHeight;
+  FDevicePanel.Height := WidgetTop + WidgetHeight + WidgetBottomMargin;
   FDevicePanel.BevelOuter := bvNone;
   FDevicePanel.OnDragOver := @DevicePanelDragOver;
   FDevicePanel.OnDragDrop := @DevicePanelDragDrop;
@@ -333,7 +352,7 @@ begin
   FTrackWidget.Left := TrackWidgetLeft;
   FTrackWidget.Top := WidgetTop;
   FTrackWidget.Width := 100;
-  FTrackWidget.Height := 144;
+  FTrackWidget.Height := WidgetHeight;
   FTrackWidget.BevelOuter := bvRaised;
 
   FTrackWidgetLabel := TLabel.Create(Self);
@@ -350,7 +369,7 @@ begin
   FInstrumentWidget.Left := InstrumentSlotLeft;
   FInstrumentWidget.Top := WidgetTop;
   FInstrumentWidget.Width := 220;
-  FInstrumentWidget.Height := 144;
+  FInstrumentWidget.Height := WidgetHeight;
   FInstrumentWidget.BevelOuter := bvRaised;
   FInstrumentWidget.Visible := False;
 
@@ -408,7 +427,7 @@ begin
   FWarpWidget.Left := WarpSlotLeft;
   FWarpWidget.Top := WidgetTop;
   FWarpWidget.Width := 500;
-  FWarpWidget.Height := 144;
+  FWarpWidget.Height := WidgetHeight;
   FWarpWidget.BevelOuter := bvRaised;
   FWarpWidget.Visible := False;
   FWarpWidget.Caption := '';
@@ -427,7 +446,7 @@ begin
   FInstrumentEditorWidget.Left := WarpSlotLeft;
   FInstrumentEditorWidget.Top := WidgetTop;
   FInstrumentEditorWidget.Width := 400;
-  FInstrumentEditorWidget.Height := 144;
+  FInstrumentEditorWidget.Height := WidgetHeight;
   FInstrumentEditorWidget.BevelOuter := bvRaised;
   FInstrumentEditorWidget.Visible := False;
   FInstrumentEditorWidget.Caption := '';
@@ -604,6 +623,49 @@ begin
     FArrangementView.ClearSelection;
     FArrangementView.RefreshTrack(TrackIndex);
   end;
+end;
+
+{ these are also bound as menu shortcuts (not just handled in
+  ArrangementView.KeyDown) specifically so they keep working no matter which
+  control currently has keyboard focus - the device panel grew a lot of
+  focusable widgets (sliders, edit boxes) this session, and raw KeyDown only
+  fires for whichever control is focused. Deferring to normal text editing
+  when a text box is focused mirrors the same guard FormKeyDown already uses
+  for note-triggering. }
+
+procedure TForm1.EditCopyClick(Sender: TObject);
+begin
+  if ActiveControl is TCustomEdit then
+    Exit;
+  FArrangementView.CopySelection;
+end;
+
+procedure TForm1.EditPasteClick(Sender: TObject);
+begin
+  if ActiveControl is TCustomEdit then
+    Exit;
+  FArrangementView.PasteSelection;
+end;
+
+procedure TForm1.EditDuplicateClick(Sender: TObject);
+begin
+  if ActiveControl is TCustomEdit then
+    Exit;
+  FArrangementView.DuplicateSelection;
+end;
+
+procedure TForm1.EditSplitClick(Sender: TObject);
+begin
+  if ActiveControl is TCustomEdit then
+    Exit;
+  FArrangementView.SplitAtCursor;
+end;
+
+procedure TForm1.EditDeleteClick(Sender: TObject);
+begin
+  if ActiveControl is TCustomEdit then
+    Exit;
+  FArrangementView.DeleteSelection;
 end;
 
 procedure TForm1.ViewZoomInClick(Sender: TObject);

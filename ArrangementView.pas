@@ -96,9 +96,6 @@ type
     procedure DrawClips;
     procedure DrawCursor;
     procedure DrawRangeSelection;
-    procedure CopySelection;
-    procedure PasteSelection;
-    procedure DuplicateSelection;
   protected
     procedure Paint; override;
     procedure Resize; override;
@@ -119,6 +116,11 @@ type
     procedure ZoomIn;
     procedure ZoomOut;
     procedure SetGridDivision(ADivision: Integer);
+    procedure CopySelection;
+    procedure PasteSelection;
+    procedure DuplicateSelection;
+    procedure SplitAtCursor;
+    procedure DeleteSelection;
     property KeyboardTrack: Integer read FKeyboardTrack;
     property SelectedTrack: Integer read FSelectedTrack;
     property SelectedClipIndex: Integer read FSelectedClip;
@@ -1195,6 +1197,7 @@ var
   RangeStart, RangeEnd, Span: Int64;
   Extracted, NewClip: TClip;
   Snapshotted: array[0..Project.MaxTracks - 1] of Boolean;
+  SrcClips: TClipArray;
 begin
   if FRangeSelectActive then
   begin
@@ -1208,9 +1211,14 @@ begin
 
     FillChar(Snapshotted, SizeOf(Snapshotted), 0);
     for t := t1 to t2 do
-      for i := 0 to High(Project.Tracks[t].Clips) do
-        if ExtractClipInRange(Project.Tracks[t].Clips[i], RangeStart, RangeEnd,
-          Extracted) then
+    begin
+      { snapshot first - CommitClipToTrack below reassigns/reorders
+        Project.Tracks[t].Clips (it overwrites whatever the duplicate lands
+        on), so iterating that array live while also mutating it would skip
+        or misread entries for any track with more than one clip in range }
+      SrcClips := Copy(Project.Tracks[t].Clips, 0, Length(Project.Tracks[t].Clips));
+      for i := 0 to High(SrcClips) do
+        if ExtractClipInRange(SrcClips[i], RangeStart, RangeEnd, Extracted) then
         begin
           if not Snapshotted[t] then
           begin
@@ -1222,6 +1230,7 @@ begin
           Project.CommitClipToTrack(t, NewClip);
           PushTrackToEngine(t);
         end;
+    end;
 
     { move the selection along with the duplicate, Ableton-style, so
       repeated Ctrl+D keeps stacking copies rightward }
@@ -1245,27 +1254,93 @@ begin
   end;
 end;
 
-procedure TArrangementView.KeyDown(var Key: Word; Shift: TShiftState);
+procedure TArrangementView.DeleteSelection;
+begin
+  if (FSelectedTrack >= 0) and (FSelectedClip >= 0) and
+    (FSelectedClip <= High(Project.Tracks[FSelectedTrack].Clips)) then
+  begin
+    Project.PushUndoSnapshot(FSelectedTrack);
+    Project.RemoveClipAt(FSelectedTrack, FSelectedClip);
+    PushTrackToEngine(FSelectedTrack);
+    SelectClip(FSelectedTrack, -1);
+    Invalidate;
+  end;
+end;
+
+procedure TArrangementView.SplitAtCursor;
 var
   Track: Integer;
-  Selected, NewClip, LeftPart, RightPart: TClip;
+  Selected, LeftPart, RightPart: TClip;
   SplitFrame, SplitRel: Int64;
   Clips, NewClips: TClipArray;
   j, k: Integer;
+begin
+  if FSelectedTrack < 0 then
+    Exit;
+  Track := FSelectedTrack;
+  if (FSelectedClip < 0) or (FSelectedClip > High(Project.Tracks[Track].Clips)) then
+    Exit;
+
+  Selected := Project.Tracks[Track].Clips[FSelectedClip];
+  SplitFrame := FCursorFrame;
+
+  if (SplitFrame > Selected.Position) and
+    (SplitFrame < Selected.Position + Selected.Length) then
+  begin
+    LeftPart := Selected;
+    RightPart := Selected;
+
+    { carry the matching half of the warp markers across the cut instead of
+      discarding them - otherwise splitting a warped clip would silently
+      revert both halves to unwarped 1:1 playback. The returned split frame
+      may differ slightly from the requested one (see SplitWarpMarkers) -
+      use it for the clip geometry too so the halves' lengths stay
+      consistent with their markers. }
+    SplitRel := SplitWarpMarkers(Selected.WarpMarkers,
+      SplitFrame - Selected.Position, LeftPart.WarpMarkers,
+      RightPart.WarpMarkers);
+
+    LeftPart.Length := SplitRel;
+
+    RightPart.Offset := Selected.Offset + SplitRel;
+    RightPart.Position := Selected.Position + SplitRel;
+    RightPart.Length := Selected.Length - SplitRel;
+
+    Project.PushUndoSnapshot(Track);
+
+    Clips := Project.Tracks[Track].Clips;
+    SetLength(NewClips, Length(Clips) + 1);
+    k := 0;
+    for j := 0 to High(Clips) do
+    begin
+      if j = FSelectedClip then
+      begin
+        NewClips[k] := LeftPart;
+        Inc(k);
+        NewClips[k] := RightPart;
+        Inc(k);
+      end
+      else
+      begin
+        NewClips[k] := Clips[j];
+        Inc(k);
+      end;
+    end;
+    Project.ReplaceTrackClips(Track, NewClips);
+    PushTrackToEngine(Track);
+
+    SelectClip(Track, -1);
+    Invalidate;
+  end;
+end;
+
+procedure TArrangementView.KeyDown(var Key: Word; Shift: TShiftState);
 begin
   inherited KeyDown(Key, Shift);
 
   if Key = VK_DELETE then
   begin
-    if (FSelectedTrack >= 0) and (FSelectedClip >= 0) and
-      (FSelectedClip <= High(Project.Tracks[FSelectedTrack].Clips)) then
-    begin
-      Project.PushUndoSnapshot(FSelectedTrack);
-      Project.RemoveClipAt(FSelectedTrack, FSelectedClip);
-      PushTrackToEngine(FSelectedTrack);
-      SelectClip(FSelectedTrack, -1);
-      Invalidate;
-    end;
+    DeleteSelection;
     Key := 0;
     Exit;
   end;
@@ -1277,83 +1352,20 @@ begin
   begin
     CopySelection;
     Key := 0;
-    Exit;
-  end;
-
-  if Key = Ord('V') then
+  end
+  else if Key = Ord('V') then
   begin
     PasteSelection;
     Key := 0;
-    Exit;
-  end;
-
-  if Key = Ord('D') then
+  end
+  else if Key = Ord('D') then
   begin
     DuplicateSelection;
     Key := 0;
-    Exit;
-  end;
-
-  if FSelectedTrack < 0 then
-    Exit;
-
-  Track := FSelectedTrack;
-  if (FSelectedClip < 0) or (FSelectedClip > High(Project.Tracks[Track].Clips)) then
-    Exit;
-
-  if (Key = Ord('E')) then
+  end
+  else if Key = Ord('E') then
   begin
-    Selected := Project.Tracks[Track].Clips[FSelectedClip];
-    SplitFrame := FCursorFrame;
-
-    if (SplitFrame > Selected.Position) and
-      (SplitFrame < Selected.Position + Selected.Length) then
-    begin
-      LeftPart := Selected;
-      RightPart := Selected;
-
-      { carry the matching half of the warp markers across the cut instead
-        of discarding them - otherwise splitting a warped clip would silently
-        revert both halves to unwarped 1:1 playback. The returned split
-        frame may differ slightly from the requested one (see
-        SplitWarpMarkers) - use it for the clip geometry too so the halves'
-        lengths stay consistent with their markers. }
-      SplitRel := SplitWarpMarkers(Selected.WarpMarkers,
-        SplitFrame - Selected.Position, LeftPart.WarpMarkers,
-        RightPart.WarpMarkers);
-
-      LeftPart.Length := SplitRel;
-
-      RightPart.Offset := Selected.Offset + SplitRel;
-      RightPart.Position := Selected.Position + SplitRel;
-      RightPart.Length := Selected.Length - SplitRel;
-
-      Project.PushUndoSnapshot(Track);
-
-      Clips := Project.Tracks[Track].Clips;
-      SetLength(NewClips, Length(Clips) + 1);
-      k := 0;
-      for j := 0 to High(Clips) do
-      begin
-        if j = FSelectedClip then
-        begin
-          NewClips[k] := LeftPart;
-          Inc(k);
-          NewClips[k] := RightPart;
-          Inc(k);
-        end
-        else
-        begin
-          NewClips[k] := Clips[j];
-          Inc(k);
-        end;
-      end;
-      Project.ReplaceTrackClips(Track, NewClips);
-      PushTrackToEngine(Track);
-
-      SelectClip(Track, -1);
-      Invalidate;
-    end;
+    SplitAtCursor;
     Key := 0;
   end;
 end;
