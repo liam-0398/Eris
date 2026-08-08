@@ -25,6 +25,17 @@ type
   end;
   TWarpMarkerArray = array of TWarpMarker;
 
+const
+  { Beats (default): each segment plays at 1:1 and loops/truncates its tail
+    to hit the next marker, preserving pitch - see AudioEngine.ClipSourcePosition.
+    RePitch: the classic continuous vari-speed warp - each segment resamples
+    linearly across its whole span using the same resample engine as
+    keyboard pitch-shifting, so moving a marker changes playback speed (and
+    therefore pitch) smoothly across both the segment before and after it. }
+  WarpModeBeats = 0;
+  WarpModeRePitch = 1;
+
+type
   TClip = record
     SampleID: Integer;
     Offset, Length: Int64;
@@ -33,6 +44,7 @@ type
     PitchSemitones: Single;
     Gain: Single;
     WarpMarkers: TWarpMarkerArray;
+    WarpMode: Integer;
   end;
 
   TClipArray = array of TClip;

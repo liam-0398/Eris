@@ -395,6 +395,7 @@ begin
     Items[i].Length := Clip.Length;
     Items[i].Position := Clip.Position;
     Items[i].Gain := Clip.Gain * Project.TrackVolume[ATrackIndex];
+    Items[i].WarpMode := Clip.WarpMode;
 
     MarkerCount := Length(Clip.WarpMarkers);
     if MarkerCount > MaxClipWarpMarkers then
@@ -640,7 +641,7 @@ begin
         DrawWaveform(Canvas, Rect(R.Left, R.Top + 14, R.Right, R.Bottom),
           Project.SamplePeaks[Clip.SampleID],
           Project.SamplePool[Clip.SampleID].FrameCount, Clip.Offset,
-          Clip.Offset + Clip.Length, Clip.WarpMarkers, FTrackColors[t]);
+          Clip.Offset + Clip.Length, Clip.WarpMarkers, FTrackColors[t], Clip.WarpMode);
 
       { border only (Frame, not Rectangle - Rectangle also fills the
         interior with the current brush, which would erase the waveform
@@ -1049,7 +1050,7 @@ begin
           markers and geometry stay consistent. }
         SplitRel := SplitWarpMarkers(FDragOrigClip.WarpMarkers,
           FDragCurrentClip.Position - FDragOrigClip.Position, DiscardMarkers,
-          FDragCurrentClip.WarpMarkers);
+          FDragCurrentClip.WarpMarkers, FDragOrigClip.WarpMode);
         FDragCurrentClip.Offset := FDragOrigClip.Offset + SplitRel;
         FDragCurrentClip.Position := FDragOrigClip.Position + SplitRel;
         FDragCurrentClip.Length := FDragOrigClip.Length - SplitRel;
@@ -1100,7 +1101,7 @@ begin
   if NewStart > AClip.Position then
   begin
     SplitRel := SplitWarpMarkers(AClip.WarpMarkers, NewStart - AClip.Position,
-      DiscardMarkers, KeptMarkers);
+      DiscardMarkers, KeptMarkers, AClip.WarpMode);
     AResult.WarpMarkers := KeptMarkers;
     AResult.Offset := AClip.Offset + SplitRel;
     AResult.Position := AClip.Position + SplitRel;
@@ -1109,7 +1110,7 @@ begin
   if NewEnd < ClipEnd then
   begin
     SplitRel := SplitWarpMarkers(AResult.WarpMarkers, NewEnd - AResult.Position,
-      KeptMarkers, DiscardMarkers);
+      KeptMarkers, DiscardMarkers, AClip.WarpMode);
     AResult.WarpMarkers := KeptMarkers;
     AResult.Length := SplitRel;
   end
@@ -1298,7 +1299,7 @@ begin
       consistent with their markers. }
     SplitRel := SplitWarpMarkers(Selected.WarpMarkers,
       SplitFrame - Selected.Position, LeftPart.WarpMarkers,
-      RightPart.WarpMarkers);
+      RightPart.WarpMarkers, Selected.WarpMode);
 
     LeftPart.Length := SplitRel;
 

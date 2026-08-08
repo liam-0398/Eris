@@ -20,6 +20,7 @@ type
     MarkerCount: Integer; { 0 = unwarped 1:1 playback }
     MarkerSource: array[0..MaxClipWarpMarkers - 1] of Int64;
     MarkerTimeline: array[0..MaxClipWarpMarkers - 1] of Int64;
+    WarpMode: Integer; { 0 = Beats (loop/truncate, preserves pitch), 1 = RePitch (vari-speed) }
   end;
   PPlaybackClip = ^TPlaybackClip;
 
@@ -347,6 +348,18 @@ begin
   SegTimelineLen := Clip^.MarkerTimeline[k + 1] - SegStartTimeline;
   SegSourceLen := Clip^.MarkerSource[k + 1] - SegStartSource;
   OffsetIntoSeg := AClipRelativeFrame - SegStartTimeline;
+
+  if Clip^.WarpMode = 1 then
+  begin
+    { RePitch: the classic continuous vari-speed warp - resample linearly
+      across the whole segment (same math the original warp implementation
+      and keyboard pitch-shifting both use), so dragging a marker audibly
+      stretches/compresses the segments on both sides of it together,
+      changing pitch, instead of preserving pitch via loop/truncate }
+    if SegTimelineLen = 0 then
+      Exit(SegStartSource);
+    Exit(SegStartSource + OffsetIntoSeg * (SegSourceLen / SegTimelineLen));
+  end;
 
   if SegTimelineLen <= 0 then
     Exit(SegStartSource);

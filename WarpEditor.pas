@@ -267,7 +267,7 @@ begin
   Sample := Project.SamplePool[AClip.SampleID];
   DrawWaveform(Canvas, Rect(0, WarpRulerHeight, Width, Height),
     Project.SamplePeaks[AClip.SampleID], Sample.FrameCount, AClip.Offset,
-    AClip.Offset + AClip.Length, AClip.WarpMarkers, clAqua);
+    AClip.Offset + AClip.Length, AClip.WarpMarkers, clAqua, AClip.WarpMode);
 end;
 
 procedure TWarpEditor.DrawMarkers(const AClip: TClip);
@@ -504,7 +504,8 @@ begin
   SetLength(NewMarkers, Length(Clip.WarpMarkers) + 1);
   for i := 0 to InsertAt - 1 do
     NewMarkers[i] := Clip.WarpMarkers[i];
-  NewMarkers[InsertAt].SourceFrame := Round(WarpedSourcePosition(Clip.WarpMarkers, ClickFrame));
+  NewMarkers[InsertAt].SourceFrame := Round(WarpedSourcePosition(Clip.WarpMarkers,
+    ClickFrame, nil, 0, 0, 44100, Clip.WarpMode));
   NewMarkers[InsertAt].TimelineFrame := ClickFrame;
   for i := InsertAt to High(Clip.WarpMarkers) do
     NewMarkers[i + 1] := Clip.WarpMarkers[i];

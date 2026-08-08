@@ -34,10 +34,16 @@ function ComputeWaveformPeaks(const ASample: TSample): TWaveformPeaks;
   AData/AFrameCount/AChannels are optional: when supplied, loop and
   truncation cut points are snapped to nearby zero crossings to avoid
   clicking. Callers that only need this for on-screen drawing (no click risk)
-  can omit them. }
+  can omit them.
+
+  AWarpMode = WarpModeRePitch switches to the classic continuous vari-speed
+  warp instead (same math as keyboard pitch-shifting): each segment resamples
+  linearly across its whole span, so dragging a marker audibly
+  stretches/compresses both neighboring segments together. }
 function WarpedSourcePosition(const AMarkers: TWarpMarkerArray;
   ATimelineFrame: Int64; AData: PSingle = nil; AFrameCount: Integer = 0;
-  AChannels: Integer = 0; ASampleRate: Integer = 44100): Double;
+  AChannels: Integer = 0; ASampleRate: Integer = 44100;
+  AWarpMode: Integer = WarpModeBeats): Double;
 
 { Cuts a warp marker array in two at ASplitFrame (clip-relative timeline
   frame), for use whenever a clip itself is split or trimmed (explicit split,
@@ -60,9 +66,12 @@ function WarpedSourcePosition(const AMarkers: TWarpMarkerArray;
   gets pushed forward to that segment's own end: the loop-fill math is driven
   by the segment's full natural length, so truncating the segment for the
   right half would shrink that reference and reconstruct a different (wrong)
-  loop - there's no marker pair that reproduces a partial loop exactly. }
+  loop - there's no marker pair that reproduces a partial loop exactly. This
+  snap-forward only applies in Beats mode; in RePitch mode a segment is a
+  plain linear resample and can be split cleanly anywhere. }
 function SplitWarpMarkers(const AMarkers: TWarpMarkerArray; ASplitFrame: Int64;
-  out ALeftMarkers, ARightMarkers: TWarpMarkerArray): Int64;
+  out ALeftMarkers, ARightMarkers: TWarpMarkerArray;
+  AWarpMode: Integer = WarpModeBeats): Int64;
 
 { Draws the waveform for [AStartFrame, AEndFrame) of a sample (out of
   ATotalFrameCount frames covered by APeaks) into ARect. When AMarkers has
@@ -71,7 +80,7 @@ function SplitWarpMarkers(const AMarkers: TWarpMarkerArray; ASplitFrame: Int64;
   drawn waveform visually stretches/compresses exactly like the audio does. }
 procedure DrawWaveform(ACanvas: TCanvas; const ARect: TRect;
   const APeaks: TWaveformPeaks; ATotalFrameCount, AStartFrame, AEndFrame: Int64;
-  const AMarkers: TWarpMarkerArray; AColor: TColor);
+  const AMarkers: TWarpMarkerArray; AColor: TColor; AWarpMode: Integer = WarpModeBeats);
 
 implementation
 
@@ -170,7 +179,7 @@ end;
 
 function WarpedSourcePosition(const AMarkers: TWarpMarkerArray;
   ATimelineFrame: Int64; AData: PSingle; AFrameCount: Integer;
-  AChannels: Integer; ASampleRate: Integer): Double;
+  AChannels: Integer; ASampleRate: Integer; AWarpMode: Integer): Double;
 var
   k: Integer;
   SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen: Int64;
@@ -190,6 +199,13 @@ begin
   SegTimelineLen := AMarkers[k + 1].TimelineFrame - SegStartTimeline;
   SegSourceLen := AMarkers[k + 1].SourceFrame - SegStartSource;
   OffsetIntoSeg := ATimelineFrame - SegStartTimeline;
+
+  if AWarpMode = WarpModeRePitch then
+  begin
+    if SegTimelineLen = 0 then
+      Exit(SegStartSource);
+    Exit(SegStartSource + OffsetIntoSeg * (SegSourceLen / SegTimelineLen));
+  end;
 
   if SegTimelineLen <= 0 then
     Exit(SegStartSource);
@@ -231,7 +247,7 @@ begin
 end;
 
 function SplitWarpMarkers(const AMarkers: TWarpMarkerArray; ASplitFrame: Int64;
-  out ALeftMarkers, ARightMarkers: TWarpMarkerArray): Int64;
+  out ALeftMarkers, ARightMarkers: TWarpMarkerArray; AWarpMode: Integer): Int64;
 var
   i, cnt, k: Integer;
   SplitSource: Int64;
@@ -262,8 +278,8 @@ begin
   SegTimelineLen := AMarkers[k + 1].TimelineFrame - SegStartTimeline;
   SegSourceLen := AMarkers[k + 1].SourceFrame - AMarkers[k].SourceFrame;
   OffsetIntoSeg := ASplitFrame - SegStartTimeline;
-  if (OffsetIntoSeg > 0) and (OffsetIntoSeg < SegTimelineLen) and
-    (SegTimelineLen > SegSourceLen) then
+  if (AWarpMode = WarpModeBeats) and (OffsetIntoSeg > 0) and
+    (OffsetIntoSeg < SegTimelineLen) and (SegTimelineLen > SegSourceLen) then
     ASplitFrame := AMarkers[k + 1].TimelineFrame;
 
   Result := ASplitFrame;
@@ -274,7 +290,8 @@ begin
   if ASplitFrame >= AMarkers[High(AMarkers)].TimelineFrame then
     SplitSource := AMarkers[High(AMarkers)].SourceFrame
   else
-    SplitSource := Round(WarpedSourcePosition(AMarkers, ASplitFrame));
+    SplitSource := Round(WarpedSourcePosition(AMarkers, ASplitFrame, nil, 0, 0,
+      44100, AWarpMode));
 
   cnt := 0;
   for i := 0 to High(AMarkers) do
@@ -318,7 +335,7 @@ end;
 
 procedure DrawWaveform(ACanvas: TCanvas; const ARect: TRect;
   const APeaks: TWaveformPeaks; ATotalFrameCount, AStartFrame, AEndFrame: Int64;
-  const AMarkers: TWarpMarkerArray; AColor: TColor);
+  const AMarkers: TWarpMarkerArray; AColor: TColor; AWarpMode: Integer);
 var
   x, midY, halfH, RectWidth: Integer;
   BinCount: Integer;
@@ -346,8 +363,10 @@ begin
     if TimelineFrame1 <= TimelineFrame0 then
       TimelineFrame1 := TimelineFrame0 + 1;
 
-    SrcFrame0 := AStartFrame + WarpedSourcePosition(AMarkers, TimelineFrame0);
-    SrcFrame1 := AStartFrame + WarpedSourcePosition(AMarkers, TimelineFrame1);
+    SrcFrame0 := AStartFrame + WarpedSourcePosition(AMarkers, TimelineFrame0,
+      nil, 0, 0, 44100, AWarpMode);
+    SrcFrame1 := AStartFrame + WarpedSourcePosition(AMarkers, TimelineFrame1,
+      nil, 0, 0, 44100, AWarpMode);
     if SrcFrame1 <= SrcFrame0 then
       SrcFrame1 := SrcFrame0 + 1;
 

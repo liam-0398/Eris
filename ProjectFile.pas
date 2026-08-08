@@ -59,6 +59,7 @@ begin
         Ini.WriteInt64(Section, Prefix + 'Position', Clip.Position);
         Ini.WriteFloat(Section, Prefix + 'Pitch', Clip.PitchSemitones);
         Ini.WriteFloat(Section, Prefix + 'Gain', Clip.Gain);
+        Ini.WriteInteger(Section, Prefix + 'WarpMode', Clip.WarpMode);
 
         Ini.WriteInteger(Section, Prefix + 'MarkerCount', Length(Clip.WarpMarkers));
         for m := 0 to High(Clip.WarpMarkers) do
@@ -71,6 +72,7 @@ begin
       end;
     end;
 
+    Result := True;
   finally
     Ini.Free;
   end;
@@ -158,6 +160,7 @@ begin
         Clip.TrackID := t;
         Clip.PitchSemitones := Ini.ReadFloat(Section, Prefix + 'Pitch', 0);
         Clip.Gain := Ini.ReadFloat(Section, Prefix + 'Gain', 1.0);
+        Clip.WarpMode := Ini.ReadInteger(Section, Prefix + 'WarpMode', SampleTypes.WarpModeBeats);
 
         MarkerCount := Ini.ReadInteger(Section, Prefix + 'MarkerCount', 0);
         SetLength(Clip.WarpMarkers, MarkerCount);
@@ -222,7 +225,8 @@ begin
         for Frame := 0 to Clip.Length - 1 do
         begin
           SrcPos := Clip.Offset + WarpedSourcePosition(Clip.WarpMarkers, Frame,
-            Sample.Data, Sample.FrameCount, Sample.Channels, AudioEngine.ProjectSampleRate);
+            Sample.Data, Sample.FrameCount, Sample.Channels, AudioEngine.ProjectSampleRate,
+            Clip.WarpMode);
           if (SrcPos < 0) or (SrcPos >= Sample.FrameCount) then
             Continue;
 

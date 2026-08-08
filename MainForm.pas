@@ -6,7 +6,7 @@ interface
 
 uses
   Classes, SysUtils, Math, Forms, Controls, Graphics, Dialogs, Menus, ExtCtrls,
-  StdCtrls, ComCtrls, LCLType, ArrangementView, PrefsForm, FileBrowser,
+  StdCtrls, ComCtrls, Buttons, LCLType, ArrangementView, PrefsForm, FileBrowser,
   SampleTypes, WavDecoder, AudioEngine, Project, ProjectFile, WarpEditor,
   InstrumentEditor, Effects, EffectsRack;
 
@@ -50,6 +50,7 @@ type
     FDropHintLabel: TLabel;
     FWarpWidget: TPanel;
     FWarpEditor: TWarpEditor;
+    FWarpRepitchToggle: TSpeedButton;
     FInstrumentEditorWidget: TPanel;
     FInstrumentEditor: TInstrumentEditor;
     FDeviceScrollBar: TScrollBar;
@@ -95,6 +96,7 @@ type
     procedure ArrangementViewClipSelectionChanged(Sender: TObject);
     procedure WarpEditorClipChanged(Sender: TObject);
     procedure InstrumentEditorChanged(Sender: TObject);
+    procedure WarpRepitchToggleClick(Sender: TObject);
     procedure WarpZoomInClick(Sender: TObject);
     procedure WarpZoomOutClick(Sender: TObject);
     procedure InstrumentZoomInClick(Sender: TObject);
@@ -234,32 +236,33 @@ end;
 
 procedure TForm1.BuildLayout;
 
-  procedure AddZoomButtons(AParent: TWinControl; AZoomInClick, AZoomOutClick: TNotifyEvent);
+  function AddZoomButtons(AParent: TWinControl; AZoomInClick, AZoomOutClick: TNotifyEvent): TPanel;
   var
-    Panel: TPanel;
     BtnPlus, BtnMinus: TButton;
   begin
-    Panel := TPanel.Create(Self);
-    Panel.Parent := AParent;
-    Panel.Align := alLeft;
-    Panel.Width := 22;
-    Panel.BevelOuter := bvNone;
+    Result := TPanel.Create(Self);
+    Result.Parent := AParent;
+    Result.Align := alLeft;
+    Result.Width := 22;
+    Result.BevelOuter := bvNone;
 
     BtnPlus := TButton.Create(Self);
-    BtnPlus.Parent := Panel;
+    BtnPlus.Parent := Result;
     BtnPlus.Caption := '+';
     BtnPlus.Align := alTop;
     BtnPlus.Height := 24;
     BtnPlus.OnClick := AZoomInClick;
 
     BtnMinus := TButton.Create(Self);
-    BtnMinus.Parent := Panel;
+    BtnMinus.Parent := Result;
     BtnMinus.Caption := '-';
     BtnMinus.Align := alBottom;
     BtnMinus.Height := 24;
     BtnMinus.OnClick := AZoomOutClick;
   end;
 
+var
+  WarpButtonsPanel: TPanel;
 begin
   Width := 1280;
   Height := 800;
@@ -432,7 +435,20 @@ begin
   FWarpWidget.Visible := False;
   FWarpWidget.Caption := '';
 
-  AddZoomButtons(FWarpWidget, @WarpZoomInClick, @WarpZoomOutClick);
+  WarpButtonsPanel := AddZoomButtons(FWarpWidget, @WarpZoomInClick, @WarpZoomOutClick);
+
+  { Re-Pitch toggle - the classic continuous vari-speed warp (same tech as
+    keyboard pitch-shifting), as an alternative to the default Beats mode.
+    Lives in the same left-side handle as the zoom +/- buttons. }
+  FWarpRepitchToggle := TSpeedButton.Create(Self);
+  FWarpRepitchToggle.Parent := WarpButtonsPanel;
+  FWarpRepitchToggle.Caption := 'RP';
+  FWarpRepitchToggle.Align := alBottom;
+  FWarpRepitchToggle.Height := 24;
+  FWarpRepitchToggle.ShowHint := True;
+  FWarpRepitchToggle.Hint := 'Re-Pitch warp mode (continuous vari-speed, changes pitch)' +
+    LineEnding + 'instead of the default Beats mode (preserves pitch)';
+  FWarpRepitchToggle.OnClick := @WarpRepitchToggleClick;
 
   FWarpEditor := TWarpEditor.Create(Self);
   FWarpEditor.Parent := FWarpWidget;
@@ -778,6 +794,7 @@ begin
   Clip.TrackID := FRecordTrackIndex;
   Clip.PitchSemitones := 0;
   Clip.Gain := 1.0;
+  Clip.WarpMode := SampleTypes.WarpModeBeats;
 
   Project.PushUndoSnapshot(FRecordTrackIndex);
   Project.CommitClipToTrack(FRecordTrackIndex, Clip);
@@ -858,6 +875,7 @@ begin
   Clip.TrackID := ATrackIndex;
   Clip.PitchSemitones := 0;
   Clip.Gain := 1.0;
+  Clip.WarpMode := SampleTypes.WarpModeBeats;
 
   Project.PushUndoSnapshot(ATrackIndex);
   Project.CommitClipToTrack(ATrackIndex, Clip);
@@ -882,6 +900,9 @@ begin
       FArrangementView.SelectedClipIndex);
     FWarpWidget.Visible := True;
     RefreshWarpWidgetSize;
+    FWarpRepitchToggle.Down :=
+      Project.Tracks[FArrangementView.SelectedTrack].Clips[FArrangementView.SelectedClipIndex].WarpMode
+      = SampleTypes.WarpModeRePitch;
   end
   else
     FWarpWidget.Visible := False;
@@ -899,6 +920,28 @@ procedure TForm1.InstrumentEditorChanged(Sender: TObject);
 begin
   { the start/end trim points are read live from Project at each keypress -
     nothing needs to be pushed ahead of time }
+end;
+
+procedure TForm1.WarpRepitchToggleClick(Sender: TObject);
+var
+  Track, ClipIdx: Integer;
+begin
+  Track := FArrangementView.SelectedTrack;
+  ClipIdx := FArrangementView.SelectedClipIndex;
+  if (Track < 0) or (ClipIdx < 0) or
+    (ClipIdx > High(Project.Tracks[Track].Clips)) then
+  begin
+    FWarpRepitchToggle.Down := False; { nothing selected - nothing to toggle }
+    Exit;
+  end;
+
+  if FWarpRepitchToggle.Down then
+    Project.Tracks[Track].Clips[ClipIdx].WarpMode := SampleTypes.WarpModeRePitch
+  else
+    Project.Tracks[Track].Clips[ClipIdx].WarpMode := SampleTypes.WarpModeBeats;
+
+  FArrangementView.RefreshTrack(Track);
+  FWarpEditor.Invalidate;
 end;
 
 procedure TForm1.WarpZoomInClick(Sender: TObject);

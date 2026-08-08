@@ -57,7 +57,7 @@ begin
         (see SplitWarpMarkers) - use it for the clip's own geometry too so
         length and markers stay consistent }
       SplitRel := SplitWarpMarkers(Existing.WarpMarkers,
-        ANewPosition - ExistingStart, KeptMarkers, DiscardMarkers);
+        ANewPosition - ExistingStart, KeptMarkers, DiscardMarkers, Existing.WarpMode);
       Existing.WarpMarkers := KeptMarkers;
       Existing.Length := SplitRel;
       Append(Existing);
@@ -68,7 +68,7 @@ begin
         move forward, so this is exactly the right half of a split at the
         trim point - carry over the matching (rebased) warp markers. }
       SplitRel := SplitWarpMarkers(Existing.WarpMarkers,
-        NewEnd - ExistingStart, DiscardMarkers, KeptMarkers);
+        NewEnd - ExistingStart, DiscardMarkers, KeptMarkers, Existing.WarpMode);
       Existing.WarpMarkers := KeptMarkers;
       Existing.Offset := Existing.Offset + SplitRel;
       Existing.Position := ExistingStart + SplitRel;
@@ -81,12 +81,12 @@ begin
         remainders, each keeping its own matching half of the warp markers }
       Left := Existing;
       SplitRel := SplitWarpMarkers(Existing.WarpMarkers,
-        ANewPosition - ExistingStart, Left.WarpMarkers, DiscardMarkers);
+        ANewPosition - ExistingStart, Left.WarpMarkers, DiscardMarkers, Existing.WarpMode);
       Left.Length := SplitRel;
 
       Right := Existing;
       SplitRel2 := SplitWarpMarkers(Existing.WarpMarkers,
-        NewEnd - ExistingStart, DiscardMarkers, Right.WarpMarkers);
+        NewEnd - ExistingStart, DiscardMarkers, Right.WarpMarkers, Existing.WarpMode);
       Right.Offset := Existing.Offset + SplitRel2;
       Right.Position := ExistingStart + SplitRel2;
       Right.Length := ExistingEnd - (ExistingStart + SplitRel2);
