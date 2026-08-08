@@ -26,7 +26,6 @@ type
       MinPixelsPerSecond = 5;
       MaxPixelsPerSecond = 3000;
       ZoomFactor = 1.25;
-      MinGridPixelWidth = 16;
       EdgeGrabPixels = 6;
       ScrollBarHeight = 16;
       AutoScrollMarginPixels = 40;
@@ -59,6 +58,7 @@ type
       FLoopStart: Int64;
       FLoopEnd: Int64;
       FDraggingVolumeTrack: Integer;
+      FGridDivision: Integer; { divisions per bar, e.g. 16 = 1/16th notes }
     function LaneWidth: Integer;
     function ContentHeight: Integer;
     function ContentEndFrame: Int64;
@@ -106,6 +106,7 @@ type
     procedure ClearSelection;
     procedure ZoomIn;
     procedure ZoomOut;
+    procedure SetGridDivision(ADivision: Integer);
     property KeyboardTrack: Integer read FKeyboardTrack;
     property SelectedTrack: Integer read FSelectedTrack;
     property SelectedClipIndex: Integer read FSelectedClip;
@@ -135,6 +136,7 @@ begin
   FLoopStart := -1;
   FLoopEnd := -1;
   FDraggingVolumeTrack := -1;
+  FGridDivision := 16;
 
   Randomize;
   for i := 0 to Project.MaxTracks - 1 do
@@ -223,23 +225,16 @@ begin
 end;
 
 function TArrangementView.CurrentGridFrames: Int64;
-const
-  Divisions: array[0..5] of Integer = (1, 2, 4, 8, 16, 32);
-var
-  BarF: Int64;
-  i: Integer;
-  DivFrames: Int64;
 begin
-  BarF := BeatFrames * 4;
-  Result := BarF;
-  for i := 0 to High(Divisions) do
-  begin
-    DivFrames := BarF div Divisions[i];
-    if FrameToX(DivFrames) >= MinGridPixelWidth then
-      Result := DivFrames
-    else
-      Break;
-  end;
+  Result := (BeatFrames * 4) div FGridDivision;
+end;
+
+procedure TArrangementView.SetGridDivision(ADivision: Integer);
+begin
+  if ADivision < 1 then
+    ADivision := 1;
+  FGridDivision := ADivision;
+  Invalidate;
 end;
 
 function TArrangementView.SnapFrame(AFrame: Int64): Int64;

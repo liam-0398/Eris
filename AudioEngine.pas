@@ -39,6 +39,8 @@ function AudioEngineHasClip: Boolean;
 function AudioEngineGetPosition: Int64;
 function AudioEngineLiveNoteActive(ATrackIndex: Integer): Boolean;
 function AudioEngineLiveNotePosition(ATrackIndex: Integer): Int64;
+procedure AudioEngineSetSP1200Enabled(AEnabled: Boolean);
+function AudioEngineGetSP1200Enabled: Boolean;
 
 const
   RecordStateIdle = 0;
@@ -53,7 +55,7 @@ function AudioEngineTakeRecordedAudio(out AData: PSingle; out AFrameCount: Integ
 implementation
 
 uses
-  Classes, SysUtils, AudioBackend, ALSABackend, Resample, Project;
+  Classes, SysUtils, AudioBackend, ALSABackend, Resample, Project, SP1200;
 
 const
   BlockFrames = 512;
@@ -67,7 +69,7 @@ const
 
 type
   TCommandKind = (ckSetTrackClips, ckPlay, ckStop, ckSeek, ckTriggerNote,
-    ckStartCountIn, ckStopRecording, ckSetLoop, ckClearLoop);
+    ckStartCountIn, ckStopRecording, ckSetLoop, ckClearLoop, ckSetSP1200Enabled);
 
   TCommand = record
     Kind: TCommandKind;
@@ -133,6 +135,9 @@ var
   CountInFramesUntilNextBeat: Int64;
   ClickSamples: array of Single;
   ClickPlayPos: Integer;
+
+  SP1200Enabled: Boolean;
+  SP1200MixState: TSP1200State;
 
 function PushCommand(const ACmd: TCommand): Boolean;
 var
@@ -237,6 +242,8 @@ begin
         end;
       ckClearLoop:
         LoopActive := False;
+      ckSetSP1200Enabled:
+        SP1200Enabled := Cmd.Param <> 0;
     end;
 end;
 
@@ -270,10 +277,58 @@ begin
   ANote.Position := ANote.Position + ANote.Rate;
 end;
 
+const
+  { how much of a stretched segment's tail gets looped to fill extra time,
+    rather than slowing the whole segment down - keeps pitch untouched,
+    matching Ableton's "Beats" warp mode rather than vari-speed/Re-Pitch }
+  WarpLoopWindowMs = 50;
+  { small local search window used to land loop/truncate cut points on a
+    near-silent sample, so the splice doesn't click }
+  WarpZeroCrossSearchFrames = 32;
+
+function FindNearestZeroCrossing(AData: PSingle; AFrameCount, AChannels: Integer;
+  ACenterFrame: Int64; ASearchRadius: Integer): Int64;
+var
+  i, lo, hi: Int64;
+  ch: Integer;
+  amp, bestAmp: Single;
+begin
+  if (AData = nil) or (AFrameCount <= 0) then
+    Exit(ACenterFrame);
+
+  Result := ACenterFrame;
+  if Result < 0 then
+    Result := 0;
+  if Result > AFrameCount - 1 then
+    Result := AFrameCount - 1;
+
+  lo := ACenterFrame - ASearchRadius;
+  if lo < 0 then
+    lo := 0;
+  hi := ACenterFrame + ASearchRadius;
+  if hi > AFrameCount - 1 then
+    hi := AFrameCount - 1;
+
+  bestAmp := 1.0e30;
+  for i := lo to hi do
+  begin
+    amp := 0;
+    for ch := 0 to AChannels - 1 do
+      amp := amp + Abs(AData[i * AChannels + ch]);
+    if amp < bestAmp then
+    begin
+      bestAmp := amp;
+      Result := i;
+    end;
+  end;
+end;
+
 function ClipSourcePosition(Clip: PPlaybackClip; AClipRelativeFrame: Int64): Double;
 var
   k: Integer;
-  SegTime, SegSrc: Int64;
+  SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen: Int64;
+  OffsetIntoSeg, StopPoint, SnappedStop, CandidatePos: Int64;
+  Overflow, LoopWindow, LoopStart, LoopEnd, ActualLoopWindow: Int64;
 begin
   if Clip^.MarkerCount < 2 then
     Exit(AClipRelativeFrame);
@@ -283,13 +338,59 @@ begin
     (AClipRelativeFrame >= Clip^.MarkerTimeline[k + 1]) do
     Inc(k);
 
-  SegTime := Clip^.MarkerTimeline[k + 1] - Clip^.MarkerTimeline[k];
-  SegSrc := Clip^.MarkerSource[k + 1] - Clip^.MarkerSource[k];
-  if SegTime = 0 then
-    Result := Clip^.MarkerSource[k]
-  else
-    Result := Clip^.MarkerSource[k] +
-      (AClipRelativeFrame - Clip^.MarkerTimeline[k]) * (SegSrc / SegTime);
+  SegStartTimeline := Clip^.MarkerTimeline[k];
+  SegStartSource := Clip^.MarkerSource[k];
+  SegTimelineLen := Clip^.MarkerTimeline[k + 1] - SegStartTimeline;
+  SegSourceLen := Clip^.MarkerSource[k + 1] - SegStartSource;
+  OffsetIntoSeg := AClipRelativeFrame - SegStartTimeline;
+
+  if SegTimelineLen <= 0 then
+    Exit(SegStartSource);
+  if SegSourceLen <= 0 then
+    Exit(SegStartSource);
+
+  if OffsetIntoSeg < SegSourceLen then
+  begin
+    { natural, un-stretched playback - always straight 1:1 through the
+      source, pitch untouched, rather than a continuous vari-speed resample
+      across the whole segment }
+    if SegTimelineLen < SegSourceLen then
+    begin
+      { this segment needs to end up SHORTER than its natural length - land
+        on a nearby zero crossing instead of hard-cutting exactly at the
+        marker, so the handover to the next segment doesn't click }
+      StopPoint := SegStartSource + SegTimelineLen;
+      SnappedStop := FindNearestZeroCrossing(Clip^.Data, Clip^.FrameCount,
+        Clip^.Channels, StopPoint, WarpZeroCrossSearchFrames);
+      CandidatePos := SegStartSource + OffsetIntoSeg;
+      if CandidatePos >= SnappedStop then
+        Exit(SnappedStop);
+      Exit(CandidatePos);
+    end;
+    Exit(SegStartSource + OffsetIntoSeg);
+  end;
+
+  { past the natural end but the segment needs to be LONGER - loop a short
+    tail window (snapped to zero crossings on both ends) to fill the extra
+    time instead of slowing playback down }
+  Overflow := OffsetIntoSeg - SegSourceLen;
+  LoopWindow := (WarpLoopWindowMs * ProjectSampleRate) div 1000;
+  if LoopWindow > SegSourceLen then
+    LoopWindow := SegSourceLen;
+  if LoopWindow < 1 then
+    LoopWindow := 1;
+
+  LoopStart := FindNearestZeroCrossing(Clip^.Data, Clip^.FrameCount,
+    Clip^.Channels, SegStartSource + SegSourceLen - LoopWindow,
+    WarpZeroCrossSearchFrames);
+  LoopEnd := FindNearestZeroCrossing(Clip^.Data, Clip^.FrameCount,
+    Clip^.Channels, SegStartSource + SegSourceLen, WarpZeroCrossSearchFrames);
+
+  ActualLoopWindow := LoopEnd - LoopStart;
+  if ActualLoopWindow < 1 then
+    ActualLoopWindow := 1;
+
+  Result := LoopStart + (Overflow mod ActualLoopWindow);
 end;
 
 procedure FillBlock;
@@ -444,6 +545,9 @@ begin
     if Playing or AnyLiveNoteActive or (RecordState <> RecordStateIdle) then
     begin
       FillBlock;
+      if SP1200Enabled then
+        SP1200Process(SP1200MixState, MixBuffer, BlockFrames, OutputChannels,
+          ProjectSampleRate);
       Backend.WriteBlock(MixBuffer, BlockFrames);
     end
     else
@@ -474,6 +578,8 @@ begin
   Playhead := 0;
   Playing := False;
   LoopActive := False;
+  SP1200Enabled := False;
+  SP1200Reset(SP1200MixState);
   RecordState := RecordStateIdle;
   RecordWritePos := 0;
   ClickPlayPos := -1;
@@ -624,6 +730,23 @@ begin
   if (ATrackIndex < 0) or (ATrackIndex >= MaxTracks) then
     Exit(0);
   Result := Trunc(LiveNotes[ATrackIndex].Position);
+end;
+
+procedure AudioEngineSetSP1200Enabled(AEnabled: Boolean);
+var
+  Cmd: TCommand;
+begin
+  Cmd.Kind := ckSetSP1200Enabled;
+  if AEnabled then
+    Cmd.Param := 1
+  else
+    Cmd.Param := 0;
+  PushCommand(Cmd);
+end;
+
+function AudioEngineGetSP1200Enabled: Boolean;
+begin
+  Result := SP1200Enabled;
 end;
 
 procedure AudioEngineStartCountIn(ATrackIndex: Integer);

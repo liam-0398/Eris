@@ -12,7 +12,7 @@ implementation
 
 uses
   SysUtils, Classes, IniFiles, SampleTypes, Project, WavDecoder, AudioEngine,
-  Resample, Waveform;
+  Resample, Waveform, SP1200;
 
 function SaveProject(const APath: string): Boolean;
 var
@@ -162,6 +162,7 @@ var
   Buffer: PSingle;
   Frame, OutIdx: Int64;
   SrcPos: Double;
+  SP1200St: TSP1200State;
 begin
   Result := False;
   ProjectLengthFrames := 0;
@@ -188,7 +189,8 @@ begin
 
         for Frame := 0 to Clip.Length - 1 do
         begin
-          SrcPos := Clip.Offset + WarpedSourcePosition(Clip.WarpMarkers, Frame);
+          SrcPos := Clip.Offset + WarpedSourcePosition(Clip.WarpMarkers, Frame,
+            Sample.Data, Sample.FrameCount, Sample.Channels, AudioEngine.ProjectSampleRate);
           if (SrcPos < 0) or (SrcPos >= Sample.FrameCount) then
             Continue;
 
@@ -210,6 +212,13 @@ begin
           end;
         end;
       end;
+
+    if AudioEngineGetSP1200Enabled then
+    begin
+      SP1200Reset(SP1200St);
+      SP1200Process(SP1200St, Buffer, ProjectLengthFrames, OutChannels,
+        ProjectSampleRate);
+    end;
 
     Result := EncodeWav(AOutputPath, Buffer, ProjectLengthFrames, OutChannels,
       ProjectSampleRate);

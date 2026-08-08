@@ -18,13 +18,26 @@ type
 
 function ComputeWaveformPeaks(const ASample: TSample): TWaveformPeaks;
 
-{ Piecewise vari-speed lookup shared by every warp-aware consumer (the
-  realtime engine keeps its own fixed-size copy of this same math for
-  lock-free safety - see AudioEngine.ClipSourcePosition). Returns a frame
-  position relative to the clip's Offset; an empty/short AMarkers means
-  unwarped 1:1 playback. }
+{ Clip-warp segment lookup shared by every warp-aware consumer (the realtime
+  engine keeps its own fixed-size copy of this same math for lock-free
+  safety - see AudioEngine.ClipSourcePosition). Returns a frame position
+  relative to the clip's Offset; an empty/short AMarkers means unwarped 1:1
+  playback.
+
+  Each marker-to-marker segment always plays back at 1:1 (pitch untouched):
+  if the segment needs to be longer than its natural length, the tail is
+  looped to fill the extra time; if shorter, the tail is simply skipped.
+  This matches Ableton's "Beats" warp mode rather than a continuous
+  vari-speed/Re-Pitch resample across the whole segment - nudging one marker
+  no longer detunes the whole span, only the one adjusted segment.
+
+  AData/AFrameCount/AChannels are optional: when supplied, loop and
+  truncation cut points are snapped to nearby zero crossings to avoid
+  clicking. Callers that only need this for on-screen drawing (no click risk)
+  can omit them. }
 function WarpedSourcePosition(const AMarkers: TWarpMarkerArray;
-  ATimelineFrame: Int64): Double;
+  ATimelineFrame: Int64; AData: PSingle = nil; AFrameCount: Integer = 0;
+  AChannels: Integer = 0; ASampleRate: Integer = 44100): Double;
 
 { Draws the waveform for [AStartFrame, AEndFrame) of a sample (out of
   ATotalFrameCount frames covered by APeaks) into ARect. When AMarkers has
@@ -89,11 +102,55 @@ begin
   end;
 end;
 
+const
+  WarpLoopWindowMs = 50;
+  WarpZeroCrossSearchFrames = 32;
+
+function FindNearestZeroCrossing(AData: PSingle; AFrameCount, AChannels: Integer;
+  ACenterFrame: Int64; ASearchRadius: Integer): Int64;
+var
+  i, lo, hi: Int64;
+  ch: Integer;
+  amp, bestAmp: Single;
+begin
+  if (AData = nil) or (AFrameCount <= 0) then
+    Exit(ACenterFrame);
+
+  Result := ACenterFrame;
+  if Result < 0 then
+    Result := 0;
+  if Result > AFrameCount - 1 then
+    Result := AFrameCount - 1;
+
+  lo := ACenterFrame - ASearchRadius;
+  if lo < 0 then
+    lo := 0;
+  hi := ACenterFrame + ASearchRadius;
+  if hi > AFrameCount - 1 then
+    hi := AFrameCount - 1;
+
+  bestAmp := 1.0e30;
+  for i := lo to hi do
+  begin
+    amp := 0;
+    for ch := 0 to AChannels - 1 do
+      amp := amp + Abs(AData[i * AChannels + ch]);
+    if amp < bestAmp then
+    begin
+      bestAmp := amp;
+      Result := i;
+    end;
+  end;
+end;
+
 function WarpedSourcePosition(const AMarkers: TWarpMarkerArray;
-  ATimelineFrame: Int64): Double;
+  ATimelineFrame: Int64; AData: PSingle; AFrameCount: Integer;
+  AChannels: Integer; ASampleRate: Integer): Double;
 var
   k: Integer;
-  SegTime, SegSrc: Int64;
+  SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen: Int64;
+  OffsetIntoSeg, StopPoint, SnappedStop, CandidatePos: Int64;
+  Overflow, LoopWindow, LoopStart, LoopEnd, ActualLoopWindow: Int64;
 begin
   if Length(AMarkers) < 2 then
     Exit(ATimelineFrame);
@@ -103,13 +160,49 @@ begin
     (ATimelineFrame >= AMarkers[k + 1].TimelineFrame) do
     Inc(k);
 
-  SegTime := AMarkers[k + 1].TimelineFrame - AMarkers[k].TimelineFrame;
-  SegSrc := AMarkers[k + 1].SourceFrame - AMarkers[k].SourceFrame;
-  if SegTime = 0 then
-    Result := AMarkers[k].SourceFrame
-  else
-    Result := AMarkers[k].SourceFrame +
-      (ATimelineFrame - AMarkers[k].TimelineFrame) * (SegSrc / SegTime);
+  SegStartTimeline := AMarkers[k].TimelineFrame;
+  SegStartSource := AMarkers[k].SourceFrame;
+  SegTimelineLen := AMarkers[k + 1].TimelineFrame - SegStartTimeline;
+  SegSourceLen := AMarkers[k + 1].SourceFrame - SegStartSource;
+  OffsetIntoSeg := ATimelineFrame - SegStartTimeline;
+
+  if SegTimelineLen <= 0 then
+    Exit(SegStartSource);
+  if SegSourceLen <= 0 then
+    Exit(SegStartSource);
+
+  if OffsetIntoSeg < SegSourceLen then
+  begin
+    if SegTimelineLen < SegSourceLen then
+    begin
+      StopPoint := SegStartSource + SegTimelineLen;
+      SnappedStop := FindNearestZeroCrossing(AData, AFrameCount, AChannels,
+        StopPoint, WarpZeroCrossSearchFrames);
+      CandidatePos := SegStartSource + OffsetIntoSeg;
+      if CandidatePos >= SnappedStop then
+        Exit(SnappedStop);
+      Exit(CandidatePos);
+    end;
+    Exit(SegStartSource + OffsetIntoSeg);
+  end;
+
+  Overflow := OffsetIntoSeg - SegSourceLen;
+  LoopWindow := (WarpLoopWindowMs * ASampleRate) div 1000;
+  if LoopWindow > SegSourceLen then
+    LoopWindow := SegSourceLen;
+  if LoopWindow < 1 then
+    LoopWindow := 1;
+
+  LoopStart := FindNearestZeroCrossing(AData, AFrameCount, AChannels,
+    SegStartSource + SegSourceLen - LoopWindow, WarpZeroCrossSearchFrames);
+  LoopEnd := FindNearestZeroCrossing(AData, AFrameCount, AChannels,
+    SegStartSource + SegSourceLen, WarpZeroCrossSearchFrames);
+
+  ActualLoopWindow := LoopEnd - LoopStart;
+  if ActualLoopWindow < 1 then
+    ActualLoopWindow := 1;
+
+  Result := LoopStart + (Overflow mod ActualLoopWindow);
 end;
 
 procedure DrawWaveform(ACanvas: TCanvas; const ARect: TRect;

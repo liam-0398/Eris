@@ -6,8 +6,9 @@ interface
 
 uses
   Classes, SysUtils, Math, Forms, Controls, Graphics, Dialogs, Menus, ExtCtrls,
-  StdCtrls, LCLType, ArrangementView, PrefsForm, FileBrowser, SampleTypes,
-  WavDecoder, AudioEngine, Project, ProjectFile, WarpEditor, InstrumentEditor;
+  StdCtrls, ComCtrls, LCLType, ArrangementView, PrefsForm, FileBrowser,
+  SampleTypes, WavDecoder, AudioEngine, Project, ProjectFile, WarpEditor,
+  InstrumentEditor;
 
 type
   TForm1 = class(TForm)
@@ -29,6 +30,8 @@ type
     FRecordingCounter: Integer;
     FTempoLabel: TLabel;
     FTempoEdit: TEdit;
+    FGridLabel: TLabel;
+    FGridTrackBar: TTrackBar;
     FFileBrowser: TFileBrowser;
     FFileBrowserSplitter: TSplitter;
     FArrangementView: TArrangementView;
@@ -74,6 +77,7 @@ type
     procedure TransportPanelResize(Sender: TObject);
     procedure DevicePanelResize(Sender: TObject);
     procedure TempoEditEditingDone(Sender: TObject);
+    procedure GridTrackBarChange(Sender: TObject);
     procedure ArrangementViewFileDrop(Sender: TObject; ATrackIndex: Integer;
       AFramePosition: Int64; const AFilePath: string);
     procedure ArrangementViewSeek(Sender: TObject; AFrameOffset: Int64);
@@ -246,6 +250,24 @@ begin
   FTempoEdit.Top := 14;
   FTempoEdit.Width := 64;
   FTempoEdit.OnEditingDone := @TempoEditEditingDone;
+
+  { timeline grid resolution - pinned to the far right of the top bar }
+  FGridTrackBar := TTrackBar.Create(Self);
+  FGridTrackBar.Parent := FTransportPanel;
+  FGridTrackBar.Min := 0;
+  FGridTrackBar.Max := 4;
+  FGridTrackBar.Frequency := 1;
+  FGridTrackBar.TickStyle := tsAuto;
+  FGridTrackBar.Position := 0; { 1/16, finest - matches ArrangementView's default }
+  FGridTrackBar.Width := 140;
+  FGridTrackBar.Height := 36;
+  FGridTrackBar.ShowHint := True;
+  FGridTrackBar.Hint := 'Timeline grid resolution';
+  FGridTrackBar.OnChange := @GridTrackBarChange;
+
+  FGridLabel := TLabel.Create(Self);
+  FGridLabel.Parent := FTransportPanel;
+  FGridLabel.Caption := '1/16';
 
   FStopButton := TButton.Create(Self);
   FStopButton.Parent := FTransportPanel;
@@ -701,6 +723,26 @@ begin
   FPlayPauseButton.Top := ButtonTop;
   FRecordButton.Left := FPlayPauseButton.Left + FPlayPauseButton.Width + Gap;
   FRecordButton.Top := ButtonTop;
+
+  FGridTrackBar.Left := FTransportPanel.ClientWidth - FGridTrackBar.Width - Gap;
+  FGridTrackBar.Top := (FTransportPanel.ClientHeight - FGridTrackBar.Height) div 2;
+  FGridLabel.Left := FGridTrackBar.Left - FGridLabel.Width - Gap;
+  FGridLabel.Top := 19;
+end;
+
+procedure TForm1.GridTrackBarChange(Sender: TObject);
+const
+  Divisions: array[0..4] of Integer = (16, 8, 4, 2, 1);
+  Labels: array[0..4] of string = ('1/16', '1/8', '1/4', '1/2', '1 bar');
+var
+  Idx: Integer;
+begin
+  Idx := FGridTrackBar.Position;
+  if (Idx < 0) or (Idx > High(Divisions)) then
+    Exit;
+  FArrangementView.SetGridDivision(Divisions[Idx]);
+  FGridLabel.Caption := Labels[Idx];
+  TransportPanelResize(FTransportPanel);
 end;
 
 procedure TForm1.TempoEditEditingDone(Sender: TObject);
