@@ -11,13 +11,14 @@ function RenderProjectToWav(const AOutputPath: string): Boolean;
 implementation
 
 uses
-  SysUtils, Classes, IniFiles, SampleTypes, Project, WavDecoder, AudioEngine;
+  SysUtils, Classes, IniFiles, SampleTypes, Project, WavDecoder, AudioEngine,
+  Resample;
 
 function SaveProject(const APath: string): Boolean;
 var
   Dir, IniPath, Section, Prefix: string;
   Ini: TIniFile;
-  t, i: Integer;
+  t, i, m: Integer;
   Clip: TClip;
 begin
   Result := False;
@@ -55,6 +56,15 @@ begin
         Ini.WriteInt64(Section, Prefix + 'Position', Clip.Position);
         Ini.WriteFloat(Section, Prefix + 'Pitch', Clip.PitchSemitones);
         Ini.WriteFloat(Section, Prefix + 'Gain', Clip.Gain);
+
+        Ini.WriteInteger(Section, Prefix + 'MarkerCount', Length(Clip.WarpMarkers));
+        for m := 0 to High(Clip.WarpMarkers) do
+        begin
+          Ini.WriteInt64(Section, Prefix + 'Marker' + IntToStr(m) + '.Source',
+            Clip.WarpMarkers[m].SourceFrame);
+          Ini.WriteInt64(Section, Prefix + 'Marker' + IntToStr(m) + '.Timeline',
+            Clip.WarpMarkers[m].TimelineFrame);
+        end;
       end;
     end;
 
@@ -68,7 +78,7 @@ function LoadProject(const APath: string): Boolean;
 var
   Dir, IniPath, Section, Prefix, StoredPath, ResolvedPath: string;
   Ini: TIniFile;
-  t, i, SampleCount, ClipCount: Integer;
+  t, i, m, SampleCount, ClipCount, MarkerCount: Integer;
   Sample, EmptySample: TSample;
   Clip: TClip;
 begin
@@ -120,6 +130,16 @@ begin
         Clip.PitchSemitones := Ini.ReadFloat(Section, Prefix + 'Pitch', 0);
         Clip.Gain := Ini.ReadFloat(Section, Prefix + 'Gain', 1.0);
 
+        MarkerCount := Ini.ReadInteger(Section, Prefix + 'MarkerCount', 0);
+        SetLength(Clip.WarpMarkers, MarkerCount);
+        for m := 0 to MarkerCount - 1 do
+        begin
+          Clip.WarpMarkers[m].SourceFrame := Ini.ReadInt64(Section,
+            Prefix + 'Marker' + IntToStr(m) + '.Source', 0);
+          Clip.WarpMarkers[m].TimelineFrame := Ini.ReadInt64(Section,
+            Prefix + 'Marker' + IntToStr(m) + '.Timeline', 0);
+        end;
+
         SetLength(Project.Tracks[t].Clips, Length(Project.Tracks[t].Clips) + 1);
         Project.Tracks[t].Clips[High(Project.Tracks[t].Clips)] := Clip;
       end;
@@ -131,6 +151,28 @@ begin
   end;
 end;
 
+function ClipSourcePosition(const AClip: TClip; AClipRelativeFrame: Int64): Double;
+var
+  k: Integer;
+  SegTime, SegSrc: Int64;
+begin
+  if Length(AClip.WarpMarkers) < 2 then
+    Exit(AClipRelativeFrame);
+
+  k := 0;
+  while (k < Length(AClip.WarpMarkers) - 2) and
+    (AClipRelativeFrame >= AClip.WarpMarkers[k + 1].TimelineFrame) do
+    Inc(k);
+
+  SegTime := AClip.WarpMarkers[k + 1].TimelineFrame - AClip.WarpMarkers[k].TimelineFrame;
+  SegSrc := AClip.WarpMarkers[k + 1].SourceFrame - AClip.WarpMarkers[k].SourceFrame;
+  if SegTime = 0 then
+    Result := AClip.WarpMarkers[k].SourceFrame
+  else
+    Result := AClip.WarpMarkers[k].SourceFrame +
+      (AClipRelativeFrame - AClip.WarpMarkers[k].TimelineFrame) * (SegSrc / SegTime);
+end;
+
 function RenderProjectToWav(const AOutputPath: string): Boolean;
 const
   OutChannels = 2;
@@ -140,8 +182,8 @@ var
   Clip: TClip;
   Sample: TSample;
   Buffer: PSingle;
-  Frame, SrcFrame, OutIdx: Int64;
-  SrcIdx: Integer;
+  Frame, OutIdx: Int64;
+  SrcPos: Double;
 begin
   Result := False;
   ProjectLengthFrames := 0;
@@ -168,22 +210,25 @@ begin
 
         for Frame := 0 to Clip.Length - 1 do
         begin
-          SrcFrame := Clip.Offset + Frame;
-          if (SrcFrame < 0) or (SrcFrame >= Sample.FrameCount) then
+          SrcPos := Clip.Offset + ClipSourcePosition(Clip, Frame);
+          if (SrcPos < 0) or (SrcPos >= Sample.FrameCount) then
             Continue;
 
           OutIdx := (Clip.Position + Frame) * OutChannels;
-          SrcIdx := SrcFrame * Sample.Channels;
 
           if Sample.Channels = 1 then
           begin
-            Buffer[OutIdx] := Buffer[OutIdx] + Sample.Data[SrcIdx] * Clip.Gain;
-            Buffer[OutIdx + 1] := Buffer[OutIdx + 1] + Sample.Data[SrcIdx] * Clip.Gain;
+            Buffer[OutIdx] := Buffer[OutIdx] +
+              Interpolate(Sample.Data, Sample.FrameCount, Sample.Channels, 0, SrcPos) * Clip.Gain;
+            Buffer[OutIdx + 1] := Buffer[OutIdx + 1] +
+              Interpolate(Sample.Data, Sample.FrameCount, Sample.Channels, 0, SrcPos) * Clip.Gain;
           end
           else
           begin
-            Buffer[OutIdx] := Buffer[OutIdx] + Sample.Data[SrcIdx] * Clip.Gain;
-            Buffer[OutIdx + 1] := Buffer[OutIdx + 1] + Sample.Data[SrcIdx + 1] * Clip.Gain;
+            Buffer[OutIdx] := Buffer[OutIdx] +
+              Interpolate(Sample.Data, Sample.FrameCount, Sample.Channels, 0, SrcPos) * Clip.Gain;
+            Buffer[OutIdx + 1] := Buffer[OutIdx + 1] +
+              Interpolate(Sample.Data, Sample.FrameCount, Sample.Channels, 1, SrcPos) * Clip.Gain;
           end;
         end;
       end;

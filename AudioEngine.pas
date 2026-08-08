@@ -6,6 +6,7 @@ interface
 
 const
   ProjectSampleRate = 44100;
+  MaxClipWarpMarkers = 8;
 
 type
   TPlaybackClip = record
@@ -16,6 +17,9 @@ type
     Length: Int64;
     Position: Int64;
     Gain: Single;
+    MarkerCount: Integer; { 0 = unwarped 1:1 playback }
+    MarkerSource: array[0..MaxClipWarpMarkers - 1] of Int64;
+    MarkerTimeline: array[0..MaxClipWarpMarkers - 1] of Int64;
   end;
   PPlaybackClip = ^TPlaybackClip;
 
@@ -203,13 +207,35 @@ begin
   ANote.Position := ANote.Position + ANote.Rate;
 end;
 
+function ClipSourcePosition(Clip: PPlaybackClip; AClipRelativeFrame: Int64): Double;
+var
+  k: Integer;
+  SegTime, SegSrc: Int64;
+begin
+  if Clip^.MarkerCount < 2 then
+    Exit(AClipRelativeFrame);
+
+  k := 0;
+  while (k < Clip^.MarkerCount - 2) and
+    (AClipRelativeFrame >= Clip^.MarkerTimeline[k + 1]) do
+    Inc(k);
+
+  SegTime := Clip^.MarkerTimeline[k + 1] - Clip^.MarkerTimeline[k];
+  SegSrc := Clip^.MarkerSource[k + 1] - Clip^.MarkerSource[k];
+  if SegTime = 0 then
+    Result := Clip^.MarkerSource[k]
+  else
+    Result := Clip^.MarkerSource[k] +
+      (AClipRelativeFrame - Clip^.MarkerTimeline[k]) * (SegSrc / SegTime);
+end;
+
 procedure FillBlock;
 var
   Frame, t, i: Integer;
-  GlobalFrame, SrcFrame: Int64;
+  GlobalFrame, ClipRelFrame: Int64;
+  SrcPos: Double;
   Clip: PPlaybackClip;
   L, R: Single;
-  SrcIdx: Integer;
 begin
   FillChar(MixBuffer^, BlockFrames * OutputChannels * SizeOf(Single), 0);
 
@@ -225,24 +251,27 @@ begin
         for i := 0 to TrackClips[t].Count - 1 do
         begin
           Clip := @(TrackClips[t].Items[i]);
-          if (GlobalFrame < Clip^.Position) or
-            (GlobalFrame >= Clip^.Position + Clip^.Length) then
+          ClipRelFrame := GlobalFrame - Clip^.Position;
+          if (ClipRelFrame < 0) or (ClipRelFrame >= Clip^.Length) then
             Continue;
 
-          SrcFrame := Clip^.Offset + (GlobalFrame - Clip^.Position);
-          if (SrcFrame < 0) or (SrcFrame >= Clip^.FrameCount) then
+          SrcPos := Clip^.Offset + ClipSourcePosition(Clip, ClipRelFrame);
+          if (SrcPos < 0) or (SrcPos >= Clip^.FrameCount) then
             Continue;
 
-          SrcIdx := SrcFrame * Clip^.Channels;
           if Clip^.Channels = 1 then
           begin
-            L := L + Clip^.Data[SrcIdx] * Clip^.Gain;
-            R := R + Clip^.Data[SrcIdx] * Clip^.Gain;
+            L := L + Interpolate(Clip^.Data, Clip^.FrameCount, Clip^.Channels,
+              0, SrcPos) * Clip^.Gain;
+            R := R + Interpolate(Clip^.Data, Clip^.FrameCount, Clip^.Channels,
+              0, SrcPos) * Clip^.Gain;
           end
           else
           begin
-            L := L + Clip^.Data[SrcIdx] * Clip^.Gain;
-            R := R + Clip^.Data[SrcIdx + 1] * Clip^.Gain;
+            L := L + Interpolate(Clip^.Data, Clip^.FrameCount, Clip^.Channels,
+              0, SrcPos) * Clip^.Gain;
+            R := R + Interpolate(Clip^.Data, Clip^.FrameCount, Clip^.Channels,
+              1, SrcPos) * Clip^.Gain;
           end;
         end;
     end;

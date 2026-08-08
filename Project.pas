@@ -5,7 +5,7 @@ unit Project;
 interface
 
 uses
-  SampleTypes, ClipOverwrite;
+  SampleTypes, ClipOverwrite, Waveform;
 
 const
   TrackCount = 4;
@@ -21,6 +21,7 @@ var
   SamplePool: array of TSample;
   SampleNames: array of string;
   SamplePaths: array of string;
+  SamplePeaks: array of TWaveformPeaks;
   TempoBPM: Single = DefaultTempoBPM;
 
   { keyboard-play instrument assigned to each track via the device panel;
@@ -65,10 +66,12 @@ begin
   SetLength(SamplePool, Length(SamplePool) + 1);
   SetLength(SampleNames, Length(SampleNames) + 1);
   SetLength(SamplePaths, Length(SamplePaths) + 1);
+  SetLength(SamplePeaks, Length(SamplePeaks) + 1);
   Result := High(SamplePool);
   SamplePool[Result] := ASample;
   SampleNames[Result] := AName;
   SamplePaths[Result] := APath;
+  SamplePeaks[Result] := ComputeWaveformPeaks(ASample);
 end;
 
 procedure CommitClipToTrack(ATrackIndex: Integer; const ANewClip: TClip);
@@ -137,6 +140,7 @@ begin
   SetLength(SamplePool, 0);
   SetLength(SampleNames, 0);
   SetLength(SamplePaths, 0);
+  SetLength(SamplePeaks, 0);
   SetLength(UndoStack, 0);
 
   for i := 0 to TrackCount - 1 do

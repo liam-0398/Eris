@@ -7,7 +7,7 @@ interface
 uses
   Classes, SysUtils, Forms, Controls, Graphics, Dialogs, Menus, ExtCtrls,
   StdCtrls, LCLType, ArrangementView, PrefsForm, FileBrowser, SampleTypes,
-  WavDecoder, AudioEngine, Project, ProjectFile;
+  WavDecoder, AudioEngine, Project, ProjectFile, WarpEditor;
 
 type
   TForm1 = class(TForm)
@@ -32,6 +32,8 @@ type
     FOctaveMinusButton: TButton;
     FOctavePlusButton: TButton;
     FDropHintLabel: TLabel;
+    FWarpWidget: TPanel;
+    FWarpEditor: TWarpEditor;
     FPlaybackPollTimer: TTimer;
     FCurrentProjectPath: string;
 
@@ -56,6 +58,8 @@ type
       AFramePosition: Int64; const AFilePath: string);
     procedure ArrangementViewSeek(Sender: TObject; AFrameOffset: Int64);
     procedure ArrangementViewKeyboardTrackChanged(Sender: TObject);
+    procedure ArrangementViewClipSelectionChanged(Sender: TObject);
+    procedure WarpEditorClipChanged(Sender: TObject);
     procedure DevicePanelDragOver(Sender, Source: TObject; X, Y: Integer;
       State: TDragState; var Accept: Boolean);
     procedure DevicePanelDragDrop(Sender, Source: TObject; X, Y: Integer);
@@ -281,6 +285,22 @@ begin
   FDropHintLabel.Top := 8;
   FDropHintLabel.Caption := 'Select a track to load an instrument';
 
+  { warp editor widget - appears when a clip is selected on the timeline }
+  FWarpWidget := TPanel.Create(Self);
+  FWarpWidget.Parent := FDevicePanel;
+  FWarpWidget.Left := 344;
+  FWarpWidget.Top := 8;
+  FWarpWidget.Width := 500;
+  FWarpWidget.Height := 144;
+  FWarpWidget.BevelOuter := bvRaised;
+  FWarpWidget.Visible := False;
+  FWarpWidget.Caption := '';
+
+  FWarpEditor := TWarpEditor.Create(Self);
+  FWarpEditor.Parent := FWarpWidget;
+  FWarpEditor.Align := alClient;
+  FWarpEditor.OnClipChanged := @WarpEditorClipChanged;
+
   FSplitter := TSplitter.Create(Self);
   FSplitter.Parent := Self;
   FSplitter.Align := alBottom;
@@ -301,6 +321,7 @@ begin
   FArrangementView.OnFileDrop := @ArrangementViewFileDrop;
   FArrangementView.OnSeek := @ArrangementViewSeek;
   FArrangementView.OnKeyboardTrackChanged := @ArrangementViewKeyboardTrackChanged;
+  FArrangementView.OnClipSelectionChanged := @ArrangementViewClipSelectionChanged;
 
   TransportPanelResize(FTransportPanel);
 
@@ -542,6 +563,24 @@ end;
 procedure TForm1.ArrangementViewKeyboardTrackChanged(Sender: TObject);
 begin
   UpdateDevicePanel;
+end;
+
+procedure TForm1.ArrangementViewClipSelectionChanged(Sender: TObject);
+begin
+  if FArrangementView.SelectedClipIndex >= 0 then
+  begin
+    FWarpEditor.SetClip(FArrangementView.SelectedTrack,
+      FArrangementView.SelectedClipIndex);
+    FWarpWidget.Visible := True;
+  end
+  else
+    FWarpWidget.Visible := False;
+end;
+
+procedure TForm1.WarpEditorClipChanged(Sender: TObject);
+begin
+  if FArrangementView.SelectedTrack >= 0 then
+    FArrangementView.RefreshTrack(FArrangementView.SelectedTrack);
 end;
 
 procedure TForm1.DevicePanelDragOver(Sender, Source: TObject; X, Y: Integer;

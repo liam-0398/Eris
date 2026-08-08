@@ -6,7 +6,7 @@ interface
 
 uses
   Classes, SysUtils, Controls, Graphics, LCLType, FileBrowser, SampleTypes,
-  Project, AudioEngine;
+  Project, AudioEngine, Waveform;
 
 type
   TFileDropEvent = procedure(Sender: TObject; ATrackIndex: Integer;
@@ -29,6 +29,7 @@ type
       FOnFileDrop: TFileDropEvent;
       FOnSeek: TSeekEvent;
       FOnKeyboardTrackChanged: TNotifyEvent;
+      FOnClipSelectionChanged: TNotifyEvent;
       FTrackColors: array[0..Project.TrackCount - 1] of TColor;
       FCursorFrame: Int64;
       FSelectedTrack: Integer;
@@ -51,6 +52,7 @@ type
     function ClipPixelRect(ATrackIndex: Integer; const AClip: TClip): TRect;
     function HitTestClip(ATrackIndex: Integer; X: Integer; out AClipIndex: Integer;
       out AMode: TDragMode): Boolean;
+    procedure SelectClip(ATrack, AClip: Integer);
     procedure PushTrackToEngine(ATrackIndex: Integer);
     procedure DrawLanes;
     procedure DrawRuler;
@@ -75,10 +77,14 @@ type
     procedure SetCursorFrame(AFrameOffset: Int64);
     procedure ClearSelection;
     property KeyboardTrack: Integer read FKeyboardTrack;
+    property SelectedTrack: Integer read FSelectedTrack;
+    property SelectedClipIndex: Integer read FSelectedClip;
     property OnFileDrop: TFileDropEvent read FOnFileDrop write FOnFileDrop;
     property OnSeek: TSeekEvent read FOnSeek write FOnSeek;
     property OnKeyboardTrackChanged: TNotifyEvent read FOnKeyboardTrackChanged
       write FOnKeyboardTrackChanged;
+    property OnClipSelectionChanged: TNotifyEvent read FOnClipSelectionChanged
+      write FOnClipSelectionChanged;
   end;
 
 implementation
@@ -200,10 +206,20 @@ begin
   end;
 end;
 
+procedure TArrangementView.SelectClip(ATrack, AClip: Integer);
+begin
+  if (ATrack = FSelectedTrack) and (AClip = FSelectedClip) then
+    Exit;
+  FSelectedTrack := ATrack;
+  FSelectedClip := AClip;
+  if Assigned(FOnClipSelectionChanged) then
+    FOnClipSelectionChanged(Self);
+end;
+
 procedure TArrangementView.PushTrackToEngine(ATrackIndex: Integer);
 var
   Items: PPlaybackClip;
-  i: Integer;
+  i, j, MarkerCount: Integer;
   Clip: TClip;
   Sample: TSample;
   Count: Integer;
@@ -225,6 +241,16 @@ begin
     Items[i].Length := Clip.Length;
     Items[i].Position := Clip.Position;
     Items[i].Gain := Clip.Gain;
+
+    MarkerCount := Length(Clip.WarpMarkers);
+    if MarkerCount > MaxClipWarpMarkers then
+      MarkerCount := MaxClipWarpMarkers;
+    Items[i].MarkerCount := MarkerCount;
+    for j := 0 to MarkerCount - 1 do
+    begin
+      Items[i].MarkerSource[j] := Clip.WarpMarkers[j].SourceFrame;
+      Items[i].MarkerTimeline[j] := Clip.WarpMarkers[j].TimelineFrame;
+    end;
   end;
 
   AudioEngineSetTrackClips(ATrackIndex, Items, Count);
@@ -333,6 +359,11 @@ begin
 
       Canvas.Brush.Color := FTrackColors[t];
       Canvas.FillRect(R);
+      if Clip.SampleID <= High(Project.SamplePeaks) then
+        DrawWaveform(Canvas, Rect(R.Left, R.Top + 14, R.Right, R.Bottom),
+          Project.SamplePeaks[Clip.SampleID],
+          Project.SamplePool[Clip.SampleID].FrameCount, Clip.Offset,
+          Clip.Offset + Clip.Length, clBlack);
       if IsSelected then
       begin
         Canvas.Pen.Color := clRed;
@@ -400,8 +431,7 @@ end;
 
 procedure TArrangementView.ClearSelection;
 begin
-  FSelectedTrack := -1;
-  FSelectedClip := -1;
+  SelectClip(-1, -1);
   Invalidate;
 end;
 
@@ -449,8 +479,7 @@ begin
 
   if TrackIndex < 0 then
   begin
-    FSelectedTrack := -1;
-    FSelectedClip := -1;
+    SelectClip(-1, -1);
     Frame := SnapFrame(XToFrame(X));
     if Frame < 0 then
       Frame := 0;
@@ -470,8 +499,7 @@ begin
 
   if HitTestClip(TrackIndex, X, ClipIndex, Mode) then
   begin
-    FSelectedTrack := TrackIndex;
-    FSelectedClip := ClipIndex;
+    SelectClip(TrackIndex, ClipIndex);
     FDragMode := Mode;
     FDragActive := True;
     FDragTrack := TrackIndex;
@@ -485,8 +513,7 @@ begin
   end
   else
   begin
-    FSelectedTrack := -1;
-    FSelectedClip := -1;
+    SelectClip(-1, -1);
     Frame := SnapFrame(XToFrame(X));
     if Frame < 0 then
       Frame := 0;
@@ -582,14 +609,32 @@ begin
           Project.PushUndoSnapshot(FDragTrack);
         Project.RemoveClipAt(OrigTrack, FDragClip);
         Project.CommitClipToTrack(FDragTrack, FDragCurrentClip);
-        FSelectedTrack := FDragTrack;
-        FSelectedClip := High(Project.Tracks[FDragTrack].Clips);
+        SelectClip(FDragTrack, High(Project.Tracks[FDragTrack].Clips));
         if OrigTrack <> FDragTrack then
           PushTrackToEngine(OrigTrack);
         PushTrackToEngine(FDragTrack);
       end;
-    dmResizeLeft, dmResizeRight:
+    dmResizeLeft:
       begin
+        { Offset changed - any warp markers (relative to the old Offset) no
+          longer apply }
+        FDragCurrentClip.WarpMarkers := nil;
+        Project.Tracks[FDragTrack].Clips[FDragClip] := FDragCurrentClip;
+        PushTrackToEngine(FDragTrack);
+      end;
+    dmResizeRight:
+      begin
+        { keep the warp end marker (if any) in step with the new length,
+          equivalent to dragging the warp editor's end marker. Copy first -
+          dynamic arrays are refcounted, and mutating a shared element in
+          place would corrupt the undo snapshot and the live Project data. }
+        if Length(FDragCurrentClip.WarpMarkers) >= 2 then
+        begin
+          FDragCurrentClip.WarpMarkers := Copy(FDragCurrentClip.WarpMarkers, 0,
+            Length(FDragCurrentClip.WarpMarkers));
+          FDragCurrentClip.WarpMarkers[High(FDragCurrentClip.WarpMarkers)].TimelineFrame :=
+            FDragCurrentClip.Length;
+        end;
         Project.Tracks[FDragTrack].Clips[FDragClip] := FDragCurrentClip;
         PushTrackToEngine(FDragTrack);
       end;
@@ -618,7 +663,7 @@ begin
       Project.PushUndoSnapshot(FSelectedTrack);
       Project.RemoveClipAt(FSelectedTrack, FSelectedClip);
       PushTrackToEngine(FSelectedTrack);
-      FSelectedClip := -1;
+      SelectClip(FSelectedTrack, -1);
       Invalidate;
     end;
     Key := 0;
@@ -644,7 +689,7 @@ begin
     Project.CommitClipToTrack(Track, NewClip);
     PushTrackToEngine(Track);
 
-    FSelectedClip := High(Project.Tracks[Track].Clips);
+    SelectClip(Track, High(Project.Tracks[Track].Clips));
     Invalidate;
     Key := 0;
   end
@@ -658,11 +703,13 @@ begin
     begin
       LeftPart := Selected;
       LeftPart.Length := SplitFrame - Selected.Position;
+      LeftPart.WarpMarkers := nil;
 
       RightPart := Selected;
       RightPart.Offset := Selected.Offset + (SplitFrame - Selected.Position);
       RightPart.Position := SplitFrame;
       RightPart.Length := (Selected.Position + Selected.Length) - SplitFrame;
+      RightPart.WarpMarkers := nil;
 
       Project.PushUndoSnapshot(Track);
 
@@ -687,7 +734,7 @@ begin
       Project.ReplaceTrackClips(Track, NewClips);
       PushTrackToEngine(Track);
 
-      FSelectedClip := -1;
+      SelectClip(Track, -1);
       Invalidate;
     end;
     Key := 0;
