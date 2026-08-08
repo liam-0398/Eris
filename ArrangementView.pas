@@ -899,6 +899,8 @@ procedure TArrangementView.MouseUp(Button: TMouseButton; Shift: TShiftState;
   X, Y: Integer);
 var
   OrigTrack: Integer;
+  DiscardMarkers: TWarpMarkerArray;
+  SplitRel: Int64;
 begin
   inherited MouseUp(Button, Shift, X, Y);
 
@@ -923,9 +925,18 @@ begin
       end;
     dmResizeLeft:
       begin
-        { Offset changed - any warp markers (relative to the old Offset) no
-          longer apply }
-        FDragCurrentClip.WarpMarkers := nil;
+        { Offset/Position moved forward - equivalent to the right half of a
+          split at the trimmed-away point, so carry the matching (rebased)
+          warp markers across instead of discarding them. The returned split
+          frame may differ slightly from the drag position (see
+          SplitWarpMarkers) - align the clip's own geometry to it too so the
+          markers and geometry stay consistent. }
+        SplitRel := SplitWarpMarkers(FDragOrigClip.WarpMarkers,
+          FDragCurrentClip.Position - FDragOrigClip.Position, DiscardMarkers,
+          FDragCurrentClip.WarpMarkers);
+        FDragCurrentClip.Offset := FDragOrigClip.Offset + SplitRel;
+        FDragCurrentClip.Position := FDragOrigClip.Position + SplitRel;
+        FDragCurrentClip.Length := FDragOrigClip.Length - SplitRel;
         Project.Tracks[FDragTrack].Clips[FDragClip] := FDragCurrentClip;
         PushTrackToEngine(FDragTrack);
       end;
@@ -956,7 +967,7 @@ procedure TArrangementView.KeyDown(var Key: Word; Shift: TShiftState);
 var
   Track: Integer;
   Selected, NewClip, LeftPart, RightPart: TClip;
-  SplitFrame: Int64;
+  SplitFrame, SplitRel: Int64;
   Clips, NewClips: TClipArray;
   j, k: Integer;
 begin
@@ -1009,14 +1020,23 @@ begin
       (SplitFrame < Selected.Position + Selected.Length) then
     begin
       LeftPart := Selected;
-      LeftPart.Length := SplitFrame - Selected.Position;
-      LeftPart.WarpMarkers := nil;
-
       RightPart := Selected;
-      RightPart.Offset := Selected.Offset + (SplitFrame - Selected.Position);
-      RightPart.Position := SplitFrame;
-      RightPart.Length := (Selected.Position + Selected.Length) - SplitFrame;
-      RightPart.WarpMarkers := nil;
+
+      { carry the matching half of the warp markers across the cut instead
+        of discarding them - otherwise splitting a warped clip would silently
+        revert both halves to unwarped 1:1 playback. The returned split
+        frame may differ slightly from the requested one (see
+        SplitWarpMarkers) - use it for the clip geometry too so the halves'
+        lengths stay consistent with their markers. }
+      SplitRel := SplitWarpMarkers(Selected.WarpMarkers,
+        SplitFrame - Selected.Position, LeftPart.WarpMarkers,
+        RightPart.WarpMarkers);
+
+      LeftPart.Length := SplitRel;
+
+      RightPart.Offset := Selected.Offset + SplitRel;
+      RightPart.Position := Selected.Position + SplitRel;
+      RightPart.Length := Selected.Length - SplitRel;
 
       Project.PushUndoSnapshot(Track);
 

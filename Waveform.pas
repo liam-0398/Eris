@@ -39,6 +39,31 @@ function WarpedSourcePosition(const AMarkers: TWarpMarkerArray;
   ATimelineFrame: Int64; AData: PSingle = nil; AFrameCount: Integer = 0;
   AChannels: Integer = 0; ASampleRate: Integer = 44100): Double;
 
+{ Cuts a warp marker array in two at ASplitFrame (clip-relative timeline
+  frame), for use whenever a clip itself is split or trimmed (explicit split,
+  drag-resizing an edge, or one clip overwriting part of another). Without
+  this, changing a clip's Offset/Length invalidates its markers' meaning and
+  they'd have to be discarded - silently reverting the clip to unwarped 1:1
+  and undoing any warp editing across the whole remainder of the clip.
+
+  ALeftMarkers keeps everything before the cut plus a synthesized end marker
+  exactly at it; ARightMarkers gets a synthesized (0,0) start marker plus
+  everything after, rebased so index 0 lines up with the new clip's own
+  Offset/Position. Either side collapses to unwarped (nil) if it would be
+  left with fewer than 2 markers (e.g. the cut landed exactly on an existing
+  marker) or the input wasn't warped to begin with.
+
+  Returns the ACTUAL split frame used, which the caller must use for the
+  clip's own Length/Offset/Position split too (instead of its original
+  ASplitFrame) so the geometry and the markers stay consistent. It normally
+  equals ASplitFrame, but a cut strictly inside a stretched (looped) segment
+  gets pushed forward to that segment's own end: the loop-fill math is driven
+  by the segment's full natural length, so truncating the segment for the
+  right half would shrink that reference and reconstruct a different (wrong)
+  loop - there's no marker pair that reproduces a partial loop exactly. }
+function SplitWarpMarkers(const AMarkers: TWarpMarkerArray; ASplitFrame: Int64;
+  out ALeftMarkers, ARightMarkers: TWarpMarkerArray): Int64;
+
 { Draws the waveform for [AStartFrame, AEndFrame) of a sample (out of
   ATotalFrameCount frames covered by APeaks) into ARect. When AMarkers has
   fewer than 2 entries this is a plain linear stretch; otherwise each pixel
@@ -203,6 +228,92 @@ begin
     ActualLoopWindow := 1;
 
   Result := LoopStart + (Overflow mod ActualLoopWindow);
+end;
+
+function SplitWarpMarkers(const AMarkers: TWarpMarkerArray; ASplitFrame: Int64;
+  out ALeftMarkers, ARightMarkers: TWarpMarkerArray): Int64;
+var
+  i, cnt, k: Integer;
+  SplitSource: Int64;
+  SegStartTimeline, SegSourceLen, SegTimelineLen, OffsetIntoSeg: Int64;
+begin
+  ALeftMarkers := nil;
+  ARightMarkers := nil;
+  if Length(AMarkers) < 2 then
+    Exit(ASplitFrame); { unwarped already - nothing to preserve }
+
+  if ASplitFrame < AMarkers[0].TimelineFrame + 1 then
+    ASplitFrame := AMarkers[0].TimelineFrame + 1;
+  if ASplitFrame > AMarkers[High(AMarkers)].TimelineFrame then
+    ASplitFrame := AMarkers[High(AMarkers)].TimelineFrame;
+
+  { a cut strictly inside a stretched (looped) segment can't be represented
+    by simply rebasing that segment's end marker: the loop-fill math is
+    driven by the segment's full natural length, and truncating the segment
+    for the right half would shrink that reference and reconstruct a
+    completely different (and wrong) loop window. Snap forward to that
+    segment's own end instead - splitting is still exact for every other
+    case (natural-rate segments, compressed segments, or a cut already
+    sitting on an existing marker). }
+  k := 0;
+  while (k < Length(AMarkers) - 2) and (ASplitFrame >= AMarkers[k + 1].TimelineFrame) do
+    Inc(k);
+  SegStartTimeline := AMarkers[k].TimelineFrame;
+  SegTimelineLen := AMarkers[k + 1].TimelineFrame - SegStartTimeline;
+  SegSourceLen := AMarkers[k + 1].SourceFrame - AMarkers[k].SourceFrame;
+  OffsetIntoSeg := ASplitFrame - SegStartTimeline;
+  if (OffsetIntoSeg > 0) and (OffsetIntoSeg < SegTimelineLen) and
+    (SegTimelineLen > SegSourceLen) then
+    ASplitFrame := AMarkers[k + 1].TimelineFrame;
+
+  Result := ASplitFrame;
+
+  { querying WarpedSourcePosition exactly at the array's final TimelineFrame
+    is out of its intended domain (valid queries only go up to Length-1) -
+    use the marker's own endpoint directly instead }
+  if ASplitFrame >= AMarkers[High(AMarkers)].TimelineFrame then
+    SplitSource := AMarkers[High(AMarkers)].SourceFrame
+  else
+    SplitSource := Round(WarpedSourcePosition(AMarkers, ASplitFrame));
+
+  cnt := 0;
+  for i := 0 to High(AMarkers) do
+    if AMarkers[i].TimelineFrame < ASplitFrame then
+      Inc(cnt);
+  SetLength(ALeftMarkers, cnt + 1);
+  cnt := 0;
+  for i := 0 to High(AMarkers) do
+    if AMarkers[i].TimelineFrame < ASplitFrame then
+    begin
+      ALeftMarkers[cnt] := AMarkers[i];
+      Inc(cnt);
+    end;
+  ALeftMarkers[cnt].TimelineFrame := ASplitFrame;
+  ALeftMarkers[cnt].SourceFrame := SplitSource;
+
+  cnt := 0;
+  for i := 0 to High(AMarkers) do
+    if AMarkers[i].TimelineFrame > ASplitFrame then
+      Inc(cnt);
+  SetLength(ARightMarkers, cnt + 1);
+  ARightMarkers[0].TimelineFrame := 0;
+  ARightMarkers[0].SourceFrame := 0;
+  cnt := 1;
+  for i := 0 to High(AMarkers) do
+    if AMarkers[i].TimelineFrame > ASplitFrame then
+    begin
+      ARightMarkers[cnt].TimelineFrame := AMarkers[i].TimelineFrame - ASplitFrame;
+      ARightMarkers[cnt].SourceFrame := AMarkers[i].SourceFrame - SplitSource;
+      Inc(cnt);
+    end;
+
+  { a cut landing exactly on an existing marker leaves that side with just
+    the single synthesized boundary marker - collapse to unwarped instead of
+    keeping a degenerate 1-marker array }
+  if Length(ALeftMarkers) < 2 then
+    ALeftMarkers := nil;
+  if Length(ARightMarkers) < 2 then
+    ARightMarkers := nil;
 end;
 
 procedure DrawWaveform(ACanvas: TCanvas; const ARect: TRect;
