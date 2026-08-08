@@ -28,11 +28,12 @@ type
     var
       FOnFileDrop: TFileDropEvent;
       FOnSeek: TSeekEvent;
-      FOnPlayPauseToggle: TNotifyEvent;
+      FOnKeyboardTrackChanged: TNotifyEvent;
       FTrackColors: array[0..Project.TrackCount - 1] of TColor;
       FCursorFrame: Int64;
       FSelectedTrack: Integer;
       FSelectedClip: Integer;
+      FKeyboardTrack: Integer;
       FDragMode: TDragMode;
       FDragActive: Boolean;
       FDragTrack: Integer;
@@ -73,10 +74,11 @@ type
     procedure RefreshTrack(ATrackIndex: Integer);
     procedure SetCursorFrame(AFrameOffset: Int64);
     procedure ClearSelection;
+    property KeyboardTrack: Integer read FKeyboardTrack;
     property OnFileDrop: TFileDropEvent read FOnFileDrop write FOnFileDrop;
     property OnSeek: TSeekEvent read FOnSeek write FOnSeek;
-    property OnPlayPauseToggle: TNotifyEvent read FOnPlayPauseToggle
-      write FOnPlayPauseToggle;
+    property OnKeyboardTrackChanged: TNotifyEvent read FOnKeyboardTrackChanged
+      write FOnKeyboardTrackChanged;
   end;
 
 implementation
@@ -91,6 +93,7 @@ begin
   TabStop := True;
   FSelectedTrack := -1;
   FSelectedClip := -1;
+  FKeyboardTrack := -1;
 
   Randomize;
   for i := 0 to Project.TrackCount - 1 do
@@ -291,7 +294,10 @@ begin
   for i := 0 to Project.TrackCount - 1 do
   begin
     y := RulerHeight + i * TrackHeight;
-    Canvas.Brush.Color := clBtnFace;
+    if i = FKeyboardTrack then
+      Canvas.Brush.Color := clGray
+    else
+      Canvas.Brush.Color := clBtnFace;
     Canvas.FillRect(Rect(LaneWidth, y, Width, y + TrackHeight));
     Canvas.Pen.Color := clBtnShadow;
     Canvas.Rectangle(LaneWidth, y, Width, y + TrackHeight);
@@ -453,6 +459,13 @@ begin
     Exit;
   end;
 
+  if TrackIndex <> FKeyboardTrack then
+  begin
+    FKeyboardTrack := TrackIndex;
+    if Assigned(FOnKeyboardTrackChanged) then
+      FOnKeyboardTrackChanged(Self);
+  end;
+
   if HitTestClip(TrackIndex, X, ClipIndex, Mode) then
   begin
     FSelectedTrack := TrackIndex;
@@ -594,14 +607,6 @@ var
   j, k: Integer;
 begin
   inherited KeyDown(Key, Shift);
-
-  if Key = VK_SPACE then
-  begin
-    if Assigned(FOnPlayPauseToggle) then
-      FOnPlayPauseToggle(Self);
-    Key := 0;
-    Exit;
-  end;
 
   if Key = VK_DELETE then
   begin

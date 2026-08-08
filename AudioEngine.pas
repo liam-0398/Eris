@@ -26,6 +26,8 @@ procedure AudioEngineSetTrackClips(ATrackIndex: Integer; AItems: PPlaybackClip;
 procedure AudioEnginePlay;
 procedure AudioEngineStop;
 procedure AudioEngineSeek(AFrame: Int64);
+procedure AudioEngineTriggerNote(ATrackIndex: Integer; AData: PSingle;
+  AFrameCount, AChannels: Integer; ASemitoneOffset: Single; AGain: Single);
 function AudioEngineIsPlaying: Boolean;
 function AudioEngineHasClip: Boolean;
 function AudioEngineGetPosition: Int64;
@@ -33,16 +35,17 @@ function AudioEngineGetPosition: Int64;
 implementation
 
 uses
-  Classes, SysUtils, AudioBackend, ALSABackend;
+  Classes, SysUtils, AudioBackend, ALSABackend, Resample;
 
 const
   BlockFrames = 512;
   OutputChannels = 2;
   RingBufferCapacity = 32;
   MaxTracks = 4;
+  NoteFadeSamples = 128; { short crossfade on hard-retrigger, avoids a click }
 
 type
-  TCommandKind = (ckSetTrackClips, ckPlay, ckStop, ckSeek);
+  TCommandKind = (ckSetTrackClips, ckPlay, ckStop, ckSeek, ckTriggerNote);
 
   TCommand = record
     Kind: TCommandKind;
@@ -50,11 +53,28 @@ type
     Items: PPlaybackClip;
     Count: Integer;
     Param: Int64;
+    NoteData: PSingle;
+    NoteFrameCount: Integer;
+    NoteChannels: Integer;
+    NoteRate: Double;
+    NoteGain: Single;
   end;
 
   TTrackClips = record
     Items: PPlaybackClip;
     Count: Integer;
+  end;
+
+  TLiveNote = record
+    Data: PSingle;
+    FrameCount: Integer;
+    Channels: Integer;
+    Position: Double;
+    Rate: Double;
+    Gain: Single;
+    FadeGain: Single;
+    FadeStep: Single;
+    Active: Boolean;
   end;
 
   TPlaybackThread = class(TThread)
@@ -74,6 +94,9 @@ var
   TrackClips: array[0..MaxTracks - 1] of TTrackClips;
   Playhead: Int64;
   Playing: Boolean;
+
+  LiveNotes: array[0..MaxTracks - 1] of TLiveNote;
+  FadingNotes: array[0..MaxTracks - 1] of TLiveNote;
 
 function PushCommand(const ACmd: TCommand): Boolean;
 var
@@ -96,9 +119,20 @@ begin
   Result := True;
 end;
 
+function AnyLiveNoteActive: Boolean;
+var
+  t: Integer;
+begin
+  Result := False;
+  for t := 0 to MaxTracks - 1 do
+    if LiveNotes[t].Active or FadingNotes[t].Active then
+      Exit(True);
+end;
+
 procedure DrainCommands;
 var
   Cmd: TCommand;
+  t: Integer;
 begin
   while PopCommand(Cmd) do
     case Cmd.Kind of
@@ -117,7 +151,56 @@ begin
           if Playhead < 0 then
             Playhead := 0;
         end;
+      ckTriggerNote:
+        begin
+          t := Cmd.TrackIndex;
+          if LiveNotes[t].Active then
+          begin
+            FadingNotes[t] := LiveNotes[t];
+            FadingNotes[t].FadeStep := 1.0 / NoteFadeSamples;
+          end;
+
+          LiveNotes[t].Data := Cmd.NoteData;
+          LiveNotes[t].FrameCount := Cmd.NoteFrameCount;
+          LiveNotes[t].Channels := Cmd.NoteChannels;
+          LiveNotes[t].Position := 0;
+          LiveNotes[t].Rate := Cmd.NoteRate;
+          LiveNotes[t].Gain := Cmd.NoteGain;
+          LiveNotes[t].FadeGain := 1.0;
+          LiveNotes[t].FadeStep := 0;
+          LiveNotes[t].Active := True;
+        end;
     end;
+end;
+
+procedure MixNoteVoice(var ANote: TLiveNote; AFadeGain: Single; var L, R: Single);
+var
+  s: Single;
+begin
+  if not ANote.Active then
+    Exit;
+  if Trunc(ANote.Position) >= ANote.FrameCount then
+  begin
+    ANote.Active := False;
+    Exit;
+  end;
+
+  if ANote.Channels = 1 then
+  begin
+    s := Interpolate(ANote.Data, ANote.FrameCount, ANote.Channels, 0, ANote.Position) *
+      ANote.Gain * AFadeGain;
+    L := L + s;
+    R := R + s;
+  end
+  else
+  begin
+    L := L + Interpolate(ANote.Data, ANote.FrameCount, ANote.Channels, 0,
+      ANote.Position) * ANote.Gain * AFadeGain;
+    R := R + Interpolate(ANote.Data, ANote.FrameCount, ANote.Channels, 1,
+      ANote.Position) * ANote.Gain * AFadeGain;
+  end;
+
+  ANote.Position := ANote.Position + ANote.Rate;
 end;
 
 procedure FillBlock;
@@ -130,39 +213,51 @@ var
 begin
   FillChar(MixBuffer^, BlockFrames * OutputChannels * SizeOf(Single), 0);
 
-  if not Playing then
-    Exit;
-
   for Frame := 0 to BlockFrames - 1 do
   begin
-    GlobalFrame := Playhead + Frame;
     L := 0;
     R := 0;
 
-    for t := 0 to MaxTracks - 1 do
-      for i := 0 to TrackClips[t].Count - 1 do
-      begin
-        Clip := @(TrackClips[t].Items[i]);
-        if (GlobalFrame < Clip^.Position) or
-          (GlobalFrame >= Clip^.Position + Clip^.Length) then
-          Continue;
-
-        SrcFrame := Clip^.Offset + (GlobalFrame - Clip^.Position);
-        if (SrcFrame < 0) or (SrcFrame >= Clip^.FrameCount) then
-          Continue;
-
-        SrcIdx := SrcFrame * Clip^.Channels;
-        if Clip^.Channels = 1 then
+    if Playing then
+    begin
+      GlobalFrame := Playhead + Frame;
+      for t := 0 to MaxTracks - 1 do
+        for i := 0 to TrackClips[t].Count - 1 do
         begin
-          L := L + Clip^.Data[SrcIdx] * Clip^.Gain;
-          R := R + Clip^.Data[SrcIdx] * Clip^.Gain;
-        end
-        else
-        begin
-          L := L + Clip^.Data[SrcIdx] * Clip^.Gain;
-          R := R + Clip^.Data[SrcIdx + 1] * Clip^.Gain;
+          Clip := @(TrackClips[t].Items[i]);
+          if (GlobalFrame < Clip^.Position) or
+            (GlobalFrame >= Clip^.Position + Clip^.Length) then
+            Continue;
+
+          SrcFrame := Clip^.Offset + (GlobalFrame - Clip^.Position);
+          if (SrcFrame < 0) or (SrcFrame >= Clip^.FrameCount) then
+            Continue;
+
+          SrcIdx := SrcFrame * Clip^.Channels;
+          if Clip^.Channels = 1 then
+          begin
+            L := L + Clip^.Data[SrcIdx] * Clip^.Gain;
+            R := R + Clip^.Data[SrcIdx] * Clip^.Gain;
+          end
+          else
+          begin
+            L := L + Clip^.Data[SrcIdx] * Clip^.Gain;
+            R := R + Clip^.Data[SrcIdx + 1] * Clip^.Gain;
+          end;
         end;
+    end;
+
+    for t := 0 to MaxTracks - 1 do
+    begin
+      MixNoteVoice(LiveNotes[t], 1.0, L, R);
+      if FadingNotes[t].Active then
+      begin
+        MixNoteVoice(FadingNotes[t], FadingNotes[t].FadeGain, L, R);
+        FadingNotes[t].FadeGain := FadingNotes[t].FadeGain - FadingNotes[t].FadeStep;
+        if FadingNotes[t].FadeGain <= 0 then
+          FadingNotes[t].Active := False;
       end;
+    end;
 
     if L > 1.0 then L := 1.0 else if L < -1.0 then L := -1.0;
     if R > 1.0 then R := 1.0 else if R < -1.0 then R := -1.0;
@@ -170,7 +265,8 @@ begin
     MixBuffer[Frame * OutputChannels + 1] := R;
   end;
 
-  Inc(Playhead, BlockFrames);
+  if Playing then
+    Inc(Playhead, BlockFrames);
 end;
 
 procedure TPlaybackThread.Execute;
@@ -178,7 +274,7 @@ begin
   while not Terminated do
   begin
     DrainCommands;
-    if Playing then
+    if Playing or AnyLiveNoteActive then
     begin
       FillBlock;
       Backend.WriteBlock(MixBuffer, BlockFrames);
@@ -200,6 +296,8 @@ begin
   begin
     TrackClips[i].Items := nil;
     TrackClips[i].Count := 0;
+    LiveNotes[i].Active := False;
+    FadingNotes[i].Active := False;
   end;
 
   GetMem(MixBuffer, BlockFrames * OutputChannels * SizeOf(Single));
@@ -263,6 +361,21 @@ var
 begin
   Cmd.Kind := ckSeek;
   Cmd.Param := AFrame;
+  PushCommand(Cmd);
+end;
+
+procedure AudioEngineTriggerNote(ATrackIndex: Integer; AData: PSingle;
+  AFrameCount, AChannels: Integer; ASemitoneOffset: Single; AGain: Single);
+var
+  Cmd: TCommand;
+begin
+  Cmd.Kind := ckTriggerNote;
+  Cmd.TrackIndex := ATrackIndex;
+  Cmd.NoteData := AData;
+  Cmd.NoteFrameCount := AFrameCount;
+  Cmd.NoteChannels := AChannels;
+  Cmd.NoteRate := SemitonesToRate(ASemitoneOffset);
+  Cmd.NoteGain := AGain;
   PushCommand(Cmd);
 end;
 

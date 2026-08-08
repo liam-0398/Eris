@@ -6,8 +6,8 @@ interface
 
 uses
   Classes, SysUtils, Forms, Controls, Graphics, Dialogs, Menus, ExtCtrls,
-  StdCtrls, ArrangementView, PrefsForm, FileBrowser, SampleTypes, WavDecoder,
-  AudioEngine, Project;
+  StdCtrls, LCLType, ArrangementView, PrefsForm, FileBrowser, SampleTypes,
+  WavDecoder, AudioEngine, Project;
 
 type
   TForm1 = class(TForm)
@@ -40,7 +40,14 @@ type
     procedure ArrangementViewFileDrop(Sender: TObject; ATrackIndex: Integer;
       AFramePosition: Int64; const AFilePath: string);
     procedure ArrangementViewSeek(Sender: TObject; AFrameOffset: Int64);
+    procedure ArrangementViewKeyboardTrackChanged(Sender: TObject);
+    procedure DevicePanelDragOver(Sender, Source: TObject; X, Y: Integer;
+      State: TDragState; var Accept: Boolean);
+    procedure DevicePanelDragDrop(Sender, Source: TObject; X, Y: Integer);
+    procedure UpdateDevicePanelLabel;
+    procedure TriggerKeyboardNote(ASemitoneOffset: Integer);
     procedure PlaybackPollTimerTimer(Sender: TObject);
+    procedure FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
   public
     constructor Create(AOwner: TComponent); override;
     destructor Destroy; override;
@@ -60,6 +67,8 @@ begin
   BuildMenu;
   BuildLayout;
   AudioEngineInit;
+  KeyPreview := True;
+  OnKeyDown := @FormKeyDown;
 end;
 
 destructor TForm1.Destroy;
@@ -177,9 +186,12 @@ begin
 
   FDevicePanelLabel := TLabel.Create(Self);
   FDevicePanelLabel.Parent := FDevicePanel;
-  FDevicePanelLabel.Caption := 'Device / instrument panel (selected track)';
+  FDevicePanelLabel.Caption := 'Device / instrument panel (select a track)';
   FDevicePanelLabel.Left := 8;
   FDevicePanelLabel.Top := 8;
+
+  FDevicePanel.OnDragOver := @DevicePanelDragOver;
+  FDevicePanel.OnDragDrop := @DevicePanelDragDrop;
 
   FSplitter := TSplitter.Create(Self);
   FSplitter.Parent := Self;
@@ -199,7 +211,7 @@ begin
   FArrangementView.Align := alClient;
   FArrangementView.OnFileDrop := @ArrangementViewFileDrop;
   FArrangementView.OnSeek := @ArrangementViewSeek;
-  FArrangementView.OnPlayPauseToggle := @PlayPauseClick;
+  FArrangementView.OnKeyboardTrackChanged := @ArrangementViewKeyboardTrackChanged;
 
   TransportPanelResize(FTransportPanel);
 
@@ -328,12 +340,153 @@ begin
   AudioEngineSeek(AFrameOffset);
 end;
 
+procedure TForm1.ArrangementViewKeyboardTrackChanged(Sender: TObject);
+begin
+  UpdateDevicePanelLabel;
+end;
+
+procedure TForm1.DevicePanelDragOver(Sender, Source: TObject; X, Y: Integer;
+  State: TDragState; var Accept: Boolean);
+begin
+  Accept := (FArrangementView.KeyboardTrack >= 0) and (Source is TControl) and
+    (TControl(Source).Parent is TFileBrowser);
+end;
+
+procedure TForm1.DevicePanelDragDrop(Sender, Source: TObject; X, Y: Integer);
+var
+  Path: string;
+  Sample: TSample;
+  Track: Integer;
+begin
+  Track := FArrangementView.KeyboardTrack;
+  if Track < 0 then
+    Exit;
+  if not ((Source is TControl) and (TControl(Source).Parent is TFileBrowser)) then
+    Exit;
+
+  Path := TFileBrowser(TControl(Source).Parent).SelectedFullPath;
+  if Path = '' then
+    Exit;
+
+  if not DecodeSampleFile(Path, Sample) then
+  begin
+    ShowMessage('Could not load "' + Path + '" as a WAV file.');
+    Exit;
+  end;
+
+  Project.TrackInstrument[Track] := Project.AddSampleToPool(Sample,
+    ExtractFileName(Path));
+  UpdateDevicePanelLabel;
+end;
+
+procedure TForm1.UpdateDevicePanelLabel;
+var
+  Track, SampleID: Integer;
+begin
+  Track := FArrangementView.KeyboardTrack;
+  if Track < 0 then
+  begin
+    FDevicePanelLabel.Caption := 'Device / instrument panel (select a track)';
+    Exit;
+  end;
+
+  SampleID := Project.TrackInstrument[Track];
+  if SampleID < 0 then
+    FDevicePanelLabel.Caption := Format(
+      'Track %d: drag a WAV here to sample it for keyboard play', [Track + 1])
+  else
+    FDevicePanelLabel.Caption := Format('Track %d: %s',
+      [Track + 1, Project.SampleNames[SampleID]]);
+end;
+
+procedure TForm1.TriggerKeyboardNote(ASemitoneOffset: Integer);
+var
+  Track, SampleID: Integer;
+  Sample: TSample;
+begin
+  Track := FArrangementView.KeyboardTrack;
+  if Track < 0 then
+    Exit;
+
+  SampleID := Project.TrackInstrument[Track];
+  if SampleID < 0 then
+    Exit;
+
+  Sample := Project.SamplePool[SampleID];
+  AudioEngineTriggerNote(Track, Sample.Data, Sample.FrameCount, Sample.Channels,
+    ASemitoneOffset, 1.0);
+end;
+
 procedure TForm1.PlaybackPollTimerTimer(Sender: TObject);
 begin
   if AudioEngineIsPlaying then
     FArrangementView.SetCursorFrame(AudioEngineGetPosition)
   else if FPlayPauseButton.Caption = 'Pause' then
     FPlayPauseButton.Caption := 'Play';
+end;
+
+function KeyToSemitoneOffset(AKey: Word; out AOffset: Integer): Boolean;
+begin
+  Result := True;
+  case AKey of
+    { bottom row - lower octave }
+    Ord('Z'): AOffset := 0;
+    Ord('S'): AOffset := 1;
+    Ord('X'): AOffset := 2;
+    Ord('D'): AOffset := 3;
+    Ord('C'): AOffset := 4;
+    Ord('V'): AOffset := 5;
+    Ord('G'): AOffset := 6;
+    Ord('B'): AOffset := 7;
+    Ord('H'): AOffset := 8;
+    Ord('N'): AOffset := 9;
+    Ord('J'): AOffset := 10;
+    Ord('M'): AOffset := 11;
+    { top row - upper octave, OctaMED/Renoise/Impulse Tracker style }
+    Ord('Q'): AOffset := 12;
+    Ord('2'): AOffset := 13;
+    Ord('W'): AOffset := 14;
+    Ord('3'): AOffset := 15;
+    Ord('E'): AOffset := 16;
+    Ord('R'): AOffset := 17;
+    Ord('5'): AOffset := 18;
+    Ord('T'): AOffset := 19;
+    Ord('6'): AOffset := 20;
+    Ord('Y'): AOffset := 21;
+    Ord('7'): AOffset := 22;
+    Ord('U'): AOffset := 23;
+    Ord('I'): AOffset := 24;
+    Ord('9'): AOffset := 25;
+    Ord('O'): AOffset := 26;
+    Ord('0'): AOffset := 27;
+    Ord('P'): AOffset := 28;
+  else
+    Result := False;
+  end;
+end;
+
+procedure TForm1.FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
+var
+  Offset: Integer;
+begin
+  if ActiveControl is TCustomEdit then
+    Exit;
+
+  if Key = VK_SPACE then
+  begin
+    PlayPauseClick(Self);
+    Key := 0;
+    Exit;
+  end;
+
+  if ssCtrl in Shift then
+    Exit;
+
+  if KeyToSemitoneOffset(Key, Offset) then
+  begin
+    TriggerKeyboardNote(Offset);
+    Key := 0;
+  end;
 end;
 
 end.

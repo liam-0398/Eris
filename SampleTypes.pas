@@ -24,6 +24,14 @@ type
 
   TClipArray = array of TClip;
 
+  { Not read/written anywhere yet - recording and the piano roll will use this
+    later, defined now so both can build on it without a later redesign. }
+  TNoteEvent = record
+    StartFrame: Int64;
+    PitchSemitones: Single;
+    LengthFrames: Int64;
+  end;
+
 implementation
 
 end.

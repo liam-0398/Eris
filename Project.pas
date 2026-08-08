@@ -22,6 +22,10 @@ var
   SampleNames: array of string;
   TempoBPM: Single = DefaultTempoBPM;
 
+  { keyboard-play instrument assigned to each track via the device panel;
+    -1 means no instrument loaded }
+  TrackInstrument: array[0..TrackCount - 1] of Integer;
+
 function AddSampleToPool(const ASample: TSample; const AName: string): Integer;
 procedure CommitClipToTrack(ATrackIndex: Integer; const ANewClip: TClip);
 procedure ReplaceTrackClips(ATrackIndex: Integer; const AClips: TClipArray);
@@ -40,6 +44,14 @@ type
 
 var
   UndoStack: array of TUndoSnapshot;
+
+procedure InitTrackInstruments;
+var
+  i: Integer;
+begin
+  for i := 0 to TrackCount - 1 do
+    TrackInstrument[i] := -1;
+end;
 
 function AddSampleToPool(const ASample: TSample; const AName: string): Integer;
 begin
@@ -105,5 +117,8 @@ begin
   ATrackIndex := Snap.TrackIndex;
   Result := True;
 end;
+
+initialization
+  InitTrackInstruments;
 
 end.
