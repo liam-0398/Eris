@@ -1934,6 +1934,11 @@ procedure TForm1.PlaybackPollTimerTimer(Sender: TObject);
 var
   Track: Integer;
 begin
+  { frees whatever old per-track clip arrays PushTrackToEngine's replacements
+    have made obsolete since the last tick - see PendingFrees' declaration
+    in AudioEngine.pas for why this can't happen on the audio thread itself }
+  AudioEngineDrainPendingFrees;
+
   if AudioEngineIsPlaying then
     FArrangementView.SetCursorFrame(AudioEngineGetPosition)
   else if FPlayPauseButton.Caption = 'Pause' then

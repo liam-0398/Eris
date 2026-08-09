@@ -95,12 +95,149 @@ begin
   Result.DrowningMixPercent := Ini.ReadFloat(ASection, APrefix + 'DrowningMixPercent', 45);
 end;
 
+type
+  TStrArr = array of string;
+
+{ Hand-rolled single-pass split, deliberately not TStrings.DelimitedText -
+  the packed clip format below never needs quoting/escaping (its own
+  delimiters can't appear inside the numeric fields they separate), so a
+  linear Pos-free scan is simpler and cheaper than a general CSV parser. }
+function SplitStr(const S: string; ADelim: Char): TStrArr;
+var
+  Parts: TStrArr;
+  Count, StartPos, i: Integer;
+begin
+  if S = '' then
+    Exit(nil);
+  SetLength(Parts, 0);
+  Count := 0;
+  StartPos := 1;
+  for i := 1 to Length(S) + 1 do
+    if (i > Length(S)) or (S[i] = ADelim) then
+    begin
+      SetLength(Parts, Count + 1);
+      Parts[Count] := Copy(S, StartPos, i - StartPos);
+      Inc(Count);
+      StartPos := i + 1;
+    end;
+  Result := Parts;
+end;
+
+function PortableFloatSettings: TFormatSettings;
+begin
+  Result := DefaultFormatSettings;
+  Result.DecimalSeparator := '.';
+  Result.ThousandSeparator := #0;
+end;
+
+const
+  { one key per track holds every clip, instead of ~9 keys per clip plus 2
+    per warp marker - see the comment on PackClips below for why }
+  ClipDelim = '|';
+  MarkerDelim = ';';
+  MarkerFieldDelim = ':';
+
+function PackClip(const AClip: TClip): string;
+var
+  FS: TFormatSettings;
+  m: Integer;
+  MarkerPart: string;
+begin
+  FS := PortableFloatSettings;
+  MarkerPart := '';
+  for m := 0 to High(AClip.WarpMarkers) do
+  begin
+    if m > 0 then
+      MarkerPart := MarkerPart + MarkerDelim;
+    MarkerPart := MarkerPart + IntToStr(AClip.WarpMarkers[m].SourceFrame) +
+      MarkerFieldDelim + IntToStr(AClip.WarpMarkers[m].TimelineFrame);
+  end;
+  Result := Format('%d,%d,%d,%d,%s,%s,%d,%s', [AClip.SampleID, AClip.Offset,
+    AClip.Length, AClip.Position, FloatToStr(AClip.PitchSemitones, FS),
+    FloatToStr(AClip.Gain, FS), AClip.WarpMode, MarkerPart]);
+end;
+
+function UnpackClip(const S: string; ATrackID: Integer): TClip;
+var
+  Fields, MarkerPairs, MarkerFields: TStrArr;
+  FS: TFormatSettings;
+  m: Integer;
+begin
+  FillChar(Result, SizeOf(Result), 0);
+  FS := PortableFloatSettings;
+  Fields := SplitStr(S, ',');
+  if Length(Fields) < 8 then
+    Exit;
+
+  Result.SampleID := StrToIntDef(Fields[0], -1);
+  Result.Offset := StrToInt64Def(Fields[1], 0);
+  Result.Length := StrToInt64Def(Fields[2], 0);
+  Result.Position := StrToInt64Def(Fields[3], 0);
+  Result.TrackID := ATrackID;
+  Result.PitchSemitones := StrToFloatDef(Fields[4], 0, FS);
+  Result.Gain := StrToFloatDef(Fields[5], 1.0, FS);
+  Result.WarpMode := StrToIntDef(Fields[6], SampleTypes.WarpModeBeats);
+
+  if Fields[7] <> '' then
+  begin
+    MarkerPairs := SplitStr(Fields[7], MarkerDelim);
+    SetLength(Result.WarpMarkers, Length(MarkerPairs));
+    for m := 0 to High(MarkerPairs) do
+    begin
+      MarkerFields := SplitStr(MarkerPairs[m], MarkerFieldDelim);
+      if Length(MarkerFields) >= 2 then
+      begin
+        Result.WarpMarkers[m].SourceFrame := StrToInt64Def(MarkerFields[0], 0);
+        Result.WarpMarkers[m].TimelineFrame := StrToInt64Def(MarkerFields[1], 0);
+      end;
+    end;
+  end;
+end;
+
+{ Packs a whole track's clip list (including every clip's warp markers) into
+  ONE string, written under a single ini key - see LoadProject/SaveProject.
+  TIniFile (src: FPC's inifiles.pp) does a linear scan to find a key within
+  a section on every single Read/Write call, AND (since CacheUpdates isn't
+  enabled - see SaveProject) rewrites the entire ini file to disk on every
+  single Write call. The old format wrote ~9 keys per clip plus 2 per warp
+  marker directly into the track's section, so saving/loading a heavily
+  chopped track (this app's core workflow) was O(clip-count^2) both ways.
+  Collapsing all of a track's clips into one key makes every track cost a
+  small, fixed number of ini calls regardless of clip count. }
+function PackClips(const AClips: TClipArray): string;
+var
+  i: Integer;
+begin
+  Result := '';
+  for i := 0 to High(AClips) do
+  begin
+    if i > 0 then
+      Result := Result + ClipDelim;
+    Result := Result + PackClip(AClips[i]);
+  end;
+end;
+
+procedure UnpackClips(const S: string; ATrackID: Integer; out AClips: TClipArray);
+var
+  Parts: TStrArr;
+  i: Integer;
+begin
+  if S = '' then
+  begin
+    SetLength(AClips, 0);
+    Exit;
+  end;
+  Parts := SplitStr(S, ClipDelim);
+  SetLength(AClips, Length(Parts));
+  for i := 0 to High(Parts) do
+    AClips[i] := UnpackClip(Parts[i], ATrackID);
+end;
+
 function SaveProject(const APath: string): Boolean;
 var
-  Dir, IniPath, Section, Prefix, EmbeddedName: string;
+  Dir, IniPath, Section, EmbeddedName: string;
   Ini: TIniFile;
-  t, i, m, e: Integer;
-  Clip: TClip;
+  t, i, e: Integer;
 begin
   Result := False;
 
@@ -116,6 +253,14 @@ begin
   IniPath := IncludeTrailingPathDelimiter(Dir) + 'project.ini';
 
   Ini := TIniFile.Create(IniPath);
+  { TIniFile (unlike TMemIniFile) leaves CacheUpdates False by default, which
+    means every single Write* call below rewrites the ENTIRE ini file to
+    disk immediately (see TIniFile.MaybeUpdateFile/UpdateFile in FPC's
+    inifiles.pp) instead of once at the end - for a project with any real
+    number of tracks/effects this made save time scale with the SQUARE of
+    the file's growing size. Enabling it batches every write in memory and
+    flushes once, on Ini.Free below. }
+  Ini.CacheUpdates := True;
   try
     Ini.WriteFloat('Project', 'Tempo', Project.TempoBPM);
     Ini.WriteInteger('Project', 'TrackCount', Project.TrackCount);
@@ -128,6 +273,17 @@ begin
     Ini.WriteInteger('Samples', 'Count', Length(Project.SamplePool));
     for i := 0 to High(Project.SamplePool) do
     begin
+      { written unconditionally so a sample's display name (e.g. a
+        Consolidate-produced clip, always named 'Consolidated') survives a
+        save/load round trip - previously this was implied by the source
+        filename and got silently replaced with the embedded WAV's bare
+        filename ('recorded3.wav') the moment a path-less sample got
+        embedded, below. Purely cosmetic - SampleNames is never used as a
+        lookup key anywhere, so this has no bearing on the embedding path
+        just below staying collision-free (that's keyed by pool index i,
+        not by name). }
+      Ini.WriteString('Samples', 'Name' + IntToStr(i), Project.SampleNames[i]);
+
       if not FileExists(Project.SamplePaths[i]) then
       begin
         { no real source file to reference - either a recorded clip (never
@@ -162,29 +318,10 @@ begin
       for e := 0 to Project.TrackEffectCount[t] - 1 do
         SaveEffect(Ini, Section, 'Effect' + IntToStr(e) + '.', Project.TrackEffects[t][e]);
 
-      Ini.WriteInteger(Section, 'ClipCount', Length(Project.Tracks[t].Clips));
-
-      for i := 0 to High(Project.Tracks[t].Clips) do
-      begin
-        Clip := Project.Tracks[t].Clips[i];
-        Prefix := 'Clip' + IntToStr(i) + '.';
-        Ini.WriteInteger(Section, Prefix + 'SampleID', Clip.SampleID);
-        Ini.WriteInt64(Section, Prefix + 'Offset', Clip.Offset);
-        Ini.WriteInt64(Section, Prefix + 'Length', Clip.Length);
-        Ini.WriteInt64(Section, Prefix + 'Position', Clip.Position);
-        Ini.WriteFloat(Section, Prefix + 'Pitch', Clip.PitchSemitones);
-        Ini.WriteFloat(Section, Prefix + 'Gain', Clip.Gain);
-        Ini.WriteInteger(Section, Prefix + 'WarpMode', Clip.WarpMode);
-
-        Ini.WriteInteger(Section, Prefix + 'MarkerCount', Length(Clip.WarpMarkers));
-        for m := 0 to High(Clip.WarpMarkers) do
-        begin
-          Ini.WriteInt64(Section, Prefix + 'Marker' + IntToStr(m) + '.Source',
-            Clip.WarpMarkers[m].SourceFrame);
-          Ini.WriteInt64(Section, Prefix + 'Marker' + IntToStr(m) + '.Timeline',
-            Clip.WarpMarkers[m].TimelineFrame);
-        end;
-      end;
+      { see PackClips' comment - one key holds every clip (and all their warp
+        markers) for the track, instead of ~9 keys per clip that made saving
+        a heavily-chopped track scale as O(clip-count^2) }
+      Ini.WriteString(Section, 'ClipsPacked', PackClips(Project.Tracks[t].Clips));
     end;
 
     Result := True;
@@ -217,6 +354,10 @@ type
   TSampleLoadJob = record
     Index: Integer;
     StoredPath, ResolvedPath: string;
+    { '' for a project.ini saved before display names were persisted (see
+      SaveProject) - Execute below falls back to deriving one from
+      StoredPath exactly as it always did, so old projects still load fine }
+    DisplayName: string;
   end;
   TSampleLoadJobArray = array of TSampleLoadJob;
 
@@ -259,7 +400,10 @@ begin
     if DecodeSampleFile(FJobs[i].ResolvedPath, Sample) then
     begin
       Project.SamplePool[Idx] := Sample;
-      Project.SampleNames[Idx] := ExtractFileName(FJobs[i].StoredPath);
+      if FJobs[i].DisplayName <> '' then
+        Project.SampleNames[Idx] := FJobs[i].DisplayName
+      else
+        Project.SampleNames[Idx] := ExtractFileName(FJobs[i].StoredPath);
     end
     else
     begin
@@ -385,6 +529,10 @@ begin
       SampleJobs[i].Index := i;
       SampleJobs[i].StoredPath := StoredPath;
       SampleJobs[i].ResolvedPath := ResolvedPath;
+      { '' (default) for a pre-existing project.ini that never wrote this
+        key - TSampleLoadThread.Execute falls back to the old
+        derive-from-filename behavior in that case }
+      SampleJobs[i].DisplayName := Ini.ReadString('Samples', 'Name' + IntToStr(i), '');
     end;
 
     LoadSamplesThreaded(SampleJobs);
@@ -413,31 +561,44 @@ begin
       for e := 0 to Project.TrackEffectCount[t] - 1 do
         Project.TrackEffects[t][e] := LoadEffect(Ini, Section, 'Effect' + IntToStr(e) + '.');
 
-      ClipCount := Ini.ReadInteger(Section, 'ClipCount', 0);
-      for i := 0 to ClipCount - 1 do
+      if Ini.ValueExists(Section, 'ClipsPacked') then
+        { current format - see PackClips/SaveProject }
+        UnpackClips(Ini.ReadString(Section, 'ClipsPacked', ''), t, Project.Tracks[t].Clips)
+      else
       begin
-        Prefix := 'Clip' + IntToStr(i) + '.';
-        Clip.SampleID := Ini.ReadInteger(Section, Prefix + 'SampleID', -1);
-        Clip.Offset := Ini.ReadInt64(Section, Prefix + 'Offset', 0);
-        Clip.Length := Ini.ReadInt64(Section, Prefix + 'Length', 0);
-        Clip.Position := Ini.ReadInt64(Section, Prefix + 'Position', 0);
-        Clip.TrackID := t;
-        Clip.PitchSemitones := Ini.ReadFloat(Section, Prefix + 'Pitch', 0);
-        Clip.Gain := Ini.ReadFloat(Section, Prefix + 'Gain', 1.0);
-        Clip.WarpMode := Ini.ReadInteger(Section, Prefix + 'WarpMode', SampleTypes.WarpModeBeats);
-
-        MarkerCount := Ini.ReadInteger(Section, Prefix + 'MarkerCount', 0);
-        SetLength(Clip.WarpMarkers, MarkerCount);
-        for m := 0 to MarkerCount - 1 do
+        { backward compatibility: a project.ini saved before clips were
+          packed into one key stores one flat Clip<N>.* key (plus 2 more per
+          warp marker) per clip instead - keep parsing that layout so those
+          old projects still load correctly. Re-saving a project loaded this
+          way writes the new packed format only (SaveProject no longer
+          writes these flat keys at all), so this branch only ever fires on
+          a project untouched since before this change. }
+        ClipCount := Ini.ReadInteger(Section, 'ClipCount', 0);
+        for i := 0 to ClipCount - 1 do
         begin
-          Clip.WarpMarkers[m].SourceFrame := Ini.ReadInt64(Section,
-            Prefix + 'Marker' + IntToStr(m) + '.Source', 0);
-          Clip.WarpMarkers[m].TimelineFrame := Ini.ReadInt64(Section,
-            Prefix + 'Marker' + IntToStr(m) + '.Timeline', 0);
-        end;
+          Prefix := 'Clip' + IntToStr(i) + '.';
+          Clip.SampleID := Ini.ReadInteger(Section, Prefix + 'SampleID', -1);
+          Clip.Offset := Ini.ReadInt64(Section, Prefix + 'Offset', 0);
+          Clip.Length := Ini.ReadInt64(Section, Prefix + 'Length', 0);
+          Clip.Position := Ini.ReadInt64(Section, Prefix + 'Position', 0);
+          Clip.TrackID := t;
+          Clip.PitchSemitones := Ini.ReadFloat(Section, Prefix + 'Pitch', 0);
+          Clip.Gain := Ini.ReadFloat(Section, Prefix + 'Gain', 1.0);
+          Clip.WarpMode := Ini.ReadInteger(Section, Prefix + 'WarpMode', SampleTypes.WarpModeBeats);
 
-        SetLength(Project.Tracks[t].Clips, Length(Project.Tracks[t].Clips) + 1);
-        Project.Tracks[t].Clips[High(Project.Tracks[t].Clips)] := Clip;
+          MarkerCount := Ini.ReadInteger(Section, Prefix + 'MarkerCount', 0);
+          SetLength(Clip.WarpMarkers, MarkerCount);
+          for m := 0 to MarkerCount - 1 do
+          begin
+            Clip.WarpMarkers[m].SourceFrame := Ini.ReadInt64(Section,
+              Prefix + 'Marker' + IntToStr(m) + '.Source', 0);
+            Clip.WarpMarkers[m].TimelineFrame := Ini.ReadInt64(Section,
+              Prefix + 'Marker' + IntToStr(m) + '.Timeline', 0);
+          end;
+
+          SetLength(Project.Tracks[t].Clips, Length(Project.Tracks[t].Clips) + 1);
+          Project.Tracks[t].Clips[High(Project.Tracks[t].Clips)] := Clip;
+        end;
       end;
     end;
 

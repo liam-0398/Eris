@@ -142,6 +142,13 @@ type
     LastEQGain: array[0..MaxEQBands - 1] of Single;
     LimiterGain: Single; { current smoothed gain reduction, linked across L/R
       so limiting never shifts the stereo image }
+    { cached so Power()/Exp() below only run when a slider actually moved,
+      same pattern as LastLowpassFreq/LastEQFreq above - previously these
+      ran unconditionally on every single sample }
+    LastLimiterThresholdDb: Single;
+    LimiterThresholdLin: Single;
+    LastLimiterReleaseMs: Single;
+    LimiterReleaseCoeff: Single;
     ChorusBufL: array of Single; { lazily sized once the sample rate is known }
     ChorusBufR: array of Single;
     ChorusWritePos: Integer;
@@ -159,6 +166,13 @@ type
     PhaserFeedbackSample: array[0..1] of Single; { last chain output, fed back into this channel's input }
     PhaserPhase: Single;
     SidechainGain: Single; { current smoothed ducking gain, 1.0 = no reduction }
+    { same caching as Limiter above }
+    LastSidechainThresholdDb: Single;
+    SidechainThresholdLin: Single;
+    LastSidechainAttackMs: Single;
+    SidechainAttackCoeff: Single;
+    LastSidechainReleaseMs: Single;
+    SidechainReleaseCoeff: Single;
     { Drowning reuses Channels[].LowpassBq/LowpassCoeffs (tone stage),
       ChorusBufL/R/ChorusWritePos/ChorusPhase (warble stage) and
       ReverbCombL/R/ReverbAllpassL/R (tank stage) above - only these two
@@ -193,6 +207,17 @@ begin
   AState.ReverbLastPreset := -1; { 0 is a valid preset (Small) - must not look
     already-set-up before SetupReverb has ever actually allocated buffers }
   AState.SidechainGain := 1.0; { unity - no ducking until the source track actually hits }
+  { NaN, not 0 - a real threshold/release value of exactly 0 is legal, and
+    would otherwise look like "unchanged" against a zeroed Last* field on
+    the very first call, leaving the paired *Lin/*Coeff field at its
+    zeroed (wrong) default instead of ever actually being computed. NaN
+    never compares equal to anything, including itself, so the first real
+    call always recomputes regardless of what value it sees. }
+  AState.LastLimiterThresholdDb := NaN;
+  AState.LastLimiterReleaseMs := NaN;
+  AState.LastSidechainThresholdDb := NaN;
+  AState.LastSidechainAttackMs := NaN;
+  AState.LastSidechainReleaseMs := NaN;
 end;
 
 procedure DefaultEffect(AKind: Integer; out AEffect: TEffect);
@@ -460,7 +485,13 @@ begin
           it immediately), which is what actually guarantees the ceiling is
           never exceeded; release is a smooth one-pole climb back to unity
           to avoid audible pumping. }
-        ThresholdLin := Power(10, AEffect.LimiterThresholdDb / 20);
+        if AEffect.LimiterThresholdDb <> AState.LastLimiterThresholdDb then
+        begin
+          AState.LimiterThresholdLin := Power(10, AEffect.LimiterThresholdDb / 20);
+          AState.LastLimiterThresholdDb := AEffect.LimiterThresholdDb;
+        end;
+        ThresholdLin := AState.LimiterThresholdLin;
+
         Peak := Abs(L);
         if Abs(R) > Peak then
           Peak := Abs(R);
@@ -477,7 +508,18 @@ begin
           ReleaseMs := AEffect.LimiterReleaseMs;
           if ReleaseMs < 1 then
             ReleaseMs := 1;
-          ReleaseCoeff := Exp(-1 / (0.001 * ReleaseMs * ASampleRate));
+          { ASampleRate isn't part of this check, unlike Lowpass/EQ4's above -
+            it's AudioEngine.ProjectSampleRate, a compile-time constant that
+            never actually varies within a run (both the realtime and
+            offline-render callers pass the same value every single call),
+            so checking it here would only ever defeat this cache, never
+            protect anything real }
+          if ReleaseMs <> AState.LastLimiterReleaseMs then
+          begin
+            AState.LimiterReleaseCoeff := Exp(-1 / (0.001 * ReleaseMs * ASampleRate));
+            AState.LastLimiterReleaseMs := ReleaseMs;
+          end;
+          ReleaseCoeff := AState.LimiterReleaseCoeff;
           AState.LimiterGain := TargetGain + (AState.LimiterGain - TargetGain) * ReleaseCoeff;
         end;
 
@@ -651,7 +693,13 @@ begin
           it visibly "breathes" with it. Attack/Release smoothing (not an
           instant snap like the Limiter above) is what makes the duck read
           as musical pumping rather than a click. }
-        ThresholdLin := Power(10, AEffect.SidechainThresholdDb / 20);
+        if AEffect.SidechainThresholdDb <> AState.LastSidechainThresholdDb then
+        begin
+          AState.SidechainThresholdLin := Power(10, AEffect.SidechainThresholdDb / 20);
+          AState.LastSidechainThresholdDb := AEffect.SidechainThresholdDb;
+        end;
+        ThresholdLin := AState.SidechainThresholdLin;
+
         ScStrengthFrac := AEffect.SidechainStrengthPercent / 100;
         if ScStrengthFrac > 1 then ScStrengthFrac := 1;
         if ScStrengthFrac < 0 then ScStrengthFrac := 0;
@@ -665,14 +713,24 @@ begin
         begin
           ScAttackMs := AEffect.SidechainAttackMs;
           if ScAttackMs < 1 then ScAttackMs := 1;
-          ScAttackCoeff := Exp(-1 / (0.001 * ScAttackMs * ASampleRate));
+          if ScAttackMs <> AState.LastSidechainAttackMs then
+          begin
+            AState.SidechainAttackCoeff := Exp(-1 / (0.001 * ScAttackMs * ASampleRate));
+            AState.LastSidechainAttackMs := ScAttackMs;
+          end;
+          ScAttackCoeff := AState.SidechainAttackCoeff;
           AState.SidechainGain := TargetGain + (AState.SidechainGain - TargetGain) * ScAttackCoeff;
         end
         else
         begin
           ReleaseMs := AEffect.SidechainReleaseMs;
           if ReleaseMs < 1 then ReleaseMs := 1;
-          ReleaseCoeff := Exp(-1 / (0.001 * ReleaseMs * ASampleRate));
+          if ReleaseMs <> AState.LastSidechainReleaseMs then
+          begin
+            AState.SidechainReleaseCoeff := Exp(-1 / (0.001 * ReleaseMs * ASampleRate));
+            AState.LastSidechainReleaseMs := ReleaseMs;
+          end;
+          ReleaseCoeff := AState.SidechainReleaseCoeff;
           AState.SidechainGain := TargetGain + (AState.SidechainGain - TargetGain) * ReleaseCoeff;
         end;
 

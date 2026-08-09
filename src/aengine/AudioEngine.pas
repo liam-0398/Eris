@@ -57,6 +57,12 @@ function AudioEngineGetMetronomeEnabled: Boolean;
 function AudioEngineGetBufferSize: Integer;
 procedure AudioEngineSetBufferSize(ANewBufferSize: Integer);
 
+{ Frees whatever old per-track TPlaybackClip arrays the audio thread has
+  retired since the last call - see PendingFrees' declaration. Must be
+  called periodically from the MAIN thread only (MainForm's playback poll
+  timer already does); never from the audio thread. }
+procedure AudioEngineDrainPendingFrees;
+
 { SP-1200-style per-track swing, shared by the realtime engine (FillBlock)
   and the offline render path (ProjectFile.RenderProjectToWav) so bounced
   audio can never drift from what was heard live. See the implementation
@@ -90,6 +96,8 @@ const
   DefaultBlockFrames = 512;
   OutputChannels = 2;
   RingBufferCapacity = 32;
+  PendingFreeCapacity = 64;
+  GrainCacheSlots = 16;
   MaxTracks = Project.MaxTracks;
   NoteFadeSamples = 128; { short crossfade on hard-retrigger, avoids a click }
   MaxRecordSeconds = 180;
@@ -147,6 +155,20 @@ var
   RingHead: Integer;
   RingTail: Integer;
 
+  { audio thread -> main thread, the mirror image of the command ring above:
+    DrainCommands (audio thread) retires a track's old TPlaybackClip array
+    every time ckSetTrackClips replaces it, but the realtime rule ("no
+    allocation, no file I/O, no locking on the audio callback thread" - see
+    CLAUDE.md) rules out calling FreeMem right there. Queuing the pointer
+    here and freeing it from the main thread's existing poll timer
+    (AudioEngineDrainPendingFrees, called from MainForm's
+    PlaybackPollTimerTimer) keeps the free off the realtime thread entirely,
+    same lock-free single-producer/single-consumer shape as PushCommand/
+    PopCommand just in the opposite direction. }
+  PendingFrees: array[0..PendingFreeCapacity - 1] of Pointer;
+  PendingFreeHead: Integer;
+  PendingFreeTail: Integer;
+
   TrackClips: array[0..MaxTracks - 1] of TTrackClips;
   Playhead: Int64;
   Playing: Boolean;
@@ -174,6 +196,32 @@ var
   TrackEffectState: array[0..MaxTracks - 1, 0..Effects.MaxEffectsPerTrack - 1] of
     Effects.TEffectState;
   MasterEffectState: array[0..Effects.MaxEffectsPerTrack - 1] of Effects.TEffectState;
+
+  { Beats-mode grain lookup cache for ClipSourcePosition/FindTransientGrain -
+    see the comment right above FindTransientGrain's declaration for why
+    this exists. Keyed by (sample data pointer, clip offset, segment) rather
+    than by the TPlaybackClip pointer itself: that pointer is into a GetMem
+    block that gets freed and reallocated on every edit (PushTrackToEngine),
+    and a same-sized reallocation - e.g. every step of a live warp-marker
+    drag - can plausibly get served the very same address back from the
+    allocator's free list while genuinely meaning a different clip/segment.
+    (Data, Offset, SegStartSource, SegSourceLen) together fully determine
+    which absolute region of Clip^.Transients a lookup searches - see
+    FindTransientGrain's own comment on that translation - so two lookups
+    that agree on all four are, by construction, asking the identical
+    question and must get the identical answer; there is no coincidental
+    false-hit case to worry about, unlike keying on clip identity would be.
+    Sized for MaxTracks simultaneously-active clips with headroom; a miss
+    just falls back to the real scan, never a wrong answer. }
+  GrainCache: array[0..GrainCacheSlots - 1] of record
+    Data: PSingle;
+    Offset: Int64;
+    SegStartSource, SegSourceLen: Int64;
+    GrainStartSource, GrainSourceLen: Int64;
+    GrainStartTimeline, GrainEndTimeline: Int64;
+    GrainTimelineLenF: Double;
+  end;
+  GrainCacheNextSlot: Integer;
 
   { Each track's final (post-own-inserts) peak level for the CURRENT block's
     frame being processed by FillBlock's "for t" loop below - written once
@@ -206,6 +254,25 @@ begin
   Result := True;
 end;
 
+{ Audio-thread-only producer for the pending-free queue - see PendingFrees'
+  declaration. Never called with more than one outstanding entry per track
+  between two main-thread poll-timer ticks in practice, so 64 slots is far
+  more headroom than this needs; if it ever did fill, the pointer is just
+  never freed rather than blocking/allocating on the realtime thread to make
+  room, which is the safer failure mode here. }
+procedure PushPendingFree(APtr: Pointer);
+var
+  NextHead: Integer;
+begin
+  if APtr = nil then
+    Exit;
+  NextHead := (PendingFreeHead + 1) mod PendingFreeCapacity;
+  if NextHead = PendingFreeTail then
+    Exit;
+  PendingFrees[PendingFreeHead] := APtr;
+  PendingFreeHead := NextHead;
+end;
+
 function AnyLiveNoteActive: Boolean;
 var
   t: Integer;
@@ -225,6 +292,13 @@ begin
     case Cmd.Kind of
       ckSetTrackClips:
         begin
+          { the array being replaced is only ever reachable through this
+            same TrackClips[t].Items slot, and we're about to overwrite that
+            slot with Cmd.Items right below, so nothing on this thread (or
+            any other) can still be reading through the old pointer by the
+            time PushPendingFree hands it off - see PendingFrees' comment
+            for why this can't just be FreeMem'd right here instead. }
+          PushPendingFree(TrackClips[Cmd.TrackIndex].Items);
           TrackClips[Cmd.TrackIndex].Items := Cmd.Items;
           TrackClips[Cmd.TrackIndex].Count := Cmd.Count;
         end;
@@ -408,10 +482,45 @@ var
     TIdx: Integer;
     BoundaryPos, NextBoundaryPos, NaturalLen: Int64;
     AccumTimeline, GrainTL: Double;
+    CacheIdx, ci: Integer;
   begin
     Result := False;
     if (Clip^.Transients = nil) or (Clip^.TransientCount <= 0) then
       Exit;
+
+    { fast path: playback advances one sample at a time and a grain
+      typically spans hundreds to thousands of samples, so the overwhelming
+      majority of calls ask about the same grain as the previous call for
+      this exact clip+segment. Reusing it skips walking Clip^.Transients
+      from the start (the loops below) on every single output sample, which
+      is what actually costs time for a sample with many detected
+      transients - this is a pure memoization of that scan, not a change to
+      what it computes; a cache miss/mismatch always just falls through to
+      the unchanged scan below. }
+    CacheIdx := -1;
+    for ci := 0 to GrainCacheSlots - 1 do
+      if (GrainCache[ci].Data = Clip^.Data) and (GrainCache[ci].Offset = Clip^.Offset) and
+        (GrainCache[ci].SegStartSource = SegStartSource) and
+        (GrainCache[ci].SegSourceLen = SegSourceLen) then
+      begin
+        CacheIdx := ci;
+        if (OffsetIntoSeg >= GrainCache[ci].GrainStartTimeline) and
+          (OffsetIntoSeg < GrainCache[ci].GrainStartTimeline + GrainCache[ci].GrainTimelineLenF) then
+        begin
+          AGrainStartSource := GrainCache[ci].GrainStartSource;
+          AGrainSourceLen := GrainCache[ci].GrainSourceLen;
+          AGrainStartTimeline := GrainCache[ci].GrainStartTimeline;
+          AGrainEndTimeline := GrainCache[ci].GrainEndTimeline;
+          AGrainTimelineLenF := GrainCache[ci].GrainTimelineLenF;
+          Exit(True);
+        end;
+        Break;
+      end;
+    if CacheIdx < 0 then
+    begin
+      CacheIdx := GrainCacheNextSlot;
+      GrainCacheNextSlot := (GrainCacheNextSlot + 1) mod GrainCacheSlots;
+    end;
 
     Ratio := SegTimelineLen / SegSourceLen;
 
@@ -478,6 +587,17 @@ var
         if AGrainEndTimeline < AccumTimeline + GrainTL then
           Inc(AGrainEndTimeline);
         AGrainTimelineLenF := GrainTL;
+
+        GrainCache[CacheIdx].Data := Clip^.Data;
+        GrainCache[CacheIdx].Offset := Clip^.Offset;
+        GrainCache[CacheIdx].SegStartSource := SegStartSource;
+        GrainCache[CacheIdx].SegSourceLen := SegSourceLen;
+        GrainCache[CacheIdx].GrainStartSource := AGrainStartSource;
+        GrainCache[CacheIdx].GrainSourceLen := AGrainSourceLen;
+        GrainCache[CacheIdx].GrainStartTimeline := AGrainStartTimeline;
+        GrainCache[CacheIdx].GrainEndTimeline := AGrainEndTimeline;
+        GrainCache[CacheIdx].GrainTimelineLenF := AGrainTimelineLenF;
+
         Exit(True);
       end;
 
@@ -1140,6 +1260,8 @@ begin
 end;
 
 procedure AudioEngineShutdown;
+var
+  i: Integer;
 begin
   if PlaybackThread <> nil then
   begin
@@ -1147,6 +1269,17 @@ begin
     PlaybackThread.WaitFor;
     FreeAndNil(PlaybackThread);
   end;
+
+  { safe to free directly here, unlike PushPendingFree's realtime-thread
+    call site above - the playback thread is fully stopped by this point,
+    so nothing can still be reading through any of these }
+  AudioEngineDrainPendingFrees;
+  for i := 0 to MaxTracks - 1 do
+    if TrackClips[i].Items <> nil then
+    begin
+      FreeMem(TrackClips[i].Items);
+      TrackClips[i].Items := nil;
+    end;
 
   Backend.Close;
 
@@ -1330,6 +1463,18 @@ begin
 
   PlaybackThread := TPlaybackThread.Create(False);
   PlaybackThread.FreeOnTerminate := False;
+end;
+
+procedure AudioEngineDrainPendingFrees;
+var
+  Ptr: Pointer;
+begin
+  while PendingFreeTail <> PendingFreeHead do
+  begin
+    Ptr := PendingFrees[PendingFreeTail];
+    PendingFreeTail := (PendingFreeTail + 1) mod PendingFreeCapacity;
+    FreeMem(Ptr);
+  end;
 end;
 
 procedure AudioEngineStartCountIn(ATrackIndex: Integer);
