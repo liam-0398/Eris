@@ -773,8 +773,20 @@ begin
   FFileBrowser.Enabled := not ABusy;
   FDevicePanel.Enabled := not ABusy;
 
-  if AGuardPlayback then
-    FTransportPanel.Enabled := not ABusy;
+  { transport is only ever disabled going into a guarded busy state, but
+    always re-enabled coming out of one, regardless of what AGuardPlayback
+    the caller passes on the way out (every OnTerminate handler passes
+    False there, since re-guarding on the way down is meaningless) - a
+    mismatched True-in/False-out here previously left it stuck disabled
+    forever after the first Open/import, since the release call's False
+    made this block a no-op. }
+  if ABusy then
+  begin
+    if AGuardPlayback then
+      FTransportPanel.Enabled := False;
+  end
+  else
+    FTransportPanel.Enabled := True;
 
   if ABusy then
     Caption := 'Eris - ' + AStatusText
@@ -821,8 +833,7 @@ begin
       Sleep(1);
 
     SetBackgroundBusy(True, 'Opening...', True);
-    with TProjectLoadThread.Create(Dlg.FileName) do
-      OnTerminate := @ProjectLoadThreadTerminate;
+    TProjectLoadThread.Create(Dlg.FileName, @ProjectLoadThreadTerminate);
   finally
     Dlg.Free;
   end;
@@ -885,8 +896,7 @@ end;
 procedure TForm1.StartProjectSave(const APath: string);
 begin
   SetBackgroundBusy(True, 'Saving...', False);
-  with TProjectSaveThread.Create(APath) do
-    OnTerminate := @ProjectSaveThreadTerminate;
+  TProjectSaveThread.Create(APath, @ProjectSaveThreadTerminate);
 end;
 
 procedure TForm1.ProjectSaveThreadTerminate(Sender: TObject);
@@ -927,8 +937,7 @@ begin
       Path := Path + '.wav';
 
     SetBackgroundBusy(True, 'Exporting...', False);
-    with TProjectRenderThread.Create(Path) do
-      OnTerminate := @ProjectRenderThreadTerminate;
+    TProjectRenderThread.Create(Path, @ProjectRenderThreadTerminate);
   finally
     Dlg.Free;
   end;
@@ -1223,8 +1232,8 @@ begin
   FPendingImportTrack := ATrackIndex;
   FPendingImportFrame := AFramePosition;
   SetBackgroundBusy(True, 'Importing...', True);
-  with TSampleImportThread.Create(AFilePath, ExtractFileName(AFilePath)) do
-    OnTerminate := @TimelineImportThreadTerminate;
+  TSampleImportThread.Create(AFilePath, ExtractFileName(AFilePath),
+    @TimelineImportThreadTerminate);
 end;
 
 procedure TForm1.TimelineImportThreadTerminate(Sender: TObject);
@@ -1902,8 +1911,8 @@ begin
     Exit;
 
   SetBackgroundBusy(True, 'Importing...', True);
-  with TSampleImportThread.Create(APath, ExtractFileName(APath)) do
-    OnTerminate := @InstrumentImportThreadTerminate;
+  TSampleImportThread.Create(APath, ExtractFileName(APath),
+    @InstrumentImportThreadTerminate);
 end;
 
 procedure TForm1.InstrumentImportThreadTerminate(Sender: TObject);

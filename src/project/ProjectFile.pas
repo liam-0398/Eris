@@ -17,11 +17,16 @@ type
 
     Same immediate-start pattern as TSampleLoadThread below (Create(True)
     hangs under FPC's Linux/cthreads suspended-thread emulation - see that
-    class's constructor comment): the caller assigns OnTerminate right
-    after construction, which is safe despite the thread already running,
-    because TThread delivers OnTerminate via Synchronize, and Synchronize
-    can't be serviced until the main thread returns to its message loop -
-    which can't happen before the OnTerminate assignment below does. }
+    class's constructor comment). OnTerminate is a constructor PARAMETER,
+    set before inherited Create(False) - the same "every field populated
+    before the thread can possibly run" rule TSampleLoadThread.Create
+    already follows for FJobs. Assigning OnTerminate as a property AFTER
+    Create(False) returns is a real race, not just a theoretical one: for
+    a fast job (small file, or an instant decode failure) the thread can
+    finish and evaluate "if Assigned(OnTerminate)" as still nil - the
+    caller hasn't reached that assignment yet - skip calling it entirely,
+    and then free itself (FreeOnTerminate). The caller's next line then
+    writes OnTerminate into an already-freed object. }
   TProjectLoadThread = class(TThread)
   private
     FPath: string;
@@ -29,7 +34,7 @@ type
   protected
     procedure Execute; override;
   public
-    constructor Create(const APath: string);
+    constructor Create(const APath: string; AOnTerminate: TNotifyEvent);
     property Path: string read FPath;
     property Success: Boolean read FSuccess;
   end;
@@ -41,7 +46,7 @@ type
   protected
     procedure Execute; override;
   public
-    constructor Create(const APath: string);
+    constructor Create(const APath: string; AOnTerminate: TNotifyEvent);
     property Path: string read FPath;
     property Success: Boolean read FSuccess;
   end;
@@ -53,7 +58,7 @@ type
   protected
     procedure Execute; override;
   public
-    constructor Create(const APath: string);
+    constructor Create(const APath: string; AOnTerminate: TNotifyEvent);
     property Path: string read FPath;
     property Success: Boolean read FSuccess;
   end;
@@ -71,7 +76,8 @@ type
   protected
     procedure Execute; override;
   public
-    constructor Create(const APath, ADisplayName: string);
+    constructor Create(const APath, ADisplayName: string;
+      AOnTerminate: TNotifyEvent);
     property Path: string read FPath;
     property Success: Boolean read FSuccess;
     property SampleID: Integer read FSampleID;
@@ -87,9 +93,10 @@ uses
   SysUtils, IniFiles, FileUtil, SampleTypes, Project, WavDecoder,
   AudioEngine, Resample, Waveform, SP1200, TarArchive, Effects, ThreadUtil;
 
-constructor TProjectLoadThread.Create(const APath: string);
+constructor TProjectLoadThread.Create(const APath: string; AOnTerminate: TNotifyEvent);
 begin
   FPath := APath;
+  OnTerminate := AOnTerminate;
   FreeOnTerminate := True;
   inherited Create(False);
 end;
@@ -99,9 +106,10 @@ begin
   FSuccess := LoadProject(FPath);
 end;
 
-constructor TProjectSaveThread.Create(const APath: string);
+constructor TProjectSaveThread.Create(const APath: string; AOnTerminate: TNotifyEvent);
 begin
   FPath := APath;
+  OnTerminate := AOnTerminate;
   FreeOnTerminate := True;
   inherited Create(False);
 end;
@@ -111,9 +119,10 @@ begin
   FSuccess := SaveProject(FPath);
 end;
 
-constructor TProjectRenderThread.Create(const APath: string);
+constructor TProjectRenderThread.Create(const APath: string; AOnTerminate: TNotifyEvent);
 begin
   FPath := APath;
+  OnTerminate := AOnTerminate;
   FreeOnTerminate := True;
   inherited Create(False);
 end;
@@ -123,11 +132,13 @@ begin
   FSuccess := RenderProjectToWav(FPath);
 end;
 
-constructor TSampleImportThread.Create(const APath, ADisplayName: string);
+constructor TSampleImportThread.Create(const APath, ADisplayName: string;
+  AOnTerminate: TNotifyEvent);
 begin
   FPath := APath;
   FDisplayName := ADisplayName;
   FSampleID := -1;
+  OnTerminate := AOnTerminate;
   FreeOnTerminate := True;
   inherited Create(False);
 end;
