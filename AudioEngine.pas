@@ -558,8 +558,15 @@ begin
         a nearby zero crossing instead of hard-cutting, so the handover to
         the next grain doesn't click }
       StopPoint := GrainStartSource + Trunc(GrainTimelineLenF);
+      { Clip^.Data/FrameCount span the WHOLE sample file (absolute frame 0 =
+        start of the WAV) while StopPoint is clip-relative (relative to
+        Clip^.Offset, same as MarkerSource) - translate to absolute for the
+        search, then back for the returned (clip-relative) position, or a
+        clip that's a chop of a longer sample (Offset <> 0) snaps to a
+        "zero crossing" that's actually near an unrelated part of the file. }
       SnappedStop := FindNearestZeroCrossing(Clip^.Data, Clip^.FrameCount,
-        Clip^.Channels, StopPoint, WarpZeroCrossSearchFrames);
+        Clip^.Channels, StopPoint + Clip^.Offset, WarpZeroCrossSearchFrames) -
+        Clip^.Offset;
       CandidatePos := GrainStartSource + GrainOffsetIntoGrain;
       if CandidatePos >= SnappedStop then
         Exit(SnappedStop);
@@ -575,10 +582,14 @@ begin
     Back-and-Forth" transient loop mode, the one their own docs call out as
     giving the highest-quality result. }
   Overflow := GrainOffsetIntoGrain - GrainSourceLen;
+  { same clip-relative -> absolute -> clip-relative translation as the
+    truncate branch above - see the comment there }
   LoopRegionStart := FindNearestZeroCrossing(Clip^.Data, Clip^.FrameCount,
-    Clip^.Channels, GrainStartSource + GrainSourceLen div 2, WarpZeroCrossSearchFrames);
+    Clip^.Channels, GrainStartSource + GrainSourceLen div 2 + Clip^.Offset,
+    WarpZeroCrossSearchFrames) - Clip^.Offset;
   LoopRegionEnd := FindNearestZeroCrossing(Clip^.Data, Clip^.FrameCount,
-    Clip^.Channels, GrainStartSource + GrainSourceLen, WarpZeroCrossSearchFrames);
+    Clip^.Channels, GrainStartSource + GrainSourceLen + Clip^.Offset,
+    WarpZeroCrossSearchFrames) - Clip^.Offset;
   { never snap PAST the grain's own natural boundary - only earlier, so the
     loop can never read into the next grain (or past the segment's end) }
   if LoopRegionEnd > GrainStartSource + GrainSourceLen then

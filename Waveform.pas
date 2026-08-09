@@ -53,7 +53,8 @@ function WarpedSourcePosition(const AMarkers: TWarpMarkerArray;
   ATimelineFrame: Int64; AData: PSingle = nil; AFrameCount: Integer = 0;
   AChannels: Integer = 0; ASampleRate: Integer = 44100;
   AWarpMode: Integer = WarpModeBeats;
-  const ATransients: TFrameArray = nil; AGrainEnd: PInt64 = nil): Double;
+  const ATransients: TFrameArray = nil; AGrainEnd: PInt64 = nil;
+  AOffset: Int64 = 0): Double;
 
 { Sample-domain crossfade wrapper around WarpedSourcePosition - see
   AudioEngine.ClipSourceSample for the full rationale (this is the
@@ -305,7 +306,7 @@ end;
 function WarpedSourcePosition(const AMarkers: TWarpMarkerArray;
   ATimelineFrame: Int64; AData: PSingle; AFrameCount: Integer;
   AChannels: Integer; ASampleRate: Integer; AWarpMode: Integer;
-  const ATransients: TFrameArray; AGrainEnd: PInt64): Double;
+  const ATransients: TFrameArray; AGrainEnd: PInt64; AOffset: Int64): Double;
 var
   k: Integer;
   SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen: Int64;
@@ -484,8 +485,15 @@ begin
     if GrainTimelineLenF < GrainSourceLen then
     begin
       StopPoint := GrainStartSource + Trunc(GrainTimelineLenF);
+      { AData/AFrameCount span the WHOLE sample file (absolute frame 0 =
+        start of the WAV) while StopPoint is clip-relative (relative to
+        AOffset, same as AMarkers' SourceFrame values) - translate to
+        absolute for the search, then back for the returned (clip-relative)
+        position, or a clip that's a chop of a longer sample (AOffset <> 0)
+        snaps to a "zero crossing" that's actually near an unrelated part of
+        the file. }
       SnappedStop := FindNearestZeroCrossing(AData, AFrameCount, AChannels,
-        StopPoint, WarpZeroCrossSearchFrames);
+        StopPoint + AOffset, WarpZeroCrossSearchFrames) - AOffset;
       CandidatePos := GrainStartSource + GrainOffsetIntoGrain;
       if CandidatePos >= SnappedStop then
         Exit(SnappedStop);
@@ -498,10 +506,12 @@ begin
     grain to fill extra time, instead of a forward-repeat that tends to
     sound like an obvious loop }
   Overflow := GrainOffsetIntoGrain - GrainSourceLen;
+  { same clip-relative -> absolute -> clip-relative translation as the
+    truncate branch above - see the comment there }
   LoopRegionStart := FindNearestZeroCrossing(AData, AFrameCount, AChannels,
-    GrainStartSource + GrainSourceLen div 2, WarpZeroCrossSearchFrames);
+    GrainStartSource + GrainSourceLen div 2 + AOffset, WarpZeroCrossSearchFrames) - AOffset;
   LoopRegionEnd := FindNearestZeroCrossing(AData, AFrameCount, AChannels,
-    GrainStartSource + GrainSourceLen, WarpZeroCrossSearchFrames);
+    GrainStartSource + GrainSourceLen + AOffset, WarpZeroCrossSearchFrames) - AOffset;
   { never snap PAST the grain's own natural boundary - only earlier, so the
     loop can never read into the next grain (or past the segment's end) }
   if LoopRegionEnd > GrainStartSource + GrainSourceLen then
@@ -590,7 +600,7 @@ begin
 
   GrainEnd := -1;
   PosA := WarpedSourcePosition(AMarkers, ATimelineFrame, AData, AFrameCount,
-    AChannels, ASampleRate, AWarpMode, ATransients, @GrainEnd);
+    AChannels, ASampleRate, AWarpMode, ATransients, @GrainEnd, AOffset);
   SampleA := SafeInterp(PosA);
 
   FadeFrames := (WarpGrainCrossfadeMs * ASampleRate) div 1000;
@@ -603,7 +613,7 @@ begin
     Exit(SampleA);
 
   PosB0 := WarpedSourcePosition(AMarkers, GrainEnd, AData, AFrameCount,
-    AChannels, ASampleRate, AWarpMode, ATransients);
+    AChannels, ASampleRate, AWarpMode, ATransients, nil, AOffset);
   PosB := PosB0 - DistToEnd;
   SampleB := SafeInterp(PosB);
 
@@ -671,9 +681,9 @@ begin
   GrainOffsetIntoGrain := ATimelineFrame - GrainStartTimeline;
 
   AnchorStart := WarpedSourcePosition(AMarkers, GrainStartTimeline, AData,
-    AFrameCount, AChannels, ASampleRate, AWarpMode);
+    AFrameCount, AChannels, ASampleRate, AWarpMode, nil, nil, AOffset);
   AnchorEnd := WarpedSourcePosition(AMarkers, GrainStartTimeline + GrainFrames,
-    AData, AFrameCount, AChannels, ASampleRate, AWarpMode);
+    AData, AFrameCount, AChannels, ASampleRate, AWarpMode, nil, nil, AOffset);
   GrainNaturalSourceLen := AnchorEnd - AnchorStart;
   if GrainNaturalSourceLen < 1 then
     GrainNaturalSourceLen := 1;
@@ -686,7 +696,7 @@ begin
     Exit(SampleCurrent);
 
   NextAnchorEnd := WarpedSourcePosition(AMarkers, GrainStartTimeline + 2 * GrainFrames,
-    AData, AFrameCount, AChannels, ASampleRate, AWarpMode);
+    AData, AFrameCount, AChannels, ASampleRate, AWarpMode, nil, nil, AOffset);
   NextGrainNaturalSourceLen := NextAnchorEnd - AnchorEnd;
   if NextGrainNaturalSourceLen < 1 then
     NextGrainNaturalSourceLen := 1;
