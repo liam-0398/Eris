@@ -167,6 +167,16 @@ var
     Effects.TEffectState;
   MasterEffectState: array[0..Effects.MaxEffectsPerTrack - 1] of Effects.TEffectState;
 
+  { Each track's final (post-own-inserts) peak level for the CURRENT block's
+    frame being processed by FillBlock's "for t" loop below - written once
+    per track per frame, read by any other track's ekSidechain effect. For a
+    source track processed earlier than the reader in that same "for t" pass
+    this is this frame's real value; for a source track processed later it's
+    still last frame's value (one-sample stale). That's inaudible for a
+    ducking envelope follower, so it's not worth the complexity of a second
+    pass over tracks just to avoid it. }
+  TrackTapLevel: array[0..MaxTracks - 1] of Single;
+
 function PushCommand(const ACmd: TCommand): Boolean;
 var
   NextHead: Integer;
@@ -856,6 +866,15 @@ begin
 end;
 
 procedure FillBlock;
+
+  function SidechainLevelFor(ASourceTrack: Integer): Single;
+  begin
+    if (ASourceTrack < 0) or (ASourceTrack >= MaxTracks) then
+      Result := 0
+    else
+      Result := TrackTapLevel[ASourceTrack];
+  end;
+
 var
   Frame, t, i, e: Integer;
   GlobalFrame, ClipRelFrame, SwungPos: Int64;
@@ -877,7 +896,12 @@ begin
     for t := 0 to MaxTracks - 1 do
     begin
       if not Project.TrackEnabled[t] then
+      begin
+        { a muted track can't be the thing a kick hits - stop any
+          ekSidechain keyed off it from ducking on a stale, frozen level }
+        TrackTapLevel[t] := 0;
         Continue;
+      end;
 
       TrackL := 0;
       TrackR := 0;
@@ -926,7 +950,16 @@ begin
       for e := 0 to Project.TrackEffectCount[t] - 1 do
         if Project.TrackEffects[t][e].Kind <> Effects.ekNone then
           Effects.ProcessEffect(TrackEffectState[t][e], Project.TrackEffects[t][e],
-            TrackL, TrackR, ProjectSampleRate);
+            TrackL, TrackR, ProjectSampleRate,
+            SidechainLevelFor(Project.TrackEffects[t][e].SidechainSourceTrack));
+
+      { this track's final, post-insert-FX level for the frame - see
+        TrackTapLevel's declaration for why a source track processed later
+        in this same "for t" pass reads one frame stale here, not zero. }
+      if Abs(TrackL) > Abs(TrackR) then
+        TrackTapLevel[t] := Abs(TrackL)
+      else
+        TrackTapLevel[t] := Abs(TrackR);
 
       L := L + TrackL;
       R := R + TrackR;
@@ -1000,7 +1033,7 @@ begin
     for e := 0 to Project.MasterEffectCount - 1 do
       if Project.MasterEffects[e].Kind <> Effects.ekNone then
         Effects.ProcessEffect(MasterEffectState[e], Project.MasterEffects[e], L, R,
-          ProjectSampleRate);
+          ProjectSampleRate, SidechainLevelFor(Project.MasterEffects[e].SidechainSourceTrack));
 
     if L > 1.0 then L := 1.0 else if L < -1.0 then L := -1.0;
     if R > 1.0 then R := 1.0 else if R < -1.0 then R := -1.0;
@@ -1072,6 +1105,7 @@ begin
     TrackClips[i].Count := 0;
     LiveNotes[i].Active := False;
     FadingNotes[i].Active := False;
+    TrackTapLevel[i] := 0;
     for e := 0 to Effects.MaxEffectsPerTrack - 1 do
       Effects.EffectStateReset(TrackEffectState[i][e]);
   end;

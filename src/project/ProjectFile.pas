@@ -35,6 +35,25 @@ begin
   Ini.WriteFloat(ASection, APrefix + 'ChorusDepthPercent', AEffect.ChorusDepthPercent);
   Ini.WriteInteger(ASection, APrefix + 'ReverbPreset', AEffect.ReverbPreset);
   Ini.WriteFloat(ASection, APrefix + 'ReverbMixPercent', AEffect.ReverbMixPercent);
+  Ini.WriteFloat(ASection, APrefix + 'FlangerRateHz', AEffect.FlangerRateHz);
+  Ini.WriteFloat(ASection, APrefix + 'FlangerDepthPercent', AEffect.FlangerDepthPercent);
+  Ini.WriteFloat(ASection, APrefix + 'FlangerFeedbackPercent', AEffect.FlangerFeedbackPercent);
+  Ini.WriteFloat(ASection, APrefix + 'FlangerMixPercent', AEffect.FlangerMixPercent);
+  Ini.WriteFloat(ASection, APrefix + 'PhaserRateHz', AEffect.PhaserRateHz);
+  Ini.WriteFloat(ASection, APrefix + 'PhaserDepthPercent', AEffect.PhaserDepthPercent);
+  Ini.WriteFloat(ASection, APrefix + 'PhaserFeedbackPercent', AEffect.PhaserFeedbackPercent);
+  Ini.WriteFloat(ASection, APrefix + 'PhaserMixPercent', AEffect.PhaserMixPercent);
+  Ini.WriteInteger(ASection, APrefix + 'SidechainSourceTrack', AEffect.SidechainSourceTrack);
+  Ini.WriteFloat(ASection, APrefix + 'SidechainThresholdDb', AEffect.SidechainThresholdDb);
+  Ini.WriteFloat(ASection, APrefix + 'SidechainAttackMs', AEffect.SidechainAttackMs);
+  Ini.WriteFloat(ASection, APrefix + 'SidechainReleaseMs', AEffect.SidechainReleaseMs);
+  Ini.WriteFloat(ASection, APrefix + 'SidechainStrengthPercent', AEffect.SidechainStrengthPercent);
+  Ini.WriteFloat(ASection, APrefix + 'DrowningToneHz', AEffect.DrowningToneHz);
+  Ini.WriteFloat(ASection, APrefix + 'DrowningWarbleRateHz', AEffect.DrowningWarbleRateHz);
+  Ini.WriteFloat(ASection, APrefix + 'DrowningWarbleDepthPercent', AEffect.DrowningWarbleDepthPercent);
+  Ini.WriteFloat(ASection, APrefix + 'DrowningSizePercent', AEffect.DrowningSizePercent);
+  Ini.WriteFloat(ASection, APrefix + 'DrowningDecayPercent', AEffect.DrowningDecayPercent);
+  Ini.WriteFloat(ASection, APrefix + 'DrowningMixPercent', AEffect.DrowningMixPercent);
 end;
 
 function LoadEffect(Ini: TIniFile; const ASection, APrefix: string): Effects.TEffect;
@@ -55,6 +74,25 @@ begin
   Result.ChorusDepthPercent := Ini.ReadFloat(ASection, APrefix + 'ChorusDepthPercent', 50);
   Result.ReverbPreset := Ini.ReadInteger(ASection, APrefix + 'ReverbPreset', Effects.ReverbPresetRoom);
   Result.ReverbMixPercent := Ini.ReadFloat(ASection, APrefix + 'ReverbMixPercent', 30);
+  Result.FlangerRateHz := Ini.ReadFloat(ASection, APrefix + 'FlangerRateHz', 0.3);
+  Result.FlangerDepthPercent := Ini.ReadFloat(ASection, APrefix + 'FlangerDepthPercent', 60);
+  Result.FlangerFeedbackPercent := Ini.ReadFloat(ASection, APrefix + 'FlangerFeedbackPercent', 40);
+  Result.FlangerMixPercent := Ini.ReadFloat(ASection, APrefix + 'FlangerMixPercent', 50);
+  Result.PhaserRateHz := Ini.ReadFloat(ASection, APrefix + 'PhaserRateHz', 0.4);
+  Result.PhaserDepthPercent := Ini.ReadFloat(ASection, APrefix + 'PhaserDepthPercent', 70);
+  Result.PhaserFeedbackPercent := Ini.ReadFloat(ASection, APrefix + 'PhaserFeedbackPercent', 30);
+  Result.PhaserMixPercent := Ini.ReadFloat(ASection, APrefix + 'PhaserMixPercent', 50);
+  Result.SidechainSourceTrack := Ini.ReadInteger(ASection, APrefix + 'SidechainSourceTrack', 0);
+  Result.SidechainThresholdDb := Ini.ReadFloat(ASection, APrefix + 'SidechainThresholdDb', -20);
+  Result.SidechainAttackMs := Ini.ReadFloat(ASection, APrefix + 'SidechainAttackMs', 5);
+  Result.SidechainReleaseMs := Ini.ReadFloat(ASection, APrefix + 'SidechainReleaseMs', 150);
+  Result.SidechainStrengthPercent := Ini.ReadFloat(ASection, APrefix + 'SidechainStrengthPercent', 70);
+  Result.DrowningToneHz := Ini.ReadFloat(ASection, APrefix + 'DrowningToneHz', 2500);
+  Result.DrowningWarbleRateHz := Ini.ReadFloat(ASection, APrefix + 'DrowningWarbleRateHz', 0.35);
+  Result.DrowningWarbleDepthPercent := Ini.ReadFloat(ASection, APrefix + 'DrowningWarbleDepthPercent', 55);
+  Result.DrowningSizePercent := Ini.ReadFloat(ASection, APrefix + 'DrowningSizePercent', 65);
+  Result.DrowningDecayPercent := Ini.ReadFloat(ASection, APrefix + 'DrowningDecayPercent', 70);
+  Result.DrowningMixPercent := Ini.ReadFloat(ASection, APrefix + 'DrowningMixPercent', 45);
 end;
 
 function SaveProject(const APath: string): Boolean;
@@ -504,8 +542,14 @@ begin
         R := Buffer[Frame * OutChannels + 1];
         for e := 0 to Project.MasterEffectCount - 1 do
           if Project.MasterEffects[e].Kind <> Effects.ekNone then
+            { 0 for the sidechain level: this offline path sums every track
+              straight into one buffer (see the loop above) with no
+              per-track signal left to key off by the time we get here, and
+              track inserts already aren't rendered offline at all - an
+              ekSidechain on the master bus simply never ducks in a bounce,
+              same class of gap as per-track FX not rendering here. }
             Effects.ProcessEffect(MasterEffectState[e], Project.MasterEffects[e], L, R,
-              ProjectSampleRate);
+              ProjectSampleRate, 0);
         Buffer[Frame * OutChannels] := L;
         Buffer[Frame * OutChannels + 1] := R;
       end;

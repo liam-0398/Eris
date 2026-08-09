@@ -17,6 +17,10 @@ const
   ekLimiter = 3;
   ekChorus = 4;
   ekReverb = 5;
+  ekFlanger = 6;
+  ekPhaser = 7;
+  ekSidechain = 8;
+  ekDrowning = 9;
 
   { classic vintage-style chorus (think Ableton Live 1/2's Chorus, or a
     tracker's chorus command) - just a short modulated delay line per
@@ -27,6 +31,22 @@ const
   ChorusCenterDelayMs = 15.0;
   ChorusModRangeMs = 8.0;
   ChorusMaxDelayMs = 30.0;
+
+  { Flanger: the same modulated-delay recipe as Chorus, but a much shorter
+    center delay (a few ms instead of ~15ms) plus a feedback path around the
+    delay line - the feedback is what turns it from "chorus but shorter"
+    into the distinctive metallic, resonant flanger sweep. }
+  FlangerCenterDelayMs = 4.0;
+  FlangerModRangeMs = 3.5;
+  FlangerMaxDelayMs = 8.0;
+
+  { Phaser: N cascaded first-order allpass stages (classic Small
+    Stone/Phase 90 recipe), all sharing one LFO-swept center frequency per
+    channel, plus a feedback tap around the whole chain for a more
+    pronounced, resonant sweep. }
+  PhaserStageCount = 4;
+  PhaserMinFreqHz = 200.0;
+  PhaserMaxFreqHz = 2000.0;
 
   { "Basic Reverb" - a small Schroeder/Freeverb-style tank: a handful of
     parallel comb filters (each with a one-pole lowpass in its feedback path
@@ -70,6 +90,30 @@ type
     ChorusDepthPercent: Single;
     ReverbPreset: Integer;
     ReverbMixPercent: Single;
+    FlangerRateHz: Single;
+    FlangerDepthPercent: Single;
+    FlangerFeedbackPercent: Single;
+    FlangerMixPercent: Single;
+    PhaserRateHz: Single;
+    PhaserDepthPercent: Single;
+    PhaserFeedbackPercent: Single;
+    PhaserMixPercent: Single;
+    { SidechainSourceTrack is a 0-based track index (Project.Tracks/TrackEffects
+      convention); ProcessEffect itself never sees Project - AudioEngine looks
+      the source track's live level up and passes it in as ASidechainLevel }
+    SidechainSourceTrack: Integer;
+    SidechainThresholdDb: Single;
+    SidechainAttackMs: Single;
+    SidechainReleaseMs: Single;
+    SidechainStrengthPercent: Single;
+    { "Drowning" (Experimental category): LP tone -> chorus-style warble ->
+      comb/allpass reverb tank, see ProcessEffect's ekDrowning branch }
+    DrowningToneHz: Single;
+    DrowningWarbleRateHz: Single;
+    DrowningWarbleDepthPercent: Single;
+    DrowningSizePercent: Single;
+    DrowningDecayPercent: Single;
+    DrowningMixPercent: Single;
   end;
 
   TEffectChannelState = record
@@ -106,6 +150,22 @@ type
     ReverbAllpassL, ReverbAllpassR: array[0..ReverbAllpassCount - 1] of TAllpassState;
     ReverbLastPreset: Integer; { -1 = not yet set up, forces setup on first use }
     ReverbLastSampleRate: Integer;
+    FlangerBufL: array of Single; { lazily sized once the sample rate is known }
+    FlangerBufR: array of Single;
+    FlangerWritePos: Integer;
+    FlangerPhase: Single; { 0..1, one full LFO cycle }
+    PhaserZ1x: array[0..1, 0..PhaserStageCount - 1] of Single; { [channel][stage] }
+    PhaserZ1y: array[0..1, 0..PhaserStageCount - 1] of Single;
+    PhaserFeedbackSample: array[0..1] of Single; { last chain output, fed back into this channel's input }
+    PhaserPhase: Single;
+    SidechainGain: Single; { current smoothed ducking gain, 1.0 = no reduction }
+    { Drowning reuses Channels[].LowpassBq/LowpassCoeffs (tone stage),
+      ChorusBufL/R/ChorusWritePos/ChorusPhase (warble stage) and
+      ReverbCombL/R/ReverbAllpassL/R (tank stage) above - only these two
+      "last settings seen" fields are Drowning-specific, since its tank is
+      sized off a continuous Size slider rather than ekReverb's preset list }
+    DrowningLastSizePercent: Single;
+    DrowningLastSampleRate: Integer;
   end;
 
 procedure EffectStateReset(var AState: TEffectState);
@@ -113,9 +173,12 @@ procedure DefaultEffect(AKind: Integer; out AEffect: TEffect);
 
 { Runs one track-insert effect over a single frame's L/R in place. Coefficient
   recomputation only happens when a parameter actually changed since the
-  last call, so turning a knob is cheap and holding it still is even cheaper. }
+  last call, so turning a knob is cheap and holding it still is even cheaper.
+  ASidechainLevel is the current linear peak level of AEffect.SidechainSourceTrack
+  - meaningless for every Kind except ekSidechain, and looked up by the
+  caller (AudioEngine), since this unit has no idea Project/tracks exist. }
 procedure ProcessEffect(var AState: TEffectState; const AEffect: TEffect;
-  var L, R: Single; ASampleRate: Integer);
+  var L, R: Single; ASampleRate: Integer; ASidechainLevel: Single);
 
 implementation
 
@@ -129,6 +192,7 @@ begin
   AState.LimiterGain := 1.0; { unity - no reduction until something is loud enough to need it }
   AState.ReverbLastPreset := -1; { 0 is a valid preset (Small) - must not look
     already-set-up before SetupReverb has ever actually allocated buffers }
+  AState.SidechainGain := 1.0; { unity - no ducking until the source track actually hits }
 end;
 
 procedure DefaultEffect(AKind: Integer; out AEffect: TEffect);
@@ -160,6 +224,39 @@ begin
       begin
         AEffect.ReverbPreset := ReverbPresetRoom;
         AEffect.ReverbMixPercent := 30;
+      end;
+    ekFlanger:
+      begin
+        AEffect.FlangerRateHz := 0.3;
+        AEffect.FlangerDepthPercent := 60;
+        AEffect.FlangerFeedbackPercent := 40;
+        AEffect.FlangerMixPercent := 50;
+      end;
+    ekPhaser:
+      begin
+        AEffect.PhaserRateHz := 0.4;
+        AEffect.PhaserDepthPercent := 70;
+        AEffect.PhaserFeedbackPercent := 30;
+        AEffect.PhaserMixPercent := 50;
+      end;
+    ekSidechain:
+      begin
+        AEffect.SidechainSourceTrack := 0;
+        AEffect.SidechainThresholdDb := -20;
+        AEffect.SidechainAttackMs := 5;
+        AEffect.SidechainReleaseMs := 150;
+        AEffect.SidechainStrengthPercent := 70;
+      end;
+    ekDrowning:
+      begin
+        { 2012-Clams-Casino-vocal-wash defaults: dark, slow-warbling, big and
+          long-tailed, roughly half-drowned rather than fully submerged }
+        AEffect.DrowningToneHz := 2500;
+        AEffect.DrowningWarbleRateHz := 0.35;
+        AEffect.DrowningWarbleDepthPercent := 55;
+        AEffect.DrowningSizePercent := 65;
+        AEffect.DrowningDecayPercent := 70;
+        AEffect.DrowningMixPercent := 45;
       end;
   end;
 end;
@@ -229,19 +326,20 @@ begin
   end;
 end;
 
-{ (Re)allocates every comb/allpass delay line for the current preset and
-  sample rate. Only called when either actually changes - not per-sample. }
-procedure SetupReverb(var AState: TEffectState; APreset, ASampleRate: Integer);
+{ (Re)allocates every comb/allpass delay line for a given room scale and
+  sample rate. Only called when either actually changes - not per-sample.
+  Shared by ekReverb (which resolves RoomScale from a fixed preset via
+  ReverbPresetParams) and ekDrowning (which sizes its tank straight off a
+  continuous Size slider instead of a preset). }
+procedure SetupReverbTank(var AState: TEffectState; ARoomScale: Single; ASampleRate: Integer);
 var
-  RoomScale, Feedback, Damping: Single;
   c, StereoSpreadSamples, LenL, LenR: Integer;
 begin
-  ReverbPresetParams(APreset, RoomScale, Feedback, Damping);
   StereoSpreadSamples := Round(ReverbStereoSpreadSamples44k * ASampleRate / 44100);
 
   for c := 0 to ReverbCombCount - 1 do
   begin
-    LenL := Round(ReverbCombBaseMs[c] * RoomScale * ASampleRate / 1000);
+    LenL := Round(ReverbCombBaseMs[c] * ARoomScale * ASampleRate / 1000);
     if LenL < 1 then
       LenL := 1;
     LenR := LenL + StereoSpreadSamples;
@@ -257,7 +355,7 @@ begin
 
   for c := 0 to ReverbAllpassCount - 1 do
   begin
-    LenL := Round(ReverbAllpassBaseMs[c] * RoomScale * ASampleRate / 1000);
+    LenL := Round(ReverbAllpassBaseMs[c] * ARoomScale * ASampleRate / 1000);
     if LenL < 1 then
       LenL := 1;
     LenR := LenL + StereoSpreadSamples;
@@ -270,6 +368,31 @@ begin
   end;
 end;
 
+procedure SetupReverb(var AState: TEffectState; APreset, ASampleRate: Integer);
+var
+  RoomScale, Feedback, Damping: Single;
+begin
+  ReverbPresetParams(APreset, RoomScale, Feedback, Damping);
+  SetupReverbTank(AState, RoomScale, ASampleRate);
+end;
+
+{ One first-order allpass stage (the "Regalia-Mitra" form used by most
+  analog-modeled phaser plugins): a single pole/zero pair whose -90 degree
+  point sits at AFreqHz. AZ1x/AZ1y are that stage's own x[n-1]/y[n-1] -
+  cascading PhaserStageCount of these with a shared, LFO-swept AFreqHz is
+  what produces the classic multi-notch phaser sweep. }
+function ProcessAllpassFirstOrder(var AZ1x, AZ1y: Single; AInput, AFreqHz: Single;
+  ASampleRate: Integer): Single;
+var
+  Coeff, Tan: Single;
+begin
+  Tan := Math.Tan(Pi * AFreqHz / ASampleRate);
+  Coeff := (Tan - 1) / (Tan + 1);
+  Result := Coeff * (AInput - AZ1y) + AZ1x;
+  AZ1x := AInput;
+  AZ1y := Result;
+end;
+
 function ClampFreq(AFreqHz: Single; ASampleRate: Integer): Single;
 begin
   Result := AFreqHz;
@@ -280,16 +403,21 @@ begin
 end;
 
 procedure ProcessEffect(var AState: TEffectState; const AEffect: TEffect;
-  var L, R: Single; ASampleRate: Integer);
+  var L, R: Single; ASampleRate: Integer; ASidechainLevel: Single);
 var
   b: Integer;
   Freq: Single;
   ThresholdLin, Peak, TargetGain, ReleaseCoeff, ReleaseMs: Single;
   ChorusBufLen: Integer;
   ModL, ModR, DelayMsL, DelayMsR, DepthFrac, WetL, WetR: Double;
-  c: Integer;
+  c, s: Integer;
   RvRoomScale, RvFeedback, RvDamping, RvDamp1, RvDamp2: Single;
   RvDryL, RvDryR, RvInputMono, RvWetL, RvWetR, RvMixFrac: Single;
+  FlangerBufLen: Integer;
+  FeedbackFrac, MixFrac: Single;
+  PhFreqL, PhFreqR, PhFeedbackFrac, PhInL, PhInR, PhOutL, PhOutR: Single;
+  ScAttackMs, ScAttackCoeff, ScStrengthFrac: Single;
+  ToneL, ToneR: Single;
 begin
   case AEffect.Kind of
     ekLowpass:
@@ -433,6 +561,212 @@ begin
         RvMixFrac := AEffect.ReverbMixPercent / 100;
         L := RvDryL * (1 - RvMixFrac) + RvWetL * RvMixFrac;
         R := RvDryR * (1 - RvMixFrac) + RvWetR * RvMixFrac;
+      end;
+    ekFlanger:
+      begin
+        if AState.FlangerBufL = nil then
+        begin
+          FlangerBufLen := Round(ASampleRate * FlangerMaxDelayMs / 1000) + 1;
+          SetLength(AState.FlangerBufL, FlangerBufLen);
+          SetLength(AState.FlangerBufR, FlangerBufLen);
+          AState.FlangerWritePos := 0;
+          AState.FlangerPhase := 0;
+        end;
+        FlangerBufLen := Length(AState.FlangerBufL);
+
+        DepthFrac := AEffect.FlangerDepthPercent / 100;
+        ModL := Sin(2 * Pi * AState.FlangerPhase);
+        ModR := Sin(2 * Pi * AState.FlangerPhase + Pi / 2);
+        DelayMsL := FlangerCenterDelayMs + ModL * FlangerModRangeMs * DepthFrac;
+        DelayMsR := FlangerCenterDelayMs + ModR * FlangerModRangeMs * DepthFrac;
+
+        WetL := ReadDelayInterp(AState.FlangerBufL, FlangerBufLen,
+          AState.FlangerWritePos - DelayMsL * ASampleRate / 1000);
+        WetR := ReadDelayInterp(AState.FlangerBufR, FlangerBufLen,
+          AState.FlangerWritePos - DelayMsR * ASampleRate / 1000);
+
+        { feedback around the delay line itself (not just the output mix) is
+          what makes a flanger's sweep resonant/metallic rather than sounding
+          like a short chorus - clamp well under 1.0 so it can't run away }
+        FeedbackFrac := AEffect.FlangerFeedbackPercent / 100;
+        if FeedbackFrac > 0.95 then FeedbackFrac := 0.95;
+        if FeedbackFrac < 0 then FeedbackFrac := 0;
+        AState.FlangerBufL[AState.FlangerWritePos] := L + WetL * FeedbackFrac;
+        AState.FlangerBufR[AState.FlangerWritePos] := R + WetR * FeedbackFrac;
+
+        MixFrac := AEffect.FlangerMixPercent / 100;
+        L := L * (1 - MixFrac) + WetL * MixFrac;
+        R := R * (1 - MixFrac) + WetR * MixFrac;
+
+        AState.FlangerWritePos := (AState.FlangerWritePos + 1) mod FlangerBufLen;
+        AState.FlangerPhase := AState.FlangerPhase + AEffect.FlangerRateHz / ASampleRate;
+        if AState.FlangerPhase >= 1 then
+          AState.FlangerPhase := AState.FlangerPhase - 1;
+      end;
+    ekPhaser:
+      begin
+        DepthFrac := AEffect.PhaserDepthPercent / 100;
+        ModL := Sin(2 * Pi * AState.PhaserPhase);
+        ModR := Sin(2 * Pi * AState.PhaserPhase + Pi / 2);
+        { sweep range narrows around the min/max midpoint as Depth drops,
+          rather than shifting the whole range up or down }
+        PhFreqL := (PhaserMinFreqHz + PhaserMaxFreqHz) / 2 +
+          ModL * ((PhaserMaxFreqHz - PhaserMinFreqHz) / 2) * DepthFrac;
+        PhFreqR := (PhaserMinFreqHz + PhaserMaxFreqHz) / 2 +
+          ModR * ((PhaserMaxFreqHz - PhaserMinFreqHz) / 2) * DepthFrac;
+
+        PhFeedbackFrac := AEffect.PhaserFeedbackPercent / 100;
+        if PhFeedbackFrac > 0.95 then PhFeedbackFrac := 0.95;
+        if PhFeedbackFrac < 0 then PhFeedbackFrac := 0;
+
+        PhInL := L + AState.PhaserFeedbackSample[0] * PhFeedbackFrac;
+        PhInR := R + AState.PhaserFeedbackSample[1] * PhFeedbackFrac;
+
+        PhOutL := PhInL;
+        PhOutR := PhInR;
+        for s := 0 to PhaserStageCount - 1 do
+        begin
+          PhOutL := ProcessAllpassFirstOrder(AState.PhaserZ1x[0, s], AState.PhaserZ1y[0, s],
+            PhOutL, PhFreqL, ASampleRate);
+          PhOutR := ProcessAllpassFirstOrder(AState.PhaserZ1x[1, s], AState.PhaserZ1y[1, s],
+            PhOutR, PhFreqR, ASampleRate);
+        end;
+
+        AState.PhaserFeedbackSample[0] := PhOutL;
+        AState.PhaserFeedbackSample[1] := PhOutR;
+
+        MixFrac := AEffect.PhaserMixPercent / 100;
+        L := L * (1 - MixFrac) + PhOutL * MixFrac;
+        R := R * (1 - MixFrac) + PhOutR * MixFrac;
+
+        AState.PhaserPhase := AState.PhaserPhase + AEffect.PhaserRateHz / ASampleRate;
+        if AState.PhaserPhase >= 1 then
+          AState.PhaserPhase := AState.PhaserPhase - 1;
+      end;
+    ekSidechain:
+      begin
+        { classic ducker: an envelope follower on another track's level,
+          gating this track's gain down whenever that source crosses
+          Threshold - mainly for keying a bass/pad track off a kick track so
+          it visibly "breathes" with it. Attack/Release smoothing (not an
+          instant snap like the Limiter above) is what makes the duck read
+          as musical pumping rather than a click. }
+        ThresholdLin := Power(10, AEffect.SidechainThresholdDb / 20);
+        ScStrengthFrac := AEffect.SidechainStrengthPercent / 100;
+        if ScStrengthFrac > 1 then ScStrengthFrac := 1;
+        if ScStrengthFrac < 0 then ScStrengthFrac := 0;
+
+        if ASidechainLevel > ThresholdLin then
+          TargetGain := 1 - ScStrengthFrac
+        else
+          TargetGain := 1.0;
+
+        if TargetGain < AState.SidechainGain then
+        begin
+          ScAttackMs := AEffect.SidechainAttackMs;
+          if ScAttackMs < 1 then ScAttackMs := 1;
+          ScAttackCoeff := Exp(-1 / (0.001 * ScAttackMs * ASampleRate));
+          AState.SidechainGain := TargetGain + (AState.SidechainGain - TargetGain) * ScAttackCoeff;
+        end
+        else
+        begin
+          ReleaseMs := AEffect.SidechainReleaseMs;
+          if ReleaseMs < 1 then ReleaseMs := 1;
+          ReleaseCoeff := Exp(-1 / (0.001 * ReleaseMs * ASampleRate));
+          AState.SidechainGain := TargetGain + (AState.SidechainGain - TargetGain) * ReleaseCoeff;
+        end;
+
+        L := L * AState.SidechainGain;
+        R := R * AState.SidechainGain;
+      end;
+    ekDrowning:
+      begin
+        { tone stage: darkens the signal before it ever reaches the warble/
+          tank below - an attenuated-highs signal decaying into a modulated
+          wash is most of what reads as "submerged" rather than just
+          "reverb with chorus on it" }
+        Freq := ClampFreq(AEffect.DrowningToneHz, ASampleRate);
+        if (ASampleRate <> AState.LastSampleRate) or (Freq <> AState.LastLowpassFreq) then
+        begin
+          ComputeLowpassBiquad(Freq, ASampleRate, LowpassQ, AState.LowpassCoeffs);
+          AState.LastLowpassFreq := Freq;
+        end;
+        ToneL := ProcessBiquad(AState.Channels[0].LowpassBq, AState.LowpassCoeffs, L);
+        ToneR := ProcessBiquad(AState.Channels[1].LowpassBq, AState.LowpassCoeffs, R);
+        AState.LastSampleRate := ASampleRate;
+
+        { warble stage: same modulated-delay recipe as Chorus, feeding 100%
+          into the tank below - the overall dry/wet is controlled once, at
+          the very end, not here }
+        if AState.ChorusBufL = nil then
+        begin
+          ChorusBufLen := Round(ASampleRate * ChorusMaxDelayMs / 1000) + 1;
+          SetLength(AState.ChorusBufL, ChorusBufLen);
+          SetLength(AState.ChorusBufR, ChorusBufLen);
+          AState.ChorusWritePos := 0;
+          AState.ChorusPhase := 0;
+        end;
+        ChorusBufLen := Length(AState.ChorusBufL);
+        AState.ChorusBufL[AState.ChorusWritePos] := ToneL;
+        AState.ChorusBufR[AState.ChorusWritePos] := ToneR;
+
+        DepthFrac := AEffect.DrowningWarbleDepthPercent / 100;
+        ModL := Sin(2 * Pi * AState.ChorusPhase);
+        ModR := Sin(2 * Pi * AState.ChorusPhase + Pi / 2);
+        DelayMsL := ChorusCenterDelayMs + ModL * ChorusModRangeMs * DepthFrac;
+        DelayMsR := ChorusCenterDelayMs + ModR * ChorusModRangeMs * DepthFrac;
+        WetL := ReadDelayInterp(AState.ChorusBufL, ChorusBufLen,
+          AState.ChorusWritePos - DelayMsL * ASampleRate / 1000);
+        WetR := ReadDelayInterp(AState.ChorusBufR, ChorusBufLen,
+          AState.ChorusWritePos - DelayMsR * ASampleRate / 1000);
+        AState.ChorusWritePos := (AState.ChorusWritePos + 1) mod ChorusBufLen;
+        AState.ChorusPhase := AState.ChorusPhase + AEffect.DrowningWarbleRateHz / ASampleRate;
+        if AState.ChorusPhase >= 1 then
+          AState.ChorusPhase := AState.ChorusPhase - 1;
+
+        { blend some unmodulated tone back in under the warble - pure 100%
+          warble reads as thin and watery; keeping some solid signal under
+          it gives the tank something to actually decay from }
+        WetL := 0.6 * ToneL + 0.4 * WetL;
+        WetR := 0.6 * ToneR + 0.4 * WetR;
+
+        { tank stage: same comb/allpass recipe as Basic Reverb, sized off
+          the continuous Size slider instead of a fixed preset }
+        RvRoomScale := 0.4 + (AEffect.DrowningSizePercent / 100) * 1.6;
+        RvFeedback := 0.5 + (AEffect.DrowningDecayPercent / 100) * 0.45;
+        RvDamping := 0.35;
+        if (AState.DrowningLastSizePercent <> AEffect.DrowningSizePercent) or
+          (AState.DrowningLastSampleRate <> ASampleRate) then
+        begin
+          SetupReverbTank(AState, RvRoomScale, ASampleRate);
+          AState.DrowningLastSizePercent := AEffect.DrowningSizePercent;
+          AState.DrowningLastSampleRate := ASampleRate;
+        end;
+        RvDamp1 := RvDamping;
+        RvDamp2 := 1 - RvDamp1;
+        RvInputMono := (WetL + WetR) * 0.5;
+
+        RvWetL := 0;
+        RvWetR := 0;
+        for c := 0 to ReverbCombCount - 1 do
+        begin
+          RvWetL := RvWetL + ProcessComb(AState.ReverbCombL[c], RvInputMono,
+            RvFeedback, RvDamp1, RvDamp2);
+          RvWetR := RvWetR + ProcessComb(AState.ReverbCombR[c], RvInputMono,
+            RvFeedback, RvDamp1, RvDamp2);
+        end;
+        RvWetL := RvWetL / ReverbCombCount;
+        RvWetR := RvWetR / ReverbCombCount;
+
+        for c := 0 to ReverbAllpassCount - 1 do
+        begin
+          RvWetL := ProcessAllpass(AState.ReverbAllpassL[c], RvWetL, ReverbAllpassFeedback);
+          RvWetR := ProcessAllpass(AState.ReverbAllpassR[c], RvWetR, ReverbAllpassFeedback);
+        end;
+
+        MixFrac := AEffect.DrowningMixPercent / 100;
+        L := L * (1 - MixFrac) + RvWetL * MixFrac;
+        R := R * (1 - MixFrac) + RvWetR * MixFrac;
       end;
   end;
 end;
