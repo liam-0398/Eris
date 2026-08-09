@@ -283,7 +283,8 @@ begin
   Sample := Project.SamplePool[AClip.SampleID];
   DrawWaveform(Canvas, Rect(0, WarpRulerHeight, Width, Height),
     Project.SamplePeaks[AClip.SampleID], Sample.FrameCount, AClip.Offset,
-    AClip.Offset + AClip.Length, AClip.WarpMarkers, clAqua, AClip.WarpMode);
+    AClip.Offset + AClip.Length, AClip.WarpMarkers, clAqua, AClip.WarpMode,
+    Project.SampleTransients[AClip.SampleID]);
 end;
 
 procedure TWarpEditor.DrawMarkers(const AClip: TClip);
@@ -473,6 +474,9 @@ var
   ClickFrame: Int64;
   NewMarkers: TWarpMarkerArray;
   InsertAt, i: Integer;
+  SampleData: PSingle;
+  SampleFrameCount, SampleChannels: Integer;
+  Transients: TFrameArray;
 begin
   inherited DblClick;
 
@@ -504,11 +508,29 @@ begin
     (Abs(Clip.WarpMarkers[InsertAt - 1].TimelineFrame - ClickFrame) < MinMarkerGapFrames) then
     Exit;
 
+  { pin the new marker to where playback ACTUALLY reads at that timeline
+    frame: pass the sample data (zero-crossing snapping) and transients
+    (transient-bounded Beats grains), or the computed SourceFrame comes from
+    the no-data/fixed-grid code path and inserting a marker - supposedly a
+    playback no-op until dragged - would audibly shift Beats-mode audio }
+  SampleData := nil;
+  SampleFrameCount := 0;
+  SampleChannels := 0;
+  Transients := nil;
+  if (Clip.SampleID >= 0) and (Clip.SampleID <= High(Project.SamplePool)) then
+  begin
+    SampleData := Project.SamplePool[Clip.SampleID].Data;
+    SampleFrameCount := Project.SamplePool[Clip.SampleID].FrameCount;
+    SampleChannels := Project.SamplePool[Clip.SampleID].Channels;
+    Transients := Project.SampleTransients[Clip.SampleID];
+  end;
+
   SetLength(NewMarkers, Length(Clip.WarpMarkers) + 1);
   for i := 0 to InsertAt - 1 do
     NewMarkers[i] := Clip.WarpMarkers[i];
   NewMarkers[InsertAt].SourceFrame := Round(WarpedSourcePosition(Clip.WarpMarkers,
-    ClickFrame, nil, 0, 0, 44100, Clip.WarpMode));
+    ClickFrame, SampleData, SampleFrameCount, SampleChannels,
+    AudioEngine.ProjectSampleRate, Clip.WarpMode, Transients, nil, Clip.Offset));
   NewMarkers[InsertAt].TimelineFrame := ClickFrame;
   for i := InsertAt to High(Clip.WarpMarkers) do
     NewMarkers[i + 1] := Clip.WarpMarkers[i];

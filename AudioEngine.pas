@@ -370,6 +370,7 @@ var
   GrainSourceLen, GrainCount, GrainIndex: Int64;
   GrainTimelineLenF: Double;
   GrainStartTimeline, GrainStartSource, GrainOffsetIntoGrain: Int64;
+  GrainEndTimeline: Int64;
   Overflow, LoopRegionStart, LoopRegionEnd, LoopLen, Period: Int64;
   Phase, FadeFrames, FadeT, PosA, PosB, SignedOffset, DistToPeak: Double;
   HaveTransientGrain: Boolean;
@@ -382,7 +383,8 @@ var
     PInt64/Count pair (Clip^.Transients/TransientCount), the lock-free-safe
     shape - see the TPlaybackClip field comments. }
   function FindTransientGrain(out AGrainStartSource, AGrainSourceLen,
-    AGrainStartTimeline: Int64; out AGrainTimelineLenF: Double): Boolean;
+    AGrainStartTimeline, AGrainEndTimeline: Int64;
+    out AGrainTimelineLenF: Double): Boolean;
   var
     Ratio: Double;
     TIdx: Integer;
@@ -407,6 +409,16 @@ var
     while (TIdx < Clip^.TransientCount) and
       ((Clip^.Transients + TIdx)^ - Clip^.Offset <= SegStartSource) do
       Inc(TIdx);
+
+    { no transient strictly inside this segment: report failure so the
+      fixed-grid fallback subdivides it (~WarpGrainMs grains) instead of
+      treating the whole segment as ONE giant grain, whose single long
+      ping-pong is exactly the obvious-loop sound grains exist to avoid.
+      (DetectTransients always returns at least frame 0, so without this
+      check the fallback was unreachable for any loaded sample.) }
+    if (TIdx >= Clip^.TransientCount) or
+      ((Clip^.Transients + TIdx)^ - Clip^.Offset >= SegStartSource + SegSourceLen) then
+      Exit;
 
     BoundaryPos := SegStartSource;
     AccumTimeline := 0;
@@ -437,6 +449,16 @@ var
         AGrainStartSource := BoundaryPos;
         AGrainSourceLen := NaturalLen;
         AGrainStartTimeline := Trunc(AccumTimeline);
+        { the FIRST timeline frame the lookup above assigns to the NEXT
+          grain, i.e. ceil of this grain's real (fractional) end. Trunc'ing
+          both start and length instead loses up to 2 frames, reporting a
+          "grain end" that still belongs to THIS grain - the crossfade in
+          ClipSourceSample then converges onto this grain's own natural
+          continuation (a no-op) and the real splice 1-2 frames later plays
+          completely unfaded. }
+        AGrainEndTimeline := Trunc(AccumTimeline + GrainTL);
+        if AGrainEndTimeline < AccumTimeline + GrainTL then
+          Inc(AGrainEndTimeline);
         AGrainTimelineLenF := GrainTL;
         Exit(True);
       end;
@@ -522,7 +544,7 @@ begin
     segment is what makes a stretch sound like an obvious loop; many small
     grains is what makes it sound natural. }
   HaveTransientGrain := FindTransientGrain(GrainStartSource, GrainSourceLen,
-    GrainStartTimeline, GrainTimelineLenF);
+    GrainStartTimeline, GrainEndTimeline, GrainTimelineLenF);
 
   if not HaveTransientGrain then
   begin
@@ -542,12 +564,24 @@ begin
       GrainIndex := GrainCount - 1;
     GrainStartTimeline := Trunc(GrainIndex * GrainTimelineLenF);
     GrainStartSource := SegStartSource + GrainIndex * GrainSourceLen;
+    { first timeline frame at which Trunc(OffsetIntoSeg / GrainTimelineLenF)
+      actually flips to the next index - ceil, for the same reason as the
+      transient path (see FindTransientGrain's grain-end comment) }
+    GrainEndTimeline := Trunc((GrainIndex + 1) * GrainTimelineLenF);
+    if GrainEndTimeline < (GrainIndex + 1) * GrainTimelineLenF then
+      Inc(GrainEndTimeline);
   end;
+
+  { float accumulation can push the last grain's ceil'd end a frame past the
+    segment - clamp to the next marker's own frame, which is exactly where
+    the next segment's first grain takes over }
+  if GrainEndTimeline > SegTimelineLen then
+    GrainEndTimeline := SegTimelineLen;
 
   GrainOffsetIntoGrain := OffsetIntoSeg - GrainStartTimeline;
 
   if AGrainEnd <> nil then
-    AGrainEnd^ := SegStartTimeline + GrainStartTimeline + Trunc(GrainTimelineLenF);
+    AGrainEnd^ := SegStartTimeline + GrainEndTimeline;
 
   if GrainOffsetIntoGrain < GrainSourceLen then
   begin
@@ -635,7 +669,16 @@ begin
     else
       SignedOffset := Phase;
     FadeT := (SignedOffset + FadeFrames) / (2 * FadeFrames);
-    PosB := LoopRegionStart + (Phase - LoopLen);
+    { both legs expressed around the peak itself: the pre-reversal
+      (incoming, forward) leg is E + SignedOffset, the post-reversal
+      (outgoing, backward) leg is E - SignedOffset. Building the incoming
+      leg from the WRAPPED phase instead (the old
+      LoopRegionStart + (Phase - LoopLen)) is a full Period short once
+      Phase wraps past 0 - and at the very first entry into the ping-pong
+      (Phase = 0, blend forced to its midpoint) it output the loop
+      MIDPOINT instead of the grain end: a hard position jump of half the
+      loop region at the tail of EVERY stretched grain. }
+    PosB := LoopRegionEnd + SignedOffset;
     PosA := LoopRegionEnd - SignedOffset;
     Exit(PosB * (1 - FadeT) + PosA * FadeT);
   end;
@@ -712,48 +755,31 @@ end;
   Length/Position - added on top of ClipSourcePosition rather than inside
   it, so Beats/RePitch warping itself is completely untouched.
 
-  Splits the timeline into small fixed grains (DetuneGrainMs each). Each
-  grain's own natural source span is whatever ClipSourcePosition already
-  says it should be (its start/end anchors) - that's true regardless of
-  warp mode, so detune composes with either one for free. Within the grain,
-  the source read advances at the pitch-shifted rate instead of 1:1,
-  ping-ponging within that natural span if it runs out early or late (same
-  "bounce instead of hard-loop" trick used above for time-stretch).
+  Splits the timeline into small fixed grains (DetuneGrainMs each), each
+  anchored to wherever ClipSourcePosition already says its start should be
+  (true regardless of warp mode, so detune composes with either for free).
+  Within a grain the read pointer simply advances FORWARD from the anchor
+  at the pitch-shifted rate, drifting away from the natural position by up
+  to (Rate - 1) * GrainFrames; the next grain re-anchors, and the last
+  Overlap frames of every grain crossfade into the next grain's own
+  (already running) read. Classic tape-splice/overlap-add granular pitch
+  shifting.
 
-  For an arbitrary pitch ratio, that ping-ponging generally does NOT land
-  back exactly at the next grain's own start - so the last Overlap frames of
-  every grain crossfade into the NEXT grain's independently-phased read
-  instead of cutting straight to it. That's what actually kills the
-  click/pop at each grain boundary; returning a raw position (no blending)
-  was the first cut at this and audibly clicked every DetuneGrainMs. }
+  An earlier version instead ping-ponged the read inside each grain's
+  natural source span - which plays audio BACKWARD for the tail of every
+  grain whenever Rate > 1 (a 1 - 1/Rate fraction of each grain: ~16% at
+  +3 semitones, half at +12). Reversed audio every 25ms was audible as
+  constant gritty distortion on any detuned clip. Forward drift reads
+  contiguous real audio; the small per-grain re-anchor jump is exactly
+  what the overlap crossfade is for. }
 function DetunedClipSample(Clip: PPlaybackClip; AClipRelativeFrame: Int64;
   AChannel: Integer): Single;
 const
   DetuneGrainMs = 25;
 var
-  Rate, AnchorStart, AnchorEnd, NextAnchorEnd: Double;
-  GrainNaturalSourceLen, NextGrainNaturalSourceLen, ConsumedSource: Double;
+  Rate, AnchorStart, AnchorEnd: Double;
   GrainFrames, GrainIndex, GrainStartTimeline, GrainOffsetIntoGrain, Overlap: Int64;
   PosCurrent, SampleCurrent, PosNext, SampleNext, FadeT: Double;
-
-  function FloorMod(AValue, APeriod: Double): Double;
-  begin
-    Result := AValue - Trunc(AValue / APeriod) * APeriod;
-    if Result < 0 then
-      Result := Result + APeriod;
-  end;
-
-  function PingPongPos(AAnchorStart, ANaturalLen, AConsumed: Double): Double;
-  var
-    Period, Phase: Double;
-  begin
-    Period := 2 * ANaturalLen;
-    Phase := FloorMod(AConsumed, Period);
-    if Phase < ANaturalLen then
-      Result := AAnchorStart + Phase
-    else
-      Result := AAnchorStart + (Period - Phase);
-  end;
 
   function SafeInterp(ARelPos: Double): Single;
   var
@@ -783,28 +809,19 @@ begin
   GrainOffsetIntoGrain := AClipRelativeFrame - GrainStartTimeline;
 
   AnchorStart := ClipSourcePosition(Clip, GrainStartTimeline);
-  AnchorEnd := ClipSourcePosition(Clip, GrainStartTimeline + GrainFrames);
-  GrainNaturalSourceLen := AnchorEnd - AnchorStart;
-  if GrainNaturalSourceLen < 1 then
-    GrainNaturalSourceLen := 1;
 
-  ConsumedSource := GrainOffsetIntoGrain * Rate;
-  PosCurrent := PingPongPos(AnchorStart, GrainNaturalSourceLen, ConsumedSource);
+  PosCurrent := AnchorStart + GrainOffsetIntoGrain * Rate;
   SampleCurrent := SafeInterp(PosCurrent);
 
   if GrainOffsetIntoGrain < GrainFrames - Overlap then
     Exit(SampleCurrent);
 
   { last Overlap frames of this grain - blend towards the next grain, whose
-    own local offset (and hence its ping-pong phase) starts a bit negative
-    here, i.e. it's already "running" underneath the tail of this one }
-  NextAnchorEnd := ClipSourcePosition(Clip, GrainStartTimeline + 2 * GrainFrames);
-  NextGrainNaturalSourceLen := NextAnchorEnd - AnchorEnd;
-  if NextGrainNaturalSourceLen < 1 then
-    NextGrainNaturalSourceLen := 1;
-
-  PosNext := PingPongPos(AnchorEnd, NextGrainNaturalSourceLen,
-    (GrainOffsetIntoGrain - GrainFrames) * Rate);
+    own local offset starts a bit negative here, i.e. it's already "running"
+    underneath the tail of this one and lands exactly on its own anchor at
+    the boundary }
+  AnchorEnd := ClipSourcePosition(Clip, GrainStartTimeline + GrainFrames);
+  PosNext := AnchorEnd + (GrainOffsetIntoGrain - GrainFrames) * Rate;
   SampleNext := SafeInterp(PosNext);
 
   FadeT := (GrainOffsetIntoGrain - (GrainFrames - Overlap)) / Overlap;

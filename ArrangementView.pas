@@ -671,7 +671,8 @@ begin
         DrawWaveform(Canvas, Rect(R.Left, R.Top + 14, R.Right, R.Bottom),
           Project.SamplePeaks[Clip.SampleID],
           Project.SamplePool[Clip.SampleID].FrameCount, Clip.Offset,
-          Clip.Offset + Clip.Length, Clip.WarpMarkers, FTrackColors[t], Clip.WarpMode);
+          Clip.Offset + Clip.Length, Clip.WarpMarkers, FTrackColors[t], Clip.WarpMode,
+          Project.SampleTransients[Clip.SampleID]);
 
       { border only (Frame, not Rectangle - Rectangle also fills the
         interior with the current brush, which would erase the waveform
@@ -1081,7 +1082,7 @@ procedure TArrangementView.MouseUp(Button: TMouseButton; Shift: TShiftState;
 var
   OrigTrack: Integer;
   DiscardMarkers: TWarpMarkerArray;
-  SplitRel: Int64;
+  SplitRel, SplitSource: Int64;
 begin
   inherited MouseUp(Button, Shift, X, Y);
 
@@ -1135,10 +1136,14 @@ begin
             slightly from the drag position (see SplitWarpMarkers) - align
             the clip's own geometry to it too so the markers and geometry
             stay consistent. }
+          { Offset is SOURCE-domain: advance it by the source-side cut, not
+            the timeline one - they differ on any stretched/warped clip (see
+            SplitWarpMarkers' ASplitSourceOut comment) }
           SplitRel := SplitWarpMarkers(FDragOrigClip.WarpMarkers,
             FDragCurrentClip.Position - FDragOrigClip.Position, DiscardMarkers,
-            FDragCurrentClip.WarpMarkers, FDragOrigClip.WarpMode);
-          FDragCurrentClip.Offset := FDragOrigClip.Offset + SplitRel;
+            FDragCurrentClip.WarpMarkers, FDragOrigClip.WarpMode,
+            AudioEngine.ProjectSampleRate, @SplitSource);
+          FDragCurrentClip.Offset := FDragOrigClip.Offset + SplitSource;
           FDragCurrentClip.Position := FDragOrigClip.Position + SplitRel;
           FDragCurrentClip.Length := FDragOrigClip.Length - SplitRel;
         end;
@@ -1187,7 +1192,7 @@ end;
 function ExtractClipInRange(const AClip: TClip; ARangeStart, ARangeEnd: Int64;
   out AResult: TClip): Boolean;
 var
-  ClipEnd, NewStart, NewEnd, SplitRel: Int64;
+  ClipEnd, NewStart, NewEnd, SplitRel, SplitSource: Int64;
   DiscardMarkers, KeptMarkers: TWarpMarkerArray;
 begin
   ClipEnd := AClip.Position + AClip.Length;
@@ -1200,10 +1205,13 @@ begin
 
   if NewStart > AClip.Position then
   begin
+    { Offset is SOURCE-domain - advance by the source-side cut, not the
+      timeline one (see SplitWarpMarkers' ASplitSourceOut comment) }
     SplitRel := SplitWarpMarkers(AClip.WarpMarkers, NewStart - AClip.Position,
-      DiscardMarkers, KeptMarkers, AClip.WarpMode);
+      DiscardMarkers, KeptMarkers, AClip.WarpMode,
+      AudioEngine.ProjectSampleRate, @SplitSource);
     AResult.WarpMarkers := KeptMarkers;
-    AResult.Offset := AClip.Offset + SplitRel;
+    AResult.Offset := AClip.Offset + SplitSource;
     AResult.Position := AClip.Position + SplitRel;
   end;
 
@@ -1372,7 +1380,7 @@ procedure TArrangementView.SplitAtCursor;
 var
   Track: Integer;
   Selected, LeftPart, RightPart: TClip;
-  SplitFrame, SplitRel: Int64;
+  SplitFrame, SplitRel, SplitSource: Int64;
   Clips, NewClips: TClipArray;
   j, k: Integer;
 begin
@@ -1399,11 +1407,14 @@ begin
       consistent with their markers. }
     SplitRel := SplitWarpMarkers(Selected.WarpMarkers,
       SplitFrame - Selected.Position, LeftPart.WarpMarkers,
-      RightPart.WarpMarkers, Selected.WarpMode);
+      RightPart.WarpMarkers, Selected.WarpMode,
+      AudioEngine.ProjectSampleRate, @SplitSource);
 
     LeftPart.Length := SplitRel;
 
-    RightPart.Offset := Selected.Offset + SplitRel;
+    { Offset is SOURCE-domain - advance by the source-side cut, not the
+      timeline one (see SplitWarpMarkers' ASplitSourceOut comment) }
+    RightPart.Offset := Selected.Offset + SplitSource;
     RightPart.Position := Selected.Position + SplitRel;
     RightPart.Length := Selected.Length - SplitRel;
 

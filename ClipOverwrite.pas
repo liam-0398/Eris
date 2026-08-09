@@ -18,6 +18,7 @@ var
   i, OutCount: Integer;
   Existing, Left, Right: TClip;
   ExistingStart, ExistingEnd, NewEnd, SplitRel, SplitRel2: Int64;
+  SplitSource: Int64;
   DiscardMarkers, KeptMarkers: TWarpMarkerArray;
 
   procedure Append(const AClip: TClip);
@@ -66,11 +67,15 @@ begin
     begin
       { overlaps only at its head - trim from the front. Offset/Position
         move forward, so this is exactly the right half of a split at the
-        trim point - carry over the matching (rebased) warp markers. }
+        trim point - carry over the matching (rebased) warp markers.
+        Offset is SOURCE-domain: advance it by the source-side cut position,
+        not the timeline one - they differ on any stretched/warped clip
+        (see SplitWarpMarkers' ASplitSourceOut comment). }
       SplitRel := SplitWarpMarkers(Existing.WarpMarkers,
-        NewEnd - ExistingStart, DiscardMarkers, KeptMarkers, Existing.WarpMode);
+        NewEnd - ExistingStart, DiscardMarkers, KeptMarkers, Existing.WarpMode,
+        44100, @SplitSource);
       Existing.WarpMarkers := KeptMarkers;
-      Existing.Offset := Existing.Offset + SplitRel;
+      Existing.Offset := Existing.Offset + SplitSource;
       Existing.Position := ExistingStart + SplitRel;
       Existing.Length := ExistingEnd - (ExistingStart + SplitRel);
       Append(Existing);
@@ -85,9 +90,12 @@ begin
       Left.Length := SplitRel;
 
       Right := Existing;
+      { same source-vs-timeline distinction for Offset as the head-trim
+        case above }
       SplitRel2 := SplitWarpMarkers(Existing.WarpMarkers,
-        NewEnd - ExistingStart, DiscardMarkers, Right.WarpMarkers, Existing.WarpMode);
-      Right.Offset := Existing.Offset + SplitRel2;
+        NewEnd - ExistingStart, DiscardMarkers, Right.WarpMarkers, Existing.WarpMode,
+        44100, @SplitSource);
+      Right.Offset := Existing.Offset + SplitSource;
       Right.Position := ExistingStart + SplitRel2;
       Right.Length := ExistingEnd - (ExistingStart + SplitRel2);
 

@@ -341,27 +341,36 @@ begin
         begin
           OutIdx := (SwungPos + Frame) * OutChannels;
 
+          { transients passed through (absolute file positions; translated
+            clip-relative inside the warp lookup via Clip.Offset) so a bounce
+            uses the same transient-bounded Beats grains as live playback -
+            omitting them silently fell back to the fixed ~120ms grid,
+            making bounces audibly diverge from what was heard live }
           if Sample.Channels = 1 then
           begin
             Buffer[OutIdx] := Buffer[OutIdx] +
               DetunedSample(Clip.WarpMarkers, Frame, Clip.PitchSemitones, Clip.Offset,
                 Sample.Data, Sample.FrameCount, Sample.Channels,
-                AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length) * Clip.Gain;
+                AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length,
+                Project.SampleTransients[Clip.SampleID]) * Clip.Gain;
             Buffer[OutIdx + 1] := Buffer[OutIdx + 1] +
               DetunedSample(Clip.WarpMarkers, Frame, Clip.PitchSemitones, Clip.Offset,
                 Sample.Data, Sample.FrameCount, Sample.Channels,
-                AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length) * Clip.Gain;
+                AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length,
+                Project.SampleTransients[Clip.SampleID]) * Clip.Gain;
           end
           else
           begin
             Buffer[OutIdx] := Buffer[OutIdx] +
               DetunedSample(Clip.WarpMarkers, Frame, Clip.PitchSemitones, Clip.Offset,
                 Sample.Data, Sample.FrameCount, Sample.Channels,
-                AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length) * Clip.Gain;
+                AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length,
+                Project.SampleTransients[Clip.SampleID]) * Clip.Gain;
             Buffer[OutIdx + 1] := Buffer[OutIdx + 1] +
               DetunedSample(Clip.WarpMarkers, Frame, Clip.PitchSemitones, Clip.Offset,
                 Sample.Data, Sample.FrameCount, Sample.Channels,
-                AudioEngine.ProjectSampleRate, Clip.WarpMode, 1, Clip.Length) * Clip.Gain;
+                AudioEngine.ProjectSampleRate, Clip.WarpMode, 1, Clip.Length,
+                Project.SampleTransients[Clip.SampleID]) * Clip.Gain;
           end;
         end;
       end;
