@@ -91,7 +91,7 @@ type
     procedure BuildLayout;
     procedure RefreshAllTracksUI;
     procedure SetBackgroundBusy(ABusy: Boolean; const AStatusText: string;
-      AHideProjectViews: Boolean);
+      AGuardPlayback: Boolean);
     procedure StartProjectSave(const APath: string);
     procedure ProjectLoadThreadTerminate(Sender: TObject);
     procedure ProjectSaveThreadTerminate(Sender: TObject);
@@ -750,14 +750,18 @@ end;
 
 { Central on/off switch for every background project operation (Open/Save/
   Export/import). Disables the controls that could start a second one or
-  mutate Project state out from under it, and - for Open and import, which
-  actually resize Project.SamplePool/Tracks arrays the arrangement/device
-  panel paint from - hides those views entirely for the duration, since a
-  disabled-but-visible control still paints on any expose event. Save and
-  Export only ever read Project state, so a concurrent (read-only) repaint
-  alongside them is harmless and they don't need hiding. }
+  mutate Project state out from under it. For Open and import, which
+  actually resize Project.SamplePool/Tracks arrays - the same arrays the
+  realtime audio callback reads during playback - AGuardPlayback also
+  disables the transport (Play/Stop/Record) so a new playback can't start
+  mid-resize; painting is left alone (an earlier version of this hid the
+  arrangement view/device panel outright, but toggling Visible mid-import
+  turned out to disturb their scroll/zoom state - a resize-on-hide glitch
+  that pinned the playhead - and caused a visible flash, worse than the
+  read-only repaint race it was guarding against). Save and Export only
+  ever read Project state, so they need neither guard. }
 procedure TForm1.SetBackgroundBusy(ABusy: Boolean; const AStatusText: string;
-  AHideProjectViews: Boolean);
+  AGuardPlayback: Boolean);
 begin
   FBackgroundBusy := ABusy;
   FNewMenuItem.Enabled := not ABusy;
@@ -769,16 +773,8 @@ begin
   FFileBrowser.Enabled := not ABusy;
   FDevicePanel.Enabled := not ABusy;
 
-  if ABusy and AHideProjectViews then
-  begin
-    FArrangementView.Visible := False;
-    FDevicePanel.Visible := False;
-  end
-  else if not ABusy then
-  begin
-    FArrangementView.Visible := True;
-    FDevicePanel.Visible := True;
-  end;
+  if AGuardPlayback then
+    FTransportPanel.Enabled := not ABusy;
 
   if ABusy then
     Caption := 'Eris - ' + AStatusText
