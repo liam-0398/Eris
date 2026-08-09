@@ -148,6 +148,14 @@ const
   SidechainMaxReleaseMs = 1000;
   SidechainMinStrengthPercent = 0;
   SidechainMaxStrengthPercent = 100;
+  { horizontal layout: one wider column for the source-track dropdown (needs
+    room for "Track 16"), then EQ4-style narrow slider columns for
+    Threshold/Attack/Release/Strength - see BuildSidechain }
+  SidechainSourceColWidth = 80;
+  SidechainSliderColCount = 4;
+  SidechainColWidth = 54;
+  SidechainColGap = 6;
+  SidechainLeftMargin = 8;
   { Drowning's Tone control reuses Lowpass's log-frequency slider convention
     (FreqToLogSlider/LogSliderToFreq, LPMinHz/LPMaxHz above) }
   DrowningMinWarbleRateX100 = 5;
@@ -160,6 +168,20 @@ const
   DrowningMaxDecayPercent = 100;
   DrowningMinMixPercent = 0;
   DrowningMaxMixPercent = 100;
+  { horizontal EQ4-style column layout - see the ekDrowning case in
+    CreateFor and BuildDrowning below }
+  DrowningColCount = 6;
+  DrowningColWidth = 54;
+  DrowningColGap = 6;
+  DrowningLeftMargin = 8;
+  FlangerColCount = 4;
+  FlangerColWidth = 54;
+  FlangerColGap = 6;
+  FlangerLeftMargin = 8;
+  PhaserColCount = 4;
+  PhaserColWidth = 54;
+  PhaserColGap = 6;
+  PhaserLeftMargin = 8;
 
 implementation
 
@@ -261,31 +283,35 @@ begin
       end;
     Effects.ekFlanger:
       begin
-        Width := Px(200);
-        Height := Px(300); { 4 controls, each needing the same vertical room
-          as one of Limiter's/Chorus's rows above - taller than the default
-          WidgetHeight }
+        { horizontal, EQ4-style column layout - see BuildDrowning's comment,
+          same idea, 4 columns instead of 6 }
+        Width := Px(FlangerLeftMargin + FlangerColCount * (FlangerColWidth + FlangerColGap) + FlangerLeftMargin);
         DeleteButton.Left := Width - Px(28);
         BuildFlanger;
       end;
     Effects.ekPhaser:
       begin
-        Width := Px(200);
-        Height := Px(300);
+        Width := Px(PhaserLeftMargin + PhaserColCount * (PhaserColWidth + PhaserColGap) + PhaserLeftMargin);
         DeleteButton.Left := Width - Px(28);
         BuildPhaser;
       end;
     Effects.ekSidechain:
       begin
-        Width := Px(200);
-        Height := Px(360); { source-track combo plus 4 controls }
+        { horizontal layout, standard WidgetHeight: a wider first column for
+          the source-track dropdown, then 4 narrow EQ4-style slider columns -
+          see BuildSidechain }
+        Width := Px(SidechainLeftMargin + SidechainSourceColWidth + SidechainColGap +
+          SidechainSliderColCount * (SidechainColWidth + SidechainColGap) + SidechainLeftMargin);
         DeleteButton.Left := Width - Px(28);
         BuildSidechain;
       end;
     Effects.ekDrowning:
       begin
-        Width := Px(220);
-        Height := Px(430); { 6 controls }
+        { horizontal, EQ4-style column layout (6 narrow columns of a label +
+          vertical slider + value readout) instead of 6 stacked full-width
+          rows, so it stays the same Height as every other widget in the
+          rack rather than towering over them }
+        Width := Px(DrowningLeftMargin + DrowningColCount * (DrowningColWidth + DrowningColGap) + DrowningLeftMargin);
         DeleteButton.Left := Width - Px(28);
         BuildDrowning;
       end;
@@ -532,19 +558,31 @@ end;
 procedure TEffectWidget.BuildFlanger;
 var
   Lbl1, Lbl2, Lbl3, Lbl4: TLabel;
+  Col1, Col2, Col3, Col4: Integer;
 begin
+  { horizontal, EQ4-style column layout: label on top, vertical slider
+    filling the middle, value readout at the bottom - keeps this the same
+    Height as every other widget in the rack instead of stacking 4
+    full-width rows into a much taller box }
+  Col1 := FlangerLeftMargin;
+  Col2 := Col1 + FlangerColWidth + FlangerColGap;
+  Col3 := Col2 + FlangerColWidth + FlangerColGap;
+  Col4 := Col3 + FlangerColWidth + FlangerColGap;
+
   Lbl1 := TLabel.Create(Owner);
   Lbl1.Parent := Self;
-  Lbl1.Left := Px(8);
-  Lbl1.Top := Px(36);
-  Lbl1.Caption := 'Rate (Hz)';
+  Lbl1.Left := Px(Col1);
+  Lbl1.Top := Px(30);
+  Lbl1.Caption := 'Rate';
 
   FFlangerRateSlider := TTrackBar.Create(Owner);
   FFlangerRateSlider.Parent := Self;
-  FFlangerRateSlider.Left := Px(8);
-  FFlangerRateSlider.Top := Px(54);
-  FFlangerRateSlider.Width := Width - Px(16);
-  FFlangerRateSlider.Height := Px(26);
+  FFlangerRateSlider.Orientation := trVertical;
+  FFlangerRateSlider.Left := Px(Col1);
+  FFlangerRateSlider.Top := Px(48);
+  FFlangerRateSlider.Width := Px(FlangerColWidth);
+  FFlangerRateSlider.Height := Px(WidgetHeight - 48 - 24);
+  FFlangerRateSlider.Reversed := True;
   FFlangerRateSlider.Min := FlangerMinRateX100;
   FFlangerRateSlider.Max := FlangerMaxRateX100;
   FFlangerRateSlider.Position := Round(EffectPtr^.FlangerRateHz * 100);
@@ -552,22 +590,24 @@ begin
 
   FFlangerRateValueLabel := TLabel.Create(Owner);
   FFlangerRateValueLabel.Parent := Self;
-  FFlangerRateValueLabel.Left := Px(8);
-  FFlangerRateValueLabel.Top := Px(82);
-  FFlangerRateValueLabel.Caption := Format('%.2f Hz', [EffectPtr^.FlangerRateHz]);
+  FFlangerRateValueLabel.Left := Px(Col1);
+  FFlangerRateValueLabel.Top := Px(WidgetHeight - 22);
+  FFlangerRateValueLabel.Caption := Format('%.2fHz', [EffectPtr^.FlangerRateHz]);
 
   Lbl2 := TLabel.Create(Owner);
   Lbl2.Parent := Self;
-  Lbl2.Left := Px(8);
-  Lbl2.Top := Px(100);
-  Lbl2.Caption := 'Depth (%)';
+  Lbl2.Left := Px(Col2);
+  Lbl2.Top := Px(30);
+  Lbl2.Caption := 'Depth';
 
   FFlangerDepthSlider := TTrackBar.Create(Owner);
   FFlangerDepthSlider.Parent := Self;
-  FFlangerDepthSlider.Left := Px(8);
-  FFlangerDepthSlider.Top := Px(118);
-  FFlangerDepthSlider.Width := Width - Px(16);
-  FFlangerDepthSlider.Height := Px(26);
+  FFlangerDepthSlider.Orientation := trVertical;
+  FFlangerDepthSlider.Left := Px(Col2);
+  FFlangerDepthSlider.Top := Px(48);
+  FFlangerDepthSlider.Width := Px(FlangerColWidth);
+  FFlangerDepthSlider.Height := Px(WidgetHeight - 48 - 24);
+  FFlangerDepthSlider.Reversed := True;
   FFlangerDepthSlider.Min := FlangerMinDepthPercent;
   FFlangerDepthSlider.Max := FlangerMaxDepthPercent;
   FFlangerDepthSlider.Position := Round(EffectPtr^.FlangerDepthPercent);
@@ -575,22 +615,24 @@ begin
 
   FFlangerDepthValueLabel := TLabel.Create(Owner);
   FFlangerDepthValueLabel.Parent := Self;
-  FFlangerDepthValueLabel.Left := Px(8);
-  FFlangerDepthValueLabel.Top := Px(146);
+  FFlangerDepthValueLabel.Left := Px(Col2);
+  FFlangerDepthValueLabel.Top := Px(WidgetHeight - 22);
   FFlangerDepthValueLabel.Caption := Format('%d%%', [Round(EffectPtr^.FlangerDepthPercent)]);
 
   Lbl3 := TLabel.Create(Owner);
   Lbl3.Parent := Self;
-  Lbl3.Left := Px(8);
-  Lbl3.Top := Px(164);
-  Lbl3.Caption := 'Feedback (%)';
+  Lbl3.Left := Px(Col3);
+  Lbl3.Top := Px(30);
+  Lbl3.Caption := 'Fdbk';
 
   FFlangerFeedbackSlider := TTrackBar.Create(Owner);
   FFlangerFeedbackSlider.Parent := Self;
-  FFlangerFeedbackSlider.Left := Px(8);
-  FFlangerFeedbackSlider.Top := Px(182);
-  FFlangerFeedbackSlider.Width := Width - Px(16);
-  FFlangerFeedbackSlider.Height := Px(26);
+  FFlangerFeedbackSlider.Orientation := trVertical;
+  FFlangerFeedbackSlider.Left := Px(Col3);
+  FFlangerFeedbackSlider.Top := Px(48);
+  FFlangerFeedbackSlider.Width := Px(FlangerColWidth);
+  FFlangerFeedbackSlider.Height := Px(WidgetHeight - 48 - 24);
+  FFlangerFeedbackSlider.Reversed := True;
   FFlangerFeedbackSlider.Min := FlangerMinFeedbackPercent;
   FFlangerFeedbackSlider.Max := FlangerMaxFeedbackPercent;
   FFlangerFeedbackSlider.Position := Round(EffectPtr^.FlangerFeedbackPercent);
@@ -598,22 +640,24 @@ begin
 
   FFlangerFeedbackValueLabel := TLabel.Create(Owner);
   FFlangerFeedbackValueLabel.Parent := Self;
-  FFlangerFeedbackValueLabel.Left := Px(8);
-  FFlangerFeedbackValueLabel.Top := Px(210);
+  FFlangerFeedbackValueLabel.Left := Px(Col3);
+  FFlangerFeedbackValueLabel.Top := Px(WidgetHeight - 22);
   FFlangerFeedbackValueLabel.Caption := Format('%d%%', [Round(EffectPtr^.FlangerFeedbackPercent)]);
 
   Lbl4 := TLabel.Create(Owner);
   Lbl4.Parent := Self;
-  Lbl4.Left := Px(8);
-  Lbl4.Top := Px(228);
-  Lbl4.Caption := 'Dry / Wet';
+  Lbl4.Left := Px(Col4);
+  Lbl4.Top := Px(30);
+  Lbl4.Caption := 'Mix';
 
   FFlangerMixSlider := TTrackBar.Create(Owner);
   FFlangerMixSlider.Parent := Self;
-  FFlangerMixSlider.Left := Px(8);
-  FFlangerMixSlider.Top := Px(246);
-  FFlangerMixSlider.Width := Width - Px(16);
-  FFlangerMixSlider.Height := Px(26);
+  FFlangerMixSlider.Orientation := trVertical;
+  FFlangerMixSlider.Left := Px(Col4);
+  FFlangerMixSlider.Top := Px(48);
+  FFlangerMixSlider.Width := Px(FlangerColWidth);
+  FFlangerMixSlider.Height := Px(WidgetHeight - 48 - 24);
+  FFlangerMixSlider.Reversed := True;
   FFlangerMixSlider.Min := FlangerMinMixPercent;
   FFlangerMixSlider.Max := FlangerMaxMixPercent;
   FFlangerMixSlider.Position := Round(EffectPtr^.FlangerMixPercent);
@@ -621,27 +665,35 @@ begin
 
   FFlangerMixValueLabel := TLabel.Create(Owner);
   FFlangerMixValueLabel.Parent := Self;
-  FFlangerMixValueLabel.Left := Px(8);
-  FFlangerMixValueLabel.Top := Px(274);
-  FFlangerMixValueLabel.Caption := Format('%d%% wet', [Round(EffectPtr^.FlangerMixPercent)]);
+  FFlangerMixValueLabel.Left := Px(Col4);
+  FFlangerMixValueLabel.Top := Px(WidgetHeight - 22);
+  FFlangerMixValueLabel.Caption := Format('%d%%', [Round(EffectPtr^.FlangerMixPercent)]);
 end;
 
 procedure TEffectWidget.BuildPhaser;
 var
   Lbl1, Lbl2, Lbl3, Lbl4: TLabel;
+  Col1, Col2, Col3, Col4: Integer;
 begin
+  Col1 := PhaserLeftMargin;
+  Col2 := Col1 + PhaserColWidth + PhaserColGap;
+  Col3 := Col2 + PhaserColWidth + PhaserColGap;
+  Col4 := Col3 + PhaserColWidth + PhaserColGap;
+
   Lbl1 := TLabel.Create(Owner);
   Lbl1.Parent := Self;
-  Lbl1.Left := Px(8);
-  Lbl1.Top := Px(36);
-  Lbl1.Caption := 'Rate (Hz)';
+  Lbl1.Left := Px(Col1);
+  Lbl1.Top := Px(30);
+  Lbl1.Caption := 'Rate';
 
   FPhaserRateSlider := TTrackBar.Create(Owner);
   FPhaserRateSlider.Parent := Self;
-  FPhaserRateSlider.Left := Px(8);
-  FPhaserRateSlider.Top := Px(54);
-  FPhaserRateSlider.Width := Width - Px(16);
-  FPhaserRateSlider.Height := Px(26);
+  FPhaserRateSlider.Orientation := trVertical;
+  FPhaserRateSlider.Left := Px(Col1);
+  FPhaserRateSlider.Top := Px(48);
+  FPhaserRateSlider.Width := Px(PhaserColWidth);
+  FPhaserRateSlider.Height := Px(WidgetHeight - 48 - 24);
+  FPhaserRateSlider.Reversed := True;
   FPhaserRateSlider.Min := PhaserMinRateX100;
   FPhaserRateSlider.Max := PhaserMaxRateX100;
   FPhaserRateSlider.Position := Round(EffectPtr^.PhaserRateHz * 100);
@@ -649,22 +701,24 @@ begin
 
   FPhaserRateValueLabel := TLabel.Create(Owner);
   FPhaserRateValueLabel.Parent := Self;
-  FPhaserRateValueLabel.Left := Px(8);
-  FPhaserRateValueLabel.Top := Px(82);
-  FPhaserRateValueLabel.Caption := Format('%.2f Hz', [EffectPtr^.PhaserRateHz]);
+  FPhaserRateValueLabel.Left := Px(Col1);
+  FPhaserRateValueLabel.Top := Px(WidgetHeight - 22);
+  FPhaserRateValueLabel.Caption := Format('%.2fHz', [EffectPtr^.PhaserRateHz]);
 
   Lbl2 := TLabel.Create(Owner);
   Lbl2.Parent := Self;
-  Lbl2.Left := Px(8);
-  Lbl2.Top := Px(100);
-  Lbl2.Caption := 'Depth (%)';
+  Lbl2.Left := Px(Col2);
+  Lbl2.Top := Px(30);
+  Lbl2.Caption := 'Depth';
 
   FPhaserDepthSlider := TTrackBar.Create(Owner);
   FPhaserDepthSlider.Parent := Self;
-  FPhaserDepthSlider.Left := Px(8);
-  FPhaserDepthSlider.Top := Px(118);
-  FPhaserDepthSlider.Width := Width - Px(16);
-  FPhaserDepthSlider.Height := Px(26);
+  FPhaserDepthSlider.Orientation := trVertical;
+  FPhaserDepthSlider.Left := Px(Col2);
+  FPhaserDepthSlider.Top := Px(48);
+  FPhaserDepthSlider.Width := Px(PhaserColWidth);
+  FPhaserDepthSlider.Height := Px(WidgetHeight - 48 - 24);
+  FPhaserDepthSlider.Reversed := True;
   FPhaserDepthSlider.Min := PhaserMinDepthPercent;
   FPhaserDepthSlider.Max := PhaserMaxDepthPercent;
   FPhaserDepthSlider.Position := Round(EffectPtr^.PhaserDepthPercent);
@@ -672,22 +726,24 @@ begin
 
   FPhaserDepthValueLabel := TLabel.Create(Owner);
   FPhaserDepthValueLabel.Parent := Self;
-  FPhaserDepthValueLabel.Left := Px(8);
-  FPhaserDepthValueLabel.Top := Px(146);
+  FPhaserDepthValueLabel.Left := Px(Col2);
+  FPhaserDepthValueLabel.Top := Px(WidgetHeight - 22);
   FPhaserDepthValueLabel.Caption := Format('%d%%', [Round(EffectPtr^.PhaserDepthPercent)]);
 
   Lbl3 := TLabel.Create(Owner);
   Lbl3.Parent := Self;
-  Lbl3.Left := Px(8);
-  Lbl3.Top := Px(164);
-  Lbl3.Caption := 'Feedback (%)';
+  Lbl3.Left := Px(Col3);
+  Lbl3.Top := Px(30);
+  Lbl3.Caption := 'Fdbk';
 
   FPhaserFeedbackSlider := TTrackBar.Create(Owner);
   FPhaserFeedbackSlider.Parent := Self;
-  FPhaserFeedbackSlider.Left := Px(8);
-  FPhaserFeedbackSlider.Top := Px(182);
-  FPhaserFeedbackSlider.Width := Width - Px(16);
-  FPhaserFeedbackSlider.Height := Px(26);
+  FPhaserFeedbackSlider.Orientation := trVertical;
+  FPhaserFeedbackSlider.Left := Px(Col3);
+  FPhaserFeedbackSlider.Top := Px(48);
+  FPhaserFeedbackSlider.Width := Px(PhaserColWidth);
+  FPhaserFeedbackSlider.Height := Px(WidgetHeight - 48 - 24);
+  FPhaserFeedbackSlider.Reversed := True;
   FPhaserFeedbackSlider.Min := PhaserMinFeedbackPercent;
   FPhaserFeedbackSlider.Max := PhaserMaxFeedbackPercent;
   FPhaserFeedbackSlider.Position := Round(EffectPtr^.PhaserFeedbackPercent);
@@ -695,22 +751,24 @@ begin
 
   FPhaserFeedbackValueLabel := TLabel.Create(Owner);
   FPhaserFeedbackValueLabel.Parent := Self;
-  FPhaserFeedbackValueLabel.Left := Px(8);
-  FPhaserFeedbackValueLabel.Top := Px(210);
+  FPhaserFeedbackValueLabel.Left := Px(Col3);
+  FPhaserFeedbackValueLabel.Top := Px(WidgetHeight - 22);
   FPhaserFeedbackValueLabel.Caption := Format('%d%%', [Round(EffectPtr^.PhaserFeedbackPercent)]);
 
   Lbl4 := TLabel.Create(Owner);
   Lbl4.Parent := Self;
-  Lbl4.Left := Px(8);
-  Lbl4.Top := Px(228);
-  Lbl4.Caption := 'Dry / Wet';
+  Lbl4.Left := Px(Col4);
+  Lbl4.Top := Px(30);
+  Lbl4.Caption := 'Mix';
 
   FPhaserMixSlider := TTrackBar.Create(Owner);
   FPhaserMixSlider.Parent := Self;
-  FPhaserMixSlider.Left := Px(8);
-  FPhaserMixSlider.Top := Px(246);
-  FPhaserMixSlider.Width := Width - Px(16);
-  FPhaserMixSlider.Height := Px(26);
+  FPhaserMixSlider.Orientation := trVertical;
+  FPhaserMixSlider.Left := Px(Col4);
+  FPhaserMixSlider.Top := Px(48);
+  FPhaserMixSlider.Width := Px(PhaserColWidth);
+  FPhaserMixSlider.Height := Px(WidgetHeight - 48 - 24);
+  FPhaserMixSlider.Reversed := True;
   FPhaserMixSlider.Min := PhaserMinMixPercent;
   FPhaserMixSlider.Max := PhaserMaxMixPercent;
   FPhaserMixSlider.Position := Round(EffectPtr^.PhaserMixPercent);
@@ -718,21 +776,32 @@ begin
 
   FPhaserMixValueLabel := TLabel.Create(Owner);
   FPhaserMixValueLabel.Parent := Self;
-  FPhaserMixValueLabel.Left := Px(8);
-  FPhaserMixValueLabel.Top := Px(274);
-  FPhaserMixValueLabel.Caption := Format('%d%% wet', [Round(EffectPtr^.PhaserMixPercent)]);
+  FPhaserMixValueLabel.Left := Px(Col4);
+  FPhaserMixValueLabel.Top := Px(WidgetHeight - 22);
+  FPhaserMixValueLabel.Caption := Format('%d%%', [Round(EffectPtr^.PhaserMixPercent)]);
 end;
 
 procedure TEffectWidget.BuildSidechain;
 var
   Lbl0, Lbl1, Lbl2, Lbl3, Lbl4: TLabel;
+  Col1, Col2, Col3, Col4, Col5: Integer;
   t: Integer;
 begin
+  { horizontal layout, standard WidgetHeight: a wider first column for the
+    source-track dropdown, then EQ4-style narrow slider columns for
+    Threshold/Attack/Release/Strength - same idea as BuildFlanger/
+    BuildDrowning, just with one wide column instead of all-narrow }
+  Col1 := SidechainLeftMargin;
+  Col2 := Col1 + SidechainSourceColWidth + SidechainColGap;
+  Col3 := Col2 + SidechainColWidth + SidechainColGap;
+  Col4 := Col3 + SidechainColWidth + SidechainColGap;
+  Col5 := Col4 + SidechainColWidth + SidechainColGap;
+
   Lbl0 := TLabel.Create(Owner);
   Lbl0.Parent := Self;
-  Lbl0.Left := Px(8);
-  Lbl0.Top := Px(36);
-  Lbl0.Caption := 'Source track';
+  Lbl0.Left := Px(Col1);
+  Lbl0.Top := Px(30);
+  Lbl0.Caption := 'Source';
 
   { lists every possible track slot (Project.MaxTracks), not just the
     currently-visible TrackCount, so a saved choice never goes out of range
@@ -740,9 +809,9 @@ begin
   FSidechainSourceCombo := TComboBox.Create(Owner);
   FSidechainSourceCombo.Parent := Self;
   FSidechainSourceCombo.Style := csDropDownList;
-  FSidechainSourceCombo.Left := Px(8);
-  FSidechainSourceCombo.Top := Px(54);
-  FSidechainSourceCombo.Width := Width - Px(16);
+  FSidechainSourceCombo.Left := Px(Col1);
+  FSidechainSourceCombo.Top := Px(48);
+  FSidechainSourceCombo.Width := Px(SidechainSourceColWidth);
   for t := 0 to Project.MaxTracks - 1 do
     FSidechainSourceCombo.Items.Add('Track ' + IntToStr(t + 1));
   FSidechainSourceCombo.ItemIndex := EffectPtr^.SidechainSourceTrack;
@@ -750,16 +819,18 @@ begin
 
   Lbl1 := TLabel.Create(Owner);
   Lbl1.Parent := Self;
-  Lbl1.Left := Px(8);
-  Lbl1.Top := Px(100);
-  Lbl1.Caption := 'Threshold (dB)';
+  Lbl1.Left := Px(Col2);
+  Lbl1.Top := Px(30);
+  Lbl1.Caption := 'Thresh';
 
   FSidechainThresholdSlider := TTrackBar.Create(Owner);
   FSidechainThresholdSlider.Parent := Self;
-  FSidechainThresholdSlider.Left := Px(8);
-  FSidechainThresholdSlider.Top := Px(118);
-  FSidechainThresholdSlider.Width := Width - Px(16);
-  FSidechainThresholdSlider.Height := Px(26);
+  FSidechainThresholdSlider.Orientation := trVertical;
+  FSidechainThresholdSlider.Left := Px(Col2);
+  FSidechainThresholdSlider.Top := Px(48);
+  FSidechainThresholdSlider.Width := Px(SidechainColWidth);
+  FSidechainThresholdSlider.Height := Px(WidgetHeight - 48 - 24);
+  FSidechainThresholdSlider.Reversed := True;
   FSidechainThresholdSlider.Min := SidechainMinThresholdDb;
   FSidechainThresholdSlider.Max := SidechainMaxThresholdDb;
   FSidechainThresholdSlider.Position := Round(EffectPtr^.SidechainThresholdDb);
@@ -767,22 +838,24 @@ begin
 
   FSidechainThresholdValueLabel := TLabel.Create(Owner);
   FSidechainThresholdValueLabel.Parent := Self;
-  FSidechainThresholdValueLabel.Left := Px(8);
-  FSidechainThresholdValueLabel.Top := Px(146);
-  FSidechainThresholdValueLabel.Caption := Format('%d dB', [Round(EffectPtr^.SidechainThresholdDb)]);
+  FSidechainThresholdValueLabel.Left := Px(Col2);
+  FSidechainThresholdValueLabel.Top := Px(WidgetHeight - 22);
+  FSidechainThresholdValueLabel.Caption := Format('%ddB', [Round(EffectPtr^.SidechainThresholdDb)]);
 
   Lbl2 := TLabel.Create(Owner);
   Lbl2.Parent := Self;
-  Lbl2.Left := Px(8);
-  Lbl2.Top := Px(164);
-  Lbl2.Caption := 'Attack (ms)';
+  Lbl2.Left := Px(Col3);
+  Lbl2.Top := Px(30);
+  Lbl2.Caption := 'Attack';
 
   FSidechainAttackSlider := TTrackBar.Create(Owner);
   FSidechainAttackSlider.Parent := Self;
-  FSidechainAttackSlider.Left := Px(8);
-  FSidechainAttackSlider.Top := Px(182);
-  FSidechainAttackSlider.Width := Width - Px(16);
-  FSidechainAttackSlider.Height := Px(26);
+  FSidechainAttackSlider.Orientation := trVertical;
+  FSidechainAttackSlider.Left := Px(Col3);
+  FSidechainAttackSlider.Top := Px(48);
+  FSidechainAttackSlider.Width := Px(SidechainColWidth);
+  FSidechainAttackSlider.Height := Px(WidgetHeight - 48 - 24);
+  FSidechainAttackSlider.Reversed := True;
   FSidechainAttackSlider.Min := SidechainMinAttackMs;
   FSidechainAttackSlider.Max := SidechainMaxAttackMs;
   FSidechainAttackSlider.Position := Round(EffectPtr^.SidechainAttackMs);
@@ -790,22 +863,24 @@ begin
 
   FSidechainAttackValueLabel := TLabel.Create(Owner);
   FSidechainAttackValueLabel.Parent := Self;
-  FSidechainAttackValueLabel.Left := Px(8);
-  FSidechainAttackValueLabel.Top := Px(210);
-  FSidechainAttackValueLabel.Caption := Format('%d ms', [Round(EffectPtr^.SidechainAttackMs)]);
+  FSidechainAttackValueLabel.Left := Px(Col3);
+  FSidechainAttackValueLabel.Top := Px(WidgetHeight - 22);
+  FSidechainAttackValueLabel.Caption := Format('%dms', [Round(EffectPtr^.SidechainAttackMs)]);
 
   Lbl3 := TLabel.Create(Owner);
   Lbl3.Parent := Self;
-  Lbl3.Left := Px(8);
-  Lbl3.Top := Px(228);
-  Lbl3.Caption := 'Release (ms)';
+  Lbl3.Left := Px(Col4);
+  Lbl3.Top := Px(30);
+  Lbl3.Caption := 'Release';
 
   FSidechainReleaseSlider := TTrackBar.Create(Owner);
   FSidechainReleaseSlider.Parent := Self;
-  FSidechainReleaseSlider.Left := Px(8);
-  FSidechainReleaseSlider.Top := Px(246);
-  FSidechainReleaseSlider.Width := Width - Px(16);
-  FSidechainReleaseSlider.Height := Px(26);
+  FSidechainReleaseSlider.Orientation := trVertical;
+  FSidechainReleaseSlider.Left := Px(Col4);
+  FSidechainReleaseSlider.Top := Px(48);
+  FSidechainReleaseSlider.Width := Px(SidechainColWidth);
+  FSidechainReleaseSlider.Height := Px(WidgetHeight - 48 - 24);
+  FSidechainReleaseSlider.Reversed := True;
   FSidechainReleaseSlider.Min := SidechainMinReleaseMs;
   FSidechainReleaseSlider.Max := SidechainMaxReleaseMs;
   FSidechainReleaseSlider.Position := Round(EffectPtr^.SidechainReleaseMs);
@@ -813,22 +888,24 @@ begin
 
   FSidechainReleaseValueLabel := TLabel.Create(Owner);
   FSidechainReleaseValueLabel.Parent := Self;
-  FSidechainReleaseValueLabel.Left := Px(8);
-  FSidechainReleaseValueLabel.Top := Px(274);
-  FSidechainReleaseValueLabel.Caption := Format('%d ms', [Round(EffectPtr^.SidechainReleaseMs)]);
+  FSidechainReleaseValueLabel.Left := Px(Col4);
+  FSidechainReleaseValueLabel.Top := Px(WidgetHeight - 22);
+  FSidechainReleaseValueLabel.Caption := Format('%dms', [Round(EffectPtr^.SidechainReleaseMs)]);
 
   Lbl4 := TLabel.Create(Owner);
   Lbl4.Parent := Self;
-  Lbl4.Left := Px(8);
-  Lbl4.Top := Px(292);
-  Lbl4.Caption := 'Strength (%)';
+  Lbl4.Left := Px(Col5);
+  Lbl4.Top := Px(30);
+  Lbl4.Caption := 'Strength';
 
   FSidechainStrengthSlider := TTrackBar.Create(Owner);
   FSidechainStrengthSlider.Parent := Self;
-  FSidechainStrengthSlider.Left := Px(8);
-  FSidechainStrengthSlider.Top := Px(310);
-  FSidechainStrengthSlider.Width := Width - Px(16);
-  FSidechainStrengthSlider.Height := Px(26);
+  FSidechainStrengthSlider.Orientation := trVertical;
+  FSidechainStrengthSlider.Left := Px(Col5);
+  FSidechainStrengthSlider.Top := Px(48);
+  FSidechainStrengthSlider.Width := Px(SidechainColWidth);
+  FSidechainStrengthSlider.Height := Px(WidgetHeight - 48 - 24);
+  FSidechainStrengthSlider.Reversed := True;
   FSidechainStrengthSlider.Min := SidechainMinStrengthPercent;
   FSidechainStrengthSlider.Max := SidechainMaxStrengthPercent;
   FSidechainStrengthSlider.Position := Round(EffectPtr^.SidechainStrengthPercent);
@@ -836,27 +913,39 @@ begin
 
   FSidechainStrengthValueLabel := TLabel.Create(Owner);
   FSidechainStrengthValueLabel.Parent := Self;
-  FSidechainStrengthValueLabel.Left := Px(8);
-  FSidechainStrengthValueLabel.Top := Px(338);
+  FSidechainStrengthValueLabel.Left := Px(Col5);
+  FSidechainStrengthValueLabel.Top := Px(WidgetHeight - 22);
   FSidechainStrengthValueLabel.Caption := Format('%d%%', [Round(EffectPtr^.SidechainStrengthPercent)]);
 end;
 
 procedure TEffectWidget.BuildDrowning;
 var
   Lbl1, Lbl2, Lbl3, Lbl4, Lbl5, Lbl6: TLabel;
+  Col1, Col2, Col3, Col4, Col5, Col6: Integer;
 begin
+  { horizontal, EQ4-style column layout - see BuildFlanger's comment, same
+    idea, 6 columns instead of 4 }
+  Col1 := DrowningLeftMargin;
+  Col2 := Col1 + DrowningColWidth + DrowningColGap;
+  Col3 := Col2 + DrowningColWidth + DrowningColGap;
+  Col4 := Col3 + DrowningColWidth + DrowningColGap;
+  Col5 := Col4 + DrowningColWidth + DrowningColGap;
+  Col6 := Col5 + DrowningColWidth + DrowningColGap;
+
   Lbl1 := TLabel.Create(Owner);
   Lbl1.Parent := Self;
-  Lbl1.Left := Px(8);
-  Lbl1.Top := Px(36);
-  Lbl1.Caption := 'Tone (Hz)';
+  Lbl1.Left := Px(Col1);
+  Lbl1.Top := Px(30);
+  Lbl1.Caption := 'Tone';
 
   FDrowningToneSlider := TTrackBar.Create(Owner);
   FDrowningToneSlider.Parent := Self;
-  FDrowningToneSlider.Left := Px(8);
-  FDrowningToneSlider.Top := Px(54);
-  FDrowningToneSlider.Width := Width - Px(16);
-  FDrowningToneSlider.Height := Px(26);
+  FDrowningToneSlider.Orientation := trVertical;
+  FDrowningToneSlider.Left := Px(Col1);
+  FDrowningToneSlider.Top := Px(48);
+  FDrowningToneSlider.Width := Px(DrowningColWidth);
+  FDrowningToneSlider.Height := Px(WidgetHeight - 48 - 24);
+  FDrowningToneSlider.Reversed := True;
   FDrowningToneSlider.Min := 0;
   FDrowningToneSlider.Max := 100;
   FDrowningToneSlider.Position := FreqToLogSlider(EffectPtr^.DrowningToneHz);
@@ -864,22 +953,24 @@ begin
 
   FDrowningToneValueLabel := TLabel.Create(Owner);
   FDrowningToneValueLabel.Parent := Self;
-  FDrowningToneValueLabel.Left := Px(8);
-  FDrowningToneValueLabel.Top := Px(82);
-  FDrowningToneValueLabel.Caption := Format('%d Hz', [Round(EffectPtr^.DrowningToneHz)]);
+  FDrowningToneValueLabel.Left := Px(Col1);
+  FDrowningToneValueLabel.Top := Px(WidgetHeight - 22);
+  FDrowningToneValueLabel.Caption := Format('%dHz', [Round(EffectPtr^.DrowningToneHz)]);
 
   Lbl2 := TLabel.Create(Owner);
   Lbl2.Parent := Self;
-  Lbl2.Left := Px(8);
-  Lbl2.Top := Px(100);
-  Lbl2.Caption := 'Warble rate (Hz)';
+  Lbl2.Left := Px(Col2);
+  Lbl2.Top := Px(30);
+  Lbl2.Caption := 'W.Rate';
 
   FDrowningWarbleRateSlider := TTrackBar.Create(Owner);
   FDrowningWarbleRateSlider.Parent := Self;
-  FDrowningWarbleRateSlider.Left := Px(8);
-  FDrowningWarbleRateSlider.Top := Px(118);
-  FDrowningWarbleRateSlider.Width := Width - Px(16);
-  FDrowningWarbleRateSlider.Height := Px(26);
+  FDrowningWarbleRateSlider.Orientation := trVertical;
+  FDrowningWarbleRateSlider.Left := Px(Col2);
+  FDrowningWarbleRateSlider.Top := Px(48);
+  FDrowningWarbleRateSlider.Width := Px(DrowningColWidth);
+  FDrowningWarbleRateSlider.Height := Px(WidgetHeight - 48 - 24);
+  FDrowningWarbleRateSlider.Reversed := True;
   FDrowningWarbleRateSlider.Min := DrowningMinWarbleRateX100;
   FDrowningWarbleRateSlider.Max := DrowningMaxWarbleRateX100;
   FDrowningWarbleRateSlider.Position := Round(EffectPtr^.DrowningWarbleRateHz * 100);
@@ -887,22 +978,24 @@ begin
 
   FDrowningWarbleRateValueLabel := TLabel.Create(Owner);
   FDrowningWarbleRateValueLabel.Parent := Self;
-  FDrowningWarbleRateValueLabel.Left := Px(8);
-  FDrowningWarbleRateValueLabel.Top := Px(146);
-  FDrowningWarbleRateValueLabel.Caption := Format('%.2f Hz', [EffectPtr^.DrowningWarbleRateHz]);
+  FDrowningWarbleRateValueLabel.Left := Px(Col2);
+  FDrowningWarbleRateValueLabel.Top := Px(WidgetHeight - 22);
+  FDrowningWarbleRateValueLabel.Caption := Format('%.2fHz', [EffectPtr^.DrowningWarbleRateHz]);
 
   Lbl3 := TLabel.Create(Owner);
   Lbl3.Parent := Self;
-  Lbl3.Left := Px(8);
-  Lbl3.Top := Px(164);
-  Lbl3.Caption := 'Warble depth (%)';
+  Lbl3.Left := Px(Col3);
+  Lbl3.Top := Px(30);
+  Lbl3.Caption := 'W.Depth';
 
   FDrowningWarbleDepthSlider := TTrackBar.Create(Owner);
   FDrowningWarbleDepthSlider.Parent := Self;
-  FDrowningWarbleDepthSlider.Left := Px(8);
-  FDrowningWarbleDepthSlider.Top := Px(182);
-  FDrowningWarbleDepthSlider.Width := Width - Px(16);
-  FDrowningWarbleDepthSlider.Height := Px(26);
+  FDrowningWarbleDepthSlider.Orientation := trVertical;
+  FDrowningWarbleDepthSlider.Left := Px(Col3);
+  FDrowningWarbleDepthSlider.Top := Px(48);
+  FDrowningWarbleDepthSlider.Width := Px(DrowningColWidth);
+  FDrowningWarbleDepthSlider.Height := Px(WidgetHeight - 48 - 24);
+  FDrowningWarbleDepthSlider.Reversed := True;
   FDrowningWarbleDepthSlider.Min := DrowningMinWarbleDepthPercent;
   FDrowningWarbleDepthSlider.Max := DrowningMaxWarbleDepthPercent;
   FDrowningWarbleDepthSlider.Position := Round(EffectPtr^.DrowningWarbleDepthPercent);
@@ -910,22 +1003,24 @@ begin
 
   FDrowningWarbleDepthValueLabel := TLabel.Create(Owner);
   FDrowningWarbleDepthValueLabel.Parent := Self;
-  FDrowningWarbleDepthValueLabel.Left := Px(8);
-  FDrowningWarbleDepthValueLabel.Top := Px(210);
+  FDrowningWarbleDepthValueLabel.Left := Px(Col3);
+  FDrowningWarbleDepthValueLabel.Top := Px(WidgetHeight - 22);
   FDrowningWarbleDepthValueLabel.Caption := Format('%d%%', [Round(EffectPtr^.DrowningWarbleDepthPercent)]);
 
   Lbl4 := TLabel.Create(Owner);
   Lbl4.Parent := Self;
-  Lbl4.Left := Px(8);
-  Lbl4.Top := Px(228);
-  Lbl4.Caption := 'Size (%)';
+  Lbl4.Left := Px(Col4);
+  Lbl4.Top := Px(30);
+  Lbl4.Caption := 'Size';
 
   FDrowningSizeSlider := TTrackBar.Create(Owner);
   FDrowningSizeSlider.Parent := Self;
-  FDrowningSizeSlider.Left := Px(8);
-  FDrowningSizeSlider.Top := Px(246);
-  FDrowningSizeSlider.Width := Width - Px(16);
-  FDrowningSizeSlider.Height := Px(26);
+  FDrowningSizeSlider.Orientation := trVertical;
+  FDrowningSizeSlider.Left := Px(Col4);
+  FDrowningSizeSlider.Top := Px(48);
+  FDrowningSizeSlider.Width := Px(DrowningColWidth);
+  FDrowningSizeSlider.Height := Px(WidgetHeight - 48 - 24);
+  FDrowningSizeSlider.Reversed := True;
   FDrowningSizeSlider.Min := DrowningMinSizePercent;
   FDrowningSizeSlider.Max := DrowningMaxSizePercent;
   FDrowningSizeSlider.Position := Round(EffectPtr^.DrowningSizePercent);
@@ -933,22 +1028,24 @@ begin
 
   FDrowningSizeValueLabel := TLabel.Create(Owner);
   FDrowningSizeValueLabel.Parent := Self;
-  FDrowningSizeValueLabel.Left := Px(8);
-  FDrowningSizeValueLabel.Top := Px(274);
+  FDrowningSizeValueLabel.Left := Px(Col4);
+  FDrowningSizeValueLabel.Top := Px(WidgetHeight - 22);
   FDrowningSizeValueLabel.Caption := Format('%d%%', [Round(EffectPtr^.DrowningSizePercent)]);
 
   Lbl5 := TLabel.Create(Owner);
   Lbl5.Parent := Self;
-  Lbl5.Left := Px(8);
-  Lbl5.Top := Px(292);
-  Lbl5.Caption := 'Decay (%)';
+  Lbl5.Left := Px(Col5);
+  Lbl5.Top := Px(30);
+  Lbl5.Caption := 'Decay';
 
   FDrowningDecaySlider := TTrackBar.Create(Owner);
   FDrowningDecaySlider.Parent := Self;
-  FDrowningDecaySlider.Left := Px(8);
-  FDrowningDecaySlider.Top := Px(310);
-  FDrowningDecaySlider.Width := Width - Px(16);
-  FDrowningDecaySlider.Height := Px(26);
+  FDrowningDecaySlider.Orientation := trVertical;
+  FDrowningDecaySlider.Left := Px(Col5);
+  FDrowningDecaySlider.Top := Px(48);
+  FDrowningDecaySlider.Width := Px(DrowningColWidth);
+  FDrowningDecaySlider.Height := Px(WidgetHeight - 48 - 24);
+  FDrowningDecaySlider.Reversed := True;
   FDrowningDecaySlider.Min := DrowningMinDecayPercent;
   FDrowningDecaySlider.Max := DrowningMaxDecayPercent;
   FDrowningDecaySlider.Position := Round(EffectPtr^.DrowningDecayPercent);
@@ -956,22 +1053,24 @@ begin
 
   FDrowningDecayValueLabel := TLabel.Create(Owner);
   FDrowningDecayValueLabel.Parent := Self;
-  FDrowningDecayValueLabel.Left := Px(8);
-  FDrowningDecayValueLabel.Top := Px(338);
+  FDrowningDecayValueLabel.Left := Px(Col5);
+  FDrowningDecayValueLabel.Top := Px(WidgetHeight - 22);
   FDrowningDecayValueLabel.Caption := Format('%d%%', [Round(EffectPtr^.DrowningDecayPercent)]);
 
   Lbl6 := TLabel.Create(Owner);
   Lbl6.Parent := Self;
-  Lbl6.Left := Px(8);
-  Lbl6.Top := Px(356);
-  Lbl6.Caption := 'Dry / Wet';
+  Lbl6.Left := Px(Col6);
+  Lbl6.Top := Px(30);
+  Lbl6.Caption := 'Mix';
 
   FDrowningMixSlider := TTrackBar.Create(Owner);
   FDrowningMixSlider.Parent := Self;
-  FDrowningMixSlider.Left := Px(8);
-  FDrowningMixSlider.Top := Px(374);
-  FDrowningMixSlider.Width := Width - Px(16);
-  FDrowningMixSlider.Height := Px(26);
+  FDrowningMixSlider.Orientation := trVertical;
+  FDrowningMixSlider.Left := Px(Col6);
+  FDrowningMixSlider.Top := Px(48);
+  FDrowningMixSlider.Width := Px(DrowningColWidth);
+  FDrowningMixSlider.Height := Px(WidgetHeight - 48 - 24);
+  FDrowningMixSlider.Reversed := True;
   FDrowningMixSlider.Min := DrowningMinMixPercent;
   FDrowningMixSlider.Max := DrowningMaxMixPercent;
   FDrowningMixSlider.Position := Round(EffectPtr^.DrowningMixPercent);
@@ -979,9 +1078,9 @@ begin
 
   FDrowningMixValueLabel := TLabel.Create(Owner);
   FDrowningMixValueLabel.Parent := Self;
-  FDrowningMixValueLabel.Left := Px(8);
-  FDrowningMixValueLabel.Top := Px(402);
-  FDrowningMixValueLabel.Caption := Format('%d%% wet', [Round(EffectPtr^.DrowningMixPercent)]);
+  FDrowningMixValueLabel.Left := Px(Col6);
+  FDrowningMixValueLabel.Top := Px(WidgetHeight - 22);
+  FDrowningMixValueLabel.Caption := Format('%d%%', [Round(EffectPtr^.DrowningMixPercent)]);
 end;
 
 procedure TEffectWidget.DeleteClick(Sender: TObject);
