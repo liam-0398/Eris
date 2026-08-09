@@ -53,7 +53,18 @@ function WarpedSourcePosition(const AMarkers: TWarpMarkerArray;
   ATimelineFrame: Int64; AData: PSingle = nil; AFrameCount: Integer = 0;
   AChannels: Integer = 0; ASampleRate: Integer = 44100;
   AWarpMode: Integer = WarpModeBeats;
-  const ATransients: TFrameArray = nil): Double;
+  const ATransients: TFrameArray = nil; AGrainEnd: PInt64 = nil): Double;
+
+{ Sample-domain crossfade wrapper around WarpedSourcePosition - see
+  AudioEngine.ClipSourceSample for the full rationale (this is the
+  shared/offline-safe copy of the same algorithm). AClipLength is the clip's
+  own total timeline length (frames), used to avoid crossfading past the
+  clip's own end; AOffset is the clip's source offset, same as DetunedSample. }
+function WarpedSourceSample(const AMarkers: TWarpMarkerArray;
+  ATimelineFrame: Int64; AClipLength: Int64; AOffset: Int64; AData: PSingle;
+  AFrameCount: Integer; AChannels: Integer; ASampleRate: Integer;
+  AWarpMode: Integer; AChannel: Integer;
+  const ATransients: TFrameArray = nil): Single;
 
 { Cuts a warp marker array in two at ASplitFrame (clip-relative timeline
   frame), for use whenever a clip itself is split or trimmed (explicit split,
@@ -96,7 +107,8 @@ function SplitWarpMarkers(const AMarkers: TWarpMarkerArray; ASplitFrame: Int64;
   (ProjectFile.RenderProjectToWav) so a bounce matches live playback. }
 function DetunedSample(const AMarkers: TWarpMarkerArray; ATimelineFrame: Int64;
   ADetuneSemitones: Single; AOffset: Int64; AData: PSingle;
-  AFrameCount, AChannels, ASampleRate: Integer; AWarpMode, AChannel: Integer): Single;
+  AFrameCount, AChannels, ASampleRate: Integer; AWarpMode, AChannel: Integer;
+  AClipLength: Int64 = -1): Single;
 
 { Draws the waveform for [AStartFrame, AEndFrame) of a sample (out of
   ATotalFrameCount frames covered by APeaks) into ARect. When AMarkers has
@@ -249,6 +261,9 @@ const
   WarpGrainMs = 120;
   WarpZeroCrossSearchFrames = 32;
   WarpReversalFadeMs = 4;
+  { width of the position blend applied before each RePitch-mode marker, to
+    absorb the rate kink between two segments - see WarpedSourcePosition }
+  WarpRepitchFadeMs = 4;
 
 function FindNearestZeroCrossing(AData: PSingle; AFrameCount, AChannels: Integer;
   ACenterFrame: Int64; ASearchRadius: Integer): Int64;
@@ -290,7 +305,7 @@ end;
 function WarpedSourcePosition(const AMarkers: TWarpMarkerArray;
   ATimelineFrame: Int64; AData: PSingle; AFrameCount: Integer;
   AChannels: Integer; ASampleRate: Integer; AWarpMode: Integer;
-  const ATransients: TFrameArray): Double;
+  const ATransients: TFrameArray; AGrainEnd: PInt64): Double;
 var
   k: Integer;
   SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen: Int64;
@@ -301,6 +316,8 @@ var
   Overflow, LoopRegionStart, LoopRegionEnd, LoopLen, Period: Int64;
   Phase, FadeFrames, FadeT, PosA, PosB, SignedOffset, DistToPeak: Double;
   HaveTransientGrain: Boolean;
+  RePitchFadeFrames, RePitchDistToEnd, NextSegSourceLen, NextSegTimelineLen: Int64;
+  RePitchPosA, RePitchPosB, RePitchFadeT: Double;
 
   { Looks up the transient-bounded grain (SourceFrame span between two
     detected onsets, or between a segment edge and the nearest onset) that
@@ -387,7 +404,41 @@ begin
   begin
     if SegTimelineLen = 0 then
       Exit(SegStartSource);
-    Exit(SegStartSource + OffsetIntoSeg * (SegSourceLen / SegTimelineLen));
+    RePitchPosA := SegStartSource + OffsetIntoSeg * (SegSourceLen / SegTimelineLen);
+
+    { Two adjacent segments generally run at different rates, so the read
+      pointer's SLOPE (not its position - the two formulas already agree
+      exactly at the marker) kinks abruptly at every internal marker. Blend
+      this segment's own formula with the next segment's, extrapolated
+      backward, over a short window ending exactly at the marker: since both
+      converge to the same value there, this fully absorbs the rate change
+      before the marker instead of snapping it - same idea as the ping-pong
+      reversal smoothing below, applied to a rate kink instead of a
+      direction reversal. }
+    if k < Length(AMarkers) - 2 then
+    begin
+      RePitchFadeFrames := (WarpRepitchFadeMs * ASampleRate) div 1000;
+      if RePitchFadeFrames > SegTimelineLen div 2 then
+        RePitchFadeFrames := SegTimelineLen div 2;
+      if RePitchFadeFrames < 1 then
+        RePitchFadeFrames := 1;
+
+      RePitchDistToEnd := SegTimelineLen - OffsetIntoSeg;
+      if RePitchDistToEnd <= RePitchFadeFrames then
+      begin
+        NextSegSourceLen := AMarkers[k + 2].SourceFrame - AMarkers[k + 1].SourceFrame;
+        NextSegTimelineLen := AMarkers[k + 2].TimelineFrame - AMarkers[k + 1].TimelineFrame;
+        if NextSegTimelineLen > 0 then
+        begin
+          RePitchPosB := AMarkers[k + 1].SourceFrame +
+            (OffsetIntoSeg - SegTimelineLen) * (NextSegSourceLen / NextSegTimelineLen);
+          RePitchFadeT := 1 - (RePitchDistToEnd / RePitchFadeFrames);
+          Exit(RePitchPosA * (1 - RePitchFadeT) + RePitchPosB * RePitchFadeT);
+        end;
+      end;
+    end;
+
+    Exit(RePitchPosA);
   end;
 
   if SegTimelineLen <= 0 then
@@ -424,6 +475,9 @@ begin
   end;
 
   GrainOffsetIntoGrain := OffsetIntoSeg - GrainStartTimeline;
+
+  if AGrainEnd <> nil then
+    AGrainEnd^ := SegStartTimeline + GrainStartTimeline + Trunc(GrainTimelineLenF);
 
   if GrainOffsetIntoGrain < GrainSourceLen then
   begin
@@ -504,9 +558,63 @@ begin
     Result := LoopRegionStart + (Phase - LoopLen);
 end;
 
+const
+  { see AudioEngine.ClipSourceSample - grains are unrelated slices of audio,
+    so their boundary needs a real sample-domain crossfade, unlike a
+    ping-pong reversal (which can be smoothed by blending positions alone). }
+  WarpGrainCrossfadeMs = 4;
+
+function WarpedSourceSample(const AMarkers: TWarpMarkerArray;
+  ATimelineFrame: Int64; AClipLength: Int64; AOffset: Int64; AData: PSingle;
+  AFrameCount: Integer; AChannels: Integer; ASampleRate: Integer;
+  AWarpMode: Integer; AChannel: Integer; const ATransients: TFrameArray): Single;
+var
+  PosA, PosB0, PosB, FadeT: Double;
+  GrainEnd, FadeFrames, DistToEnd: Int64;
+  SampleA, SampleB: Single;
+
+  function SafeInterp(APos: Double): Single;
+  var
+    AbsPos: Double;
+  begin
+    AbsPos := AOffset + APos;
+    if (AbsPos < 0) or (AbsPos >= AFrameCount) then
+      Result := 0
+    else
+      Result := Interpolate(AData, AFrameCount, AChannels, AChannel, AbsPos);
+  end;
+
+begin
+  if Length(AMarkers) < 2 then
+    Exit(SafeInterp(ATimelineFrame));
+
+  GrainEnd := -1;
+  PosA := WarpedSourcePosition(AMarkers, ATimelineFrame, AData, AFrameCount,
+    AChannels, ASampleRate, AWarpMode, ATransients, @GrainEnd);
+  SampleA := SafeInterp(PosA);
+
+  FadeFrames := (WarpGrainCrossfadeMs * ASampleRate) div 1000;
+  if FadeFrames < 1 then
+    FadeFrames := 1;
+
+  DistToEnd := GrainEnd - ATimelineFrame;
+  if (GrainEnd < 0) or (DistToEnd <= 0) or (DistToEnd > FadeFrames) or
+    (GrainEnd >= AClipLength) then
+    Exit(SampleA);
+
+  PosB0 := WarpedSourcePosition(AMarkers, GrainEnd, AData, AFrameCount,
+    AChannels, ASampleRate, AWarpMode, ATransients);
+  PosB := PosB0 - DistToEnd;
+  SampleB := SafeInterp(PosB);
+
+  FadeT := 1 - (DistToEnd / FadeFrames);
+  Result := SampleA * (1 - FadeT) + SampleB * FadeT;
+end;
+
 function DetunedSample(const AMarkers: TWarpMarkerArray; ATimelineFrame: Int64;
   ADetuneSemitones: Single; AOffset: Int64; AData: PSingle;
-  AFrameCount, AChannels, ASampleRate: Integer; AWarpMode, AChannel: Integer): Single;
+  AFrameCount, AChannels, ASampleRate: Integer; AWarpMode, AChannel: Integer;
+  AClipLength: Int64): Single;
 const
   DetuneGrainMs = 25;
 var
@@ -547,8 +655,8 @@ var
 
 begin
   if ADetuneSemitones = 0 then
-    Exit(SafeInterp(WarpedSourcePosition(AMarkers, ATimelineFrame, AData,
-      AFrameCount, AChannels, ASampleRate, AWarpMode)));
+    Exit(WarpedSourceSample(AMarkers, ATimelineFrame, AClipLength, AOffset,
+      AData, AFrameCount, AChannels, ASampleRate, AWarpMode, AChannel));
 
   Rate := Exp((ADetuneSemitones / 12) * Ln(2));
   GrainFrames := (DetuneGrainMs * ASampleRate) div 1000;

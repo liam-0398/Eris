@@ -320,6 +320,9 @@ const
   { half-width of the position blend applied around each ping-pong reversal -
     see the reversal-smoothing block in ClipSourcePosition }
   WarpReversalFadeMs = 4;
+  { width of the position blend applied before each RePitch-mode marker, to
+    absorb the rate kink between two segments - see ClipSourcePosition }
+  WarpRepitchFadeMs = 4;
 
 function FindNearestZeroCrossing(AData: PSingle; AFrameCount, AChannels: Integer;
   ACenterFrame: Int64; ASearchRadius: Integer): Int64;
@@ -358,7 +361,8 @@ begin
   end;
 end;
 
-function ClipSourcePosition(Clip: PPlaybackClip; AClipRelativeFrame: Int64): Double;
+function ClipSourcePosition(Clip: PPlaybackClip; AClipRelativeFrame: Int64;
+  AGrainEnd: PInt64 = nil): Double;
 var
   k: Integer;
   SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen: Int64;
@@ -369,6 +373,8 @@ var
   Overflow, LoopRegionStart, LoopRegionEnd, LoopLen, Period: Int64;
   Phase, FadeFrames, FadeT, PosA, PosB, SignedOffset, DistToPeak: Double;
   HaveTransientGrain: Boolean;
+  RePitchFadeFrames, RePitchDistToEnd, NextSegSourceLen, NextSegTimelineLen: Int64;
+  RePitchPosA, RePitchPosB, RePitchFadeT: Double;
 
   { Same transient-bounded grain lookup as Waveform.WarpedSourcePosition -
     kept as an independent copy (rather than a shared helper taking a
@@ -457,7 +463,41 @@ begin
       changing pitch, instead of preserving pitch via loop/truncate }
     if SegTimelineLen = 0 then
       Exit(SegStartSource);
-    Exit(SegStartSource + OffsetIntoSeg * (SegSourceLen / SegTimelineLen));
+    RePitchPosA := SegStartSource + OffsetIntoSeg * (SegSourceLen / SegTimelineLen);
+
+    { Two adjacent segments generally run at different rates, so the read
+      pointer's SLOPE (not its position - the two formulas already agree
+      exactly at the marker) kinks abruptly at every internal marker. Blend
+      this segment's own formula with the next segment's, extrapolated
+      backward, over a short window ending exactly at the marker: since both
+      converge to the same value there, this fully absorbs the rate change
+      before the marker instead of snapping it - same idea as the ping-pong
+      reversal smoothing above, applied to a rate kink instead of a
+      direction reversal. }
+    if k < Clip^.MarkerCount - 2 then
+    begin
+      RePitchFadeFrames := (WarpRepitchFadeMs * ProjectSampleRate) div 1000;
+      if RePitchFadeFrames > SegTimelineLen div 2 then
+        RePitchFadeFrames := SegTimelineLen div 2;
+      if RePitchFadeFrames < 1 then
+        RePitchFadeFrames := 1;
+
+      RePitchDistToEnd := SegTimelineLen - OffsetIntoSeg;
+      if RePitchDistToEnd <= RePitchFadeFrames then
+      begin
+        NextSegSourceLen := Clip^.MarkerSource[k + 2] - Clip^.MarkerSource[k + 1];
+        NextSegTimelineLen := Clip^.MarkerTimeline[k + 2] - Clip^.MarkerTimeline[k + 1];
+        if NextSegTimelineLen > 0 then
+        begin
+          RePitchPosB := Clip^.MarkerSource[k + 1] +
+            (OffsetIntoSeg - SegTimelineLen) * (NextSegSourceLen / NextSegTimelineLen);
+          RePitchFadeT := 1 - (RePitchDistToEnd / RePitchFadeFrames);
+          Exit(RePitchPosA * (1 - RePitchFadeT) + RePitchPosB * RePitchFadeT);
+        end;
+      end;
+    end;
+
+    Exit(RePitchPosA);
   end;
 
   if SegTimelineLen <= 0 then
@@ -497,6 +537,9 @@ begin
   end;
 
   GrainOffsetIntoGrain := OffsetIntoSeg - GrainStartTimeline;
+
+  if AGrainEnd <> nil then
+    AGrainEnd^ := SegStartTimeline + GrainStartTimeline + Trunc(GrainTimelineLenF);
 
   if GrainOffsetIntoGrain < GrainSourceLen then
   begin
@@ -584,6 +627,68 @@ begin
     Result := LoopRegionStart + (Phase - LoopLen);
 end;
 
+const
+  { Beats-mode grains are transient-bounded (or fixed-grid) SLICES of
+    unrelated audio - unlike a ping-pong reversal, the position just before a
+    grain boundary and the position just after it do NOT reference the same
+    underlying audio, so blending POSITIONS there (as the reversal-smoothing
+    above legitimately does) would produce a meaningless third position.
+    This has to be a real sample-domain crossfade instead. }
+  WarpGrainCrossfadeMs = 4;
+
+{ Wraps ClipSourcePosition with the sample-domain crossfade described above:
+  within the last WarpGrainCrossfadeMs of any grain's timeline allotment,
+  blends the natural/ping-pong sample against a preview of the next grain's
+  own natural start (walked backward from that start by exactly how far off
+  the boundary we are, so it lands exactly on that start AT the boundary -
+  i.e. continuous with what the next grain will read on its own from the very
+  next frame). This is the actual audio-producing entry point; plain
+  ClipSourcePosition stays available unchanged for non-audio callers (split
+  points, anchors) that want the raw, un-blended position. }
+function ClipSourceSample(Clip: PPlaybackClip; AClipRelativeFrame: Int64;
+  AChannel: Integer): Single;
+var
+  PosA, PosB0, PosB, FadeT: Double;
+  GrainEnd, FadeFrames, DistToEnd: Int64;
+  SampleA, SampleB: Single;
+
+  function SafeInterp(APos: Double): Single;
+  var
+    AbsPos: Double;
+  begin
+    AbsPos := Clip^.Offset + APos;
+    if (AbsPos < 0) or (AbsPos >= Clip^.FrameCount) then
+      Result := 0
+    else
+      Result := Interpolate(Clip^.Data, Clip^.FrameCount, Clip^.Channels,
+        AChannel, AbsPos);
+  end;
+
+begin
+  if Clip^.MarkerCount < 2 then
+    Exit(SafeInterp(AClipRelativeFrame));
+
+  GrainEnd := -1;
+  PosA := ClipSourcePosition(Clip, AClipRelativeFrame, @GrainEnd);
+  SampleA := SafeInterp(PosA);
+
+  FadeFrames := (WarpGrainCrossfadeMs * ProjectSampleRate) div 1000;
+  if FadeFrames < 1 then
+    FadeFrames := 1;
+
+  DistToEnd := GrainEnd - AClipRelativeFrame;
+  if (GrainEnd < 0) or (DistToEnd <= 0) or (DistToEnd > FadeFrames) or
+    (GrainEnd >= Clip^.Length) then
+    Exit(SampleA);
+
+  PosB0 := ClipSourcePosition(Clip, GrainEnd);
+  PosB := PosB0 - DistToEnd;
+  SampleB := SafeInterp(PosB);
+
+  FadeT := 1 - (DistToEnd / FadeFrames);
+  Result := SampleA * (1 - FadeT) + SampleB * FadeT;
+end;
+
 { Independent per-clip pitch trim (the "Detune" slider) that never touches
   Length/Position - added on top of ClipSourcePosition rather than inside
   it, so Beats/RePitch warping itself is completely untouched.
@@ -644,7 +749,7 @@ var
 
 begin
   if Clip^.DetuneSemitones = 0 then
-    Exit(SafeInterp(ClipSourcePosition(Clip, AClipRelativeFrame)));
+    Exit(ClipSourceSample(Clip, AClipRelativeFrame, AChannel));
 
   Rate := Exp((Clip^.DetuneSemitones / 12) * Ln(2));
   GrainFrames := (DetuneGrainMs * ProjectSampleRate) div 1000;

@@ -346,22 +346,22 @@ begin
             Buffer[OutIdx] := Buffer[OutIdx] +
               DetunedSample(Clip.WarpMarkers, Frame, Clip.PitchSemitones, Clip.Offset,
                 Sample.Data, Sample.FrameCount, Sample.Channels,
-                AudioEngine.ProjectSampleRate, Clip.WarpMode, 0) * Clip.Gain;
+                AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length) * Clip.Gain;
             Buffer[OutIdx + 1] := Buffer[OutIdx + 1] +
               DetunedSample(Clip.WarpMarkers, Frame, Clip.PitchSemitones, Clip.Offset,
                 Sample.Data, Sample.FrameCount, Sample.Channels,
-                AudioEngine.ProjectSampleRate, Clip.WarpMode, 0) * Clip.Gain;
+                AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length) * Clip.Gain;
           end
           else
           begin
             Buffer[OutIdx] := Buffer[OutIdx] +
               DetunedSample(Clip.WarpMarkers, Frame, Clip.PitchSemitones, Clip.Offset,
                 Sample.Data, Sample.FrameCount, Sample.Channels,
-                AudioEngine.ProjectSampleRate, Clip.WarpMode, 0) * Clip.Gain;
+                AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length) * Clip.Gain;
             Buffer[OutIdx + 1] := Buffer[OutIdx + 1] +
               DetunedSample(Clip.WarpMarkers, Frame, Clip.PitchSemitones, Clip.Offset,
                 Sample.Data, Sample.FrameCount, Sample.Channels,
-                AudioEngine.ProjectSampleRate, Clip.WarpMode, 1) * Clip.Gain;
+                AudioEngine.ProjectSampleRate, Clip.WarpMode, 1, Clip.Length) * Clip.Gain;
           end;
         end;
       end;
