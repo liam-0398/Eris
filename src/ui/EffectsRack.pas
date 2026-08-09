@@ -241,6 +241,9 @@ begin
   TitleLabel.Top := Px(8);
   TitleLabel.Font.Style := [fsBold];
   case Kind of
+    Effects.ekLowpass: TitleLabel.Caption := 'LP';
+    Effects.ekHighpass: TitleLabel.Caption := 'HP';
+    Effects.ekBandpass: TitleLabel.Caption := 'BP';
     Effects.ekEQ4: TitleLabel.Caption := 'EQ 4';
     Effects.ekLimiter: TitleLabel.Caption := 'Limiter';
     Effects.ekChorus: TitleLabel.Caption := 'Chorus';
@@ -249,8 +252,6 @@ begin
     Effects.ekPhaser: TitleLabel.Caption := 'Phaser';
     Effects.ekSidechain: TitleLabel.Caption := 'Sidechain';
     Effects.ekDrowning: TitleLabel.Caption := 'Drowning';
-  else
-    TitleLabel.Caption := 'LP';
   end;
 
   DeleteButton := TButton.Create(AOwner);
