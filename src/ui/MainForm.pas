@@ -1266,16 +1266,27 @@ end;
 
 procedure TForm1.UpdateWarpRepitchToggleLook;
 begin
-  FWarpRepitchToggle.Caption := 'RP';
+  { Caption names the mode that's CURRENTLY ACTIVE, not the button's own
+    pressed state and not what clicking it does - a static "RP" label that
+    only changed color read as ambiguous (easy to miss which of two similar
+    shades is "on"). Two different two-letter labels plus two very
+    different hues together tell the mode at a glance even in a small
+    button, and don't rely on Down's native pressed-look at all. }
   if FWarpRepitchToggle.Down then
   begin
+    FWarpRepitchToggle.Caption := 'RP';
     FWarpRepitchToggle.Color := clLime;
     FWarpRepitchToggle.Font.Color := clBlack;
+    FWarpRepitchToggle.Hint := 'Warp mode: Re-Pitch (continuous vari-speed, changes pitch)' +
+      LineEnding + 'Click for Beats mode (grain-based, preserves pitch)';
   end
   else
   begin
-    FWarpRepitchToggle.Color := clBtnFace;
-    FWarpRepitchToggle.Font.Color := clWindowText;
+    FWarpRepitchToggle.Caption := 'BT';
+    FWarpRepitchToggle.Color := clSkyBlue;
+    FWarpRepitchToggle.Font.Color := clBlack;
+    FWarpRepitchToggle.Hint := 'Warp mode: Beats (grain-based, preserves pitch)' +
+      LineEnding + 'Click for Re-Pitch mode (continuous vari-speed, changes pitch)';
   end;
 end;
 

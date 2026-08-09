@@ -1124,7 +1124,11 @@ begin
           { elastic resize (the old always-on behavior, now an explicit
             opt-in): keep playing the exact same full original source
             window, just stretch/squeeze it to fit the new duration - Offset
-            stays put, only the far marker's TimelineFrame rescales. }
+            stays put, only the far marker's TimelineFrame rescales. Force
+            RePitch mode so this is a plain vari-speed resample (same math
+            as keyboard-play) instead of falling through to Beats mode's
+            grain-subdivide/crossfade path, which is what actually pops. }
+          FDragCurrentClip.WarpMode := SampleTypes.WarpModeRePitch;
           FDragCurrentClip.Offset := FDragOrigClip.Offset;
           FDragCurrentClip.Length := FDragOrigClip.Position + FDragOrigClip.Length -
             FDragCurrentClip.Position;
@@ -1161,6 +1165,13 @@ begin
         end;
         Project.Tracks[FDragTrack].Clips[FDragClip] := FDragCurrentClip;
         PushTrackToEngine(FDragTrack);
+        { resizing an already-selected clip never goes through SelectClip (it
+          no-ops when track/clip index are unchanged), so anything that
+          mirrors the selected clip's state - the warp editor, the RP toggle
+          - would otherwise go stale right after a Shift-drag flips WarpMode.
+          Fire the same notification SelectClip would. }
+        if Assigned(FOnClipSelectionChanged) then
+          FOnClipSelectionChanged(Self);
       end;
     dmResizeRight:
       begin
@@ -1171,7 +1182,12 @@ begin
             length, equivalent to dragging the warp editor's end marker -
             stretches/squeezes the same source content to fit. Copy first -
             dynamic arrays are refcounted, and mutating a shared element in
-            place would corrupt the undo snapshot and the live Project data. }
+            place would corrupt the undo snapshot and the live Project data.
+            Force RePitch mode so this is a plain vari-speed resample (same
+            math as keyboard-play) instead of falling through to Beats
+            mode's grain-subdivide/crossfade path, which is what actually
+            pops. }
+          FDragCurrentClip.WarpMode := SampleTypes.WarpModeRePitch;
           if Length(FDragCurrentClip.WarpMarkers) >= 2 then
           begin
             FDragCurrentClip.WarpMarkers := Copy(FDragCurrentClip.WarpMarkers, 0,
@@ -1189,6 +1205,9 @@ begin
           playing. }
         Project.Tracks[FDragTrack].Clips[FDragClip] := FDragCurrentClip;
         PushTrackToEngine(FDragTrack);
+        { see the matching comment in dmResizeLeft above }
+        if Assigned(FOnClipSelectionChanged) then
+          FOnClipSelectionChanged(Self);
       end;
   end;
 
