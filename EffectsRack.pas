@@ -245,11 +245,16 @@ begin
 
     FEQGainSlider[b] := TTrackBar.Create(Owner);
     FEQGainSlider[b].Parent := Self;
+    { Orientation must be set before Left/Top/Width/Height -
+      TCustomTrackBar.SetOrientation swaps Width/Height for you (assuming
+      they were sized for the old orientation), so setting it up front here
+      means the explicit sizes below land correctly instead of getting
+      silently transposed into a squashed, overflowing box }
+    FEQGainSlider[b].Orientation := trVertical;
     FEQGainSlider[b].Left := Px(bx);
     FEQGainSlider[b].Top := Px(128);
     FEQGainSlider[b].Width := Px(EQBandWidth);
     FEQGainSlider[b].Height := Px(WidgetHeight) - Px(128) - Px(10);
-    FEQGainSlider[b].Orientation := trVertical;
     { GTK's un-inverted vertical range puts the Min value at the top, which
       reads backwards for a gain fader - flip it so dragging up means more
       gain, matching every real mixer/EQ }

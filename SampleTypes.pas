@@ -25,6 +25,10 @@ type
   end;
   TWarpMarkerArray = array of TWarpMarker;
 
+  { detected transient/onset positions within a sample, in source frames,
+    ascending order - see Waveform.DetectTransients }
+  TFrameArray = array of Int64;
+
 const
   { Beats (default): each segment plays at 1:1 and loops/truncates its tail
     to hit the next marker, preserving pitch - see AudioEngine.ClipSourcePosition.

@@ -27,6 +27,10 @@ var
   SampleNames: array of string;
   SamplePaths: array of string;
   SamplePeaks: array of TWaveformPeaks;
+  { detected transient/onset positions per sample, in source frames - used to
+    place Beats-mode grain boundaries on real attacks instead of an
+    arbitrary fixed grid. Computed once at load time, like SamplePeaks. }
+  SampleTransients: array of TFrameArray;
   TempoBPM: Single = DefaultTempoBPM;
 
   { keyboard-play instrument assigned to each track via the device panel;
@@ -176,11 +180,14 @@ begin
   SetLength(SampleNames, Length(SampleNames) + 1);
   SetLength(SamplePaths, Length(SamplePaths) + 1);
   SetLength(SamplePeaks, Length(SamplePeaks) + 1);
+  SetLength(SampleTransients, Length(SampleTransients) + 1);
   Result := High(SamplePool);
   SamplePool[Result] := ASample;
   SampleNames[Result] := AName;
   SamplePaths[Result] := APath;
   SamplePeaks[Result] := ComputeWaveformPeaks(ASample);
+  SampleTransients[Result] := DetectTransients(ASample.Data, ASample.FrameCount,
+    ASample.Channels, ASample.SampleRate);
 end;
 
 procedure CommitClipToTrack(ATrackIndex: Integer; const ANewClip: TClip);
@@ -268,6 +275,7 @@ begin
   SetLength(SampleNames, 0);
   SetLength(SamplePaths, 0);
   SetLength(SamplePeaks, 0);
+  SetLength(SampleTransients, 0);
   SetLength(UndoStack, 0);
 
   for i := 0 to MaxTracks - 1 do

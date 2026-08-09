@@ -18,6 +18,12 @@ type
 
 function ComputeWaveformPeaks(const ASample: TSample): TWaveformPeaks;
 
+{ Onset/transient detection, cached per-sample in Project.SampleTransients -
+  see the implementation for the algorithm. Used to place Beats-mode grain
+  boundaries on real attacks instead of an arbitrary fixed grid. }
+function DetectTransients(AData: PSingle; AFrameCount, AChannels,
+  ASampleRate: Integer): TFrameArray;
+
 { Clip-warp segment lookup shared by every warp-aware consumer (the realtime
   engine keeps its own fixed-size copy of this same math for lock-free
   safety - see AudioEngine.ClipSourcePosition). Returns a frame position
@@ -46,7 +52,8 @@ function ComputeWaveformPeaks(const ASample: TSample): TWaveformPeaks;
 function WarpedSourcePosition(const AMarkers: TWarpMarkerArray;
   ATimelineFrame: Int64; AData: PSingle = nil; AFrameCount: Integer = 0;
   AChannels: Integer = 0; ASampleRate: Integer = 44100;
-  AWarpMode: Integer = WarpModeBeats): Double;
+  AWarpMode: Integer = WarpModeBeats;
+  const ATransients: TFrameArray = nil): Double;
 
 { Cuts a warp marker array in two at ASplitFrame (clip-relative timeline
   frame), for use whenever a clip itself is split or trimmed (explicit split,
@@ -101,6 +108,90 @@ procedure DrawWaveform(ACanvas: TCanvas; const ARect: TRect;
   const AMarkers: TWarpMarkerArray; AColor: TColor; AWarpMode: Integer = WarpModeBeats);
 
 implementation
+
+{ Simple broadband energy-flux onset detector: a block-averaged absolute-
+  amplitude envelope, then peaks in its positive-only derivative ("flux")
+  above a threshold, with a minimum spacing enforced so a single transient
+  doesn't fire twice. This is a standard, well-established (if basic)
+  onset-detection technique - not claiming to match Ableton's own (never
+  published) algorithm, just landing grain boundaries on real attacks
+  instead of an arbitrary fixed grid, which is the actual point.
+  Frame 0 is always included as an implicit boundary. Computed once per
+  sample at load time (like ComputeWaveformPeaks) and cached - see
+  Project.SampleTransients. }
+function DetectTransients(AData: PSingle; AFrameCount, AChannels,
+  ASampleRate: Integer): TFrameArray;
+const
+  EnvelopeWindowMs = 5;
+  MinSpacingMs = 40;
+  FluxThresholdMultiplier = 1.5;
+var
+  EnvelopeWindow, MinSpacing, i, f, ch: Integer;
+  Envelope, Flux: array of Single;
+  Sum, MeanFlux: Double;
+  Count, ResultCount, LastTransient, BlockEnd: Integer;
+begin
+  Result := nil;
+  if (AData = nil) or (AFrameCount <= 0) then
+    Exit;
+
+  EnvelopeWindow := (EnvelopeWindowMs * ASampleRate) div 1000;
+  if EnvelopeWindow < 1 then
+    EnvelopeWindow := 1;
+  MinSpacing := (MinSpacingMs * ASampleRate) div 1000;
+  if MinSpacing < 1 then
+    MinSpacing := 1;
+
+  Count := (AFrameCount + EnvelopeWindow - 1) div EnvelopeWindow;
+  if Count < 3 then
+  begin
+    SetLength(Result, 1);
+    Result[0] := 0;
+    Exit;
+  end;
+
+  SetLength(Envelope, Count);
+  for i := 0 to Count - 1 do
+  begin
+    BlockEnd := (i + 1) * EnvelopeWindow;
+    if BlockEnd > AFrameCount then
+      BlockEnd := AFrameCount;
+    Sum := 0;
+    for f := i * EnvelopeWindow to BlockEnd - 1 do
+      for ch := 0 to AChannels - 1 do
+        Sum := Sum + Abs(AData[f * AChannels + ch]);
+    Envelope[i] := Sum / ((BlockEnd - i * EnvelopeWindow) * AChannels);
+  end;
+
+  SetLength(Flux, Count);
+  Flux[0] := 0;
+  MeanFlux := 0;
+  for i := 1 to Count - 1 do
+  begin
+    Flux[i] := Envelope[i] - Envelope[i - 1];
+    if Flux[i] < 0 then
+      Flux[i] := 0;
+    MeanFlux := MeanFlux + Flux[i];
+  end;
+  MeanFlux := MeanFlux / Count;
+
+  SetLength(Result, Count);
+  Result[0] := 0;
+  ResultCount := 1;
+  LastTransient := 0;
+
+  for i := 1 to Count - 2 do
+    if (Flux[i] > MeanFlux * FluxThresholdMultiplier) and
+      (Flux[i] >= Flux[i - 1]) and (Flux[i] >= Flux[i + 1]) and
+      (i * EnvelopeWindow - LastTransient >= MinSpacing) then
+    begin
+      Result[ResultCount] := i * EnvelopeWindow;
+      Inc(ResultCount);
+      LastTransient := i * EnvelopeWindow;
+    end;
+
+  SetLength(Result, ResultCount);
+end;
 
 function ComputeWaveformPeaks(const ASample: TSample): TWaveformPeaks;
 var
@@ -157,6 +248,7 @@ end;
 const
   WarpGrainMs = 120;
   WarpZeroCrossSearchFrames = 32;
+  WarpReversalFadeMs = 4;
 
 function FindNearestZeroCrossing(AData: PSingle; AFrameCount, AChannels: Integer;
   ACenterFrame: Int64; ASearchRadius: Integer): Int64;
@@ -197,7 +289,8 @@ end;
 
 function WarpedSourcePosition(const AMarkers: TWarpMarkerArray;
   ATimelineFrame: Int64; AData: PSingle; AFrameCount: Integer;
-  AChannels: Integer; ASampleRate: Integer; AWarpMode: Integer): Double;
+  AChannels: Integer; ASampleRate: Integer; AWarpMode: Integer;
+  const ATransients: TFrameArray): Double;
 var
   k: Integer;
   SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen: Int64;
@@ -205,7 +298,76 @@ var
   GrainSourceLen, GrainCount, GrainIndex: Int64;
   GrainTimelineLenF: Double;
   GrainStartTimeline, GrainStartSource, GrainOffsetIntoGrain: Int64;
-  Overflow, LoopRegionStart, LoopRegionEnd, LoopLen, Period, Phase: Int64;
+  Overflow, LoopRegionStart, LoopRegionEnd, LoopLen, Period: Int64;
+  Phase, FadeFrames, FadeT, PosA, PosB, SignedOffset, DistToPeak: Double;
+  HaveTransientGrain: Boolean;
+
+  { Looks up the transient-bounded grain (SourceFrame span between two
+    detected onsets, or between a segment edge and the nearest onset) that
+    OffsetIntoSeg falls into, scaling each grain's natural source length by
+    the segment's overall stretch ratio to get its timeline span. Returns
+    False (leaving the fixed-grid fallback below in charge) when there are no
+    transients to work with. }
+  function FindTransientGrain(out AGrainStartSource, AGrainSourceLen,
+    AGrainStartTimeline: Int64; out AGrainTimelineLenF: Double): Boolean;
+  var
+    Ratio: Double;
+    TIdx: Integer;
+    BoundaryPos, NextBoundaryPos, NaturalLen: Int64;
+    AccumTimeline, GrainTL: Double;
+  begin
+    Result := False;
+    if Length(ATransients) = 0 then
+      Exit;
+
+    Ratio := SegTimelineLen / SegSourceLen;
+
+    TIdx := 0;
+    while (TIdx < Length(ATransients)) and
+      (ATransients[TIdx] <= SegStartSource) do
+      Inc(TIdx);
+
+    BoundaryPos := SegStartSource;
+    AccumTimeline := 0;
+
+    while True do
+    begin
+      if (TIdx < Length(ATransients)) and
+        (ATransients[TIdx] < SegStartSource + SegSourceLen) then
+        NextBoundaryPos := ATransients[TIdx]
+      else
+        NextBoundaryPos := SegStartSource + SegSourceLen;
+
+      NaturalLen := NextBoundaryPos - BoundaryPos;
+      if NaturalLen < 1 then
+      begin
+        { degenerate boundary - shouldn't normally happen given
+          DetectTransients' own minimum spacing, but never trust it blindly }
+        if NextBoundaryPos >= SegStartSource + SegSourceLen then
+          Exit;
+        BoundaryPos := NextBoundaryPos;
+        Inc(TIdx);
+        Continue;
+      end;
+
+      GrainTL := NaturalLen * Ratio;
+
+      if (OffsetIntoSeg < AccumTimeline + GrainTL) or
+        (NextBoundaryPos >= SegStartSource + SegSourceLen) then
+      begin
+        AGrainStartSource := BoundaryPos;
+        AGrainSourceLen := NaturalLen;
+        AGrainStartTimeline := Trunc(AccumTimeline);
+        AGrainTimelineLenF := GrainTL;
+        Exit(True);
+      end;
+
+      AccumTimeline := AccumTimeline + GrainTL;
+      BoundaryPos := NextBoundaryPos;
+      Inc(TIdx);
+    end;
+  end;
+
 begin
   if Length(AMarkers) < 2 then
     Exit(ATimelineFrame);
@@ -233,25 +395,34 @@ begin
   if SegSourceLen <= 0 then
     Exit(SegStartSource);
 
-  { Beats: subdivide into small grains and distribute the stretch/compression
-    evenly across them - see AudioEngine.ClipSourcePosition for the full
-    rationale (this is the shared/offline-safe copy of the same algorithm). }
-  GrainSourceLen := (WarpGrainMs * ASampleRate) div 1000;
-  if GrainSourceLen > SegSourceLen then
-    GrainSourceLen := SegSourceLen;
-  if GrainSourceLen < 1 then
-    GrainSourceLen := 1;
-  GrainCount := SegSourceLen div GrainSourceLen;
-  if GrainCount < 1 then
-    GrainCount := 1;
-  GrainSourceLen := SegSourceLen div GrainCount;
+  { Beats: subdivide into grains bounded by detected transients (falling back
+    to a fixed grid when no transients are available) and distribute the
+    stretch/compression evenly across each grain - see
+    AudioEngine.ClipSourcePosition for the full rationale (this is the
+    shared/offline-safe copy of the same algorithm). }
+  HaveTransientGrain := FindTransientGrain(GrainStartSource, GrainSourceLen,
+    GrainStartTimeline, GrainTimelineLenF);
 
-  GrainTimelineLenF := SegTimelineLen / GrainCount;
-  GrainIndex := Trunc(OffsetIntoSeg / GrainTimelineLenF);
-  if GrainIndex >= GrainCount then
-    GrainIndex := GrainCount - 1;
-  GrainStartTimeline := Trunc(GrainIndex * GrainTimelineLenF);
-  GrainStartSource := SegStartSource + GrainIndex * GrainSourceLen;
+  if not HaveTransientGrain then
+  begin
+    GrainSourceLen := (WarpGrainMs * ASampleRate) div 1000;
+    if GrainSourceLen > SegSourceLen then
+      GrainSourceLen := SegSourceLen;
+    if GrainSourceLen < 1 then
+      GrainSourceLen := 1;
+    GrainCount := SegSourceLen div GrainSourceLen;
+    if GrainCount < 1 then
+      GrainCount := 1;
+    GrainSourceLen := SegSourceLen div GrainCount;
+
+    GrainTimelineLenF := SegTimelineLen / GrainCount;
+    GrainIndex := Trunc(OffsetIntoSeg / GrainTimelineLenF);
+    if GrainIndex >= GrainCount then
+      GrainIndex := GrainCount - 1;
+    GrainStartTimeline := Trunc(GrainIndex * GrainTimelineLenF);
+    GrainStartSource := SegStartSource + GrainIndex * GrainSourceLen;
+  end;
+
   GrainOffsetIntoGrain := OffsetIntoSeg - GrainStartTimeline;
 
   if GrainOffsetIntoGrain < GrainSourceLen then
@@ -287,6 +458,46 @@ begin
     LoopLen := 1;
   Period := 2 * LoopLen;
   Phase := Overflow mod Period;
+
+  { A reversal flips the read pointer's direction outright - a slope
+    discontinuity that zero-crossing snapping (which only fixes amplitude
+    discontinuities) can't touch. Blend the two candidate POSITIONS on
+    either side of each reversal so the read pointer's trajectory turns
+    around smoothly instead of snapping instantly; both candidates reference
+    the same underlying audio (just approached from opposite directions), so
+    blending positions here - unlike across unrelated grains - is a
+    legitimate smoothing of one continuous path. }
+  FadeFrames := (WarpReversalFadeMs * ASampleRate) / 1000;
+  if FadeFrames > LoopLen / 2 then
+    FadeFrames := LoopLen / 2;
+  if FadeFrames < 1 then
+    FadeFrames := 1;
+
+  { valley: reversal at Phase = LoopLen (forward pass hands off to backward) }
+  if Abs(Phase - LoopLen) < FadeFrames then
+  begin
+    FadeT := (Phase - LoopLen + FadeFrames) / (2 * FadeFrames);
+    PosA := LoopRegionEnd - Phase;
+    PosB := LoopRegionStart + (Phase - LoopLen);
+    Exit(PosA * (1 - FadeT) + PosB * FadeT);
+  end;
+
+  { peak: reversal at Phase = 0 / Period (backward pass hands off to forward) }
+  DistToPeak := Phase;
+  if Period - Phase < DistToPeak then
+    DistToPeak := Period - Phase;
+  if DistToPeak < FadeFrames then
+  begin
+    if Phase > Period - FadeFrames then
+      SignedOffset := Phase - Period
+    else
+      SignedOffset := Phase;
+    FadeT := (SignedOffset + FadeFrames) / (2 * FadeFrames);
+    PosB := LoopRegionStart + (Phase - LoopLen);
+    PosA := LoopRegionEnd - SignedOffset;
+    Exit(PosB * (1 - FadeT) + PosA * FadeT);
+  end;
+
   if Phase < LoopLen then
     Result := LoopRegionEnd - Phase
   else

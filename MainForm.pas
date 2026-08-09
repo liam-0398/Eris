@@ -572,11 +572,15 @@ begin
 
   FClipGainSlider := TTrackBar.Create(Self);
   FClipGainSlider.Parent := ClipControlsPanel;
+  { Orientation MUST be set before Width/Height - TCustomTrackBar.SetOrientation
+    swaps them automatically (assuming they were sized for the OLD orientation),
+    so setting it first here means the sizes set below land correctly instead
+    of getting silently transposed into a squashed, badly-overflowing box }
+  FClipGainSlider.Orientation := trVertical;
   FClipGainSlider.Left := Px(4);
   FClipGainSlider.Top := Px(20);
   FClipGainSlider.Width := Px(32);
   FClipGainSlider.Height := Px(130);
-  FClipGainSlider.Orientation := trVertical;
   FClipGainSlider.Reversed := True; { up = more gain, same convention as the EQ }
   FClipGainSlider.Min := ClipGainMinDb;
   FClipGainSlider.Max := ClipGainMaxDb;
@@ -599,11 +603,11 @@ begin
 
   FClipDetuneSlider := TTrackBar.Create(Self);
   FClipDetuneSlider.Parent := ClipControlsPanel;
+  FClipDetuneSlider.Orientation := trVertical; { see the comment on the gain slider above }
   FClipDetuneSlider.Left := Px(42);
   FClipDetuneSlider.Top := Px(20);
   FClipDetuneSlider.Width := Px(32);
   FClipDetuneSlider.Height := Px(130);
-  FClipDetuneSlider.Orientation := trVertical;
   FClipDetuneSlider.Reversed := True; { up = higher pitch }
   FClipDetuneSlider.Min := ClipDetuneMinSemitones;
   FClipDetuneSlider.Max := ClipDetuneMaxSemitones;

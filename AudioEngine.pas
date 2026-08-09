@@ -23,6 +23,9 @@ type
     WarpMode: Integer; { 0 = Beats (loop/truncate, preserves pitch), 1 = RePitch (vari-speed) }
     DetuneSemitones: Single; { independent pitch trim that never changes the
       clip's own Length/Position - see DetunedClipSample }
+    Transients: PInt64; { raw pointer into Project.SampleTransients[SampleID]'s
+      data, same lifetime/ownership pattern as Data - see ClipSourcePosition }
+    TransientCount: Integer;
   end;
   PPlaybackClip = ^TPlaybackClip;
 
@@ -314,6 +317,9 @@ const
   { small local search window used to land loop/truncate cut points on a
     near-silent sample, so the splice doesn't click }
   WarpZeroCrossSearchFrames = 32;
+  { half-width of the position blend applied around each ping-pong reversal -
+    see the reversal-smoothing block in ClipSourcePosition }
+  WarpReversalFadeMs = 4;
 
 function FindNearestZeroCrossing(AData: PSingle; AFrameCount, AChannels: Integer;
   ACenterFrame: Int64; ASearchRadius: Integer): Int64;
@@ -360,7 +366,73 @@ var
   GrainSourceLen, GrainCount, GrainIndex: Int64;
   GrainTimelineLenF: Double;
   GrainStartTimeline, GrainStartSource, GrainOffsetIntoGrain: Int64;
-  Overflow, LoopRegionStart, LoopRegionEnd, LoopLen, Period, Phase: Int64;
+  Overflow, LoopRegionStart, LoopRegionEnd, LoopLen, Period: Int64;
+  Phase, FadeFrames, FadeT, PosA, PosB, SignedOffset, DistToPeak: Double;
+  HaveTransientGrain: Boolean;
+
+  { Same transient-bounded grain lookup as Waveform.WarpedSourcePosition -
+    kept as an independent copy (rather than a shared helper taking a
+    TFrameArray) because this side of the engine only ever has a raw
+    PInt64/Count pair (Clip^.Transients/TransientCount), the lock-free-safe
+    shape - see the TPlaybackClip field comments. }
+  function FindTransientGrain(out AGrainStartSource, AGrainSourceLen,
+    AGrainStartTimeline: Int64; out AGrainTimelineLenF: Double): Boolean;
+  var
+    Ratio: Double;
+    TIdx: Integer;
+    BoundaryPos, NextBoundaryPos, NaturalLen: Int64;
+    AccumTimeline, GrainTL: Double;
+  begin
+    Result := False;
+    if (Clip^.Transients = nil) or (Clip^.TransientCount <= 0) then
+      Exit;
+
+    Ratio := SegTimelineLen / SegSourceLen;
+
+    TIdx := 0;
+    while (TIdx < Clip^.TransientCount) and
+      ((Clip^.Transients + TIdx)^ <= SegStartSource) do
+      Inc(TIdx);
+
+    BoundaryPos := SegStartSource;
+    AccumTimeline := 0;
+
+    while True do
+    begin
+      if (TIdx < Clip^.TransientCount) and
+        ((Clip^.Transients + TIdx)^ < SegStartSource + SegSourceLen) then
+        NextBoundaryPos := (Clip^.Transients + TIdx)^
+      else
+        NextBoundaryPos := SegStartSource + SegSourceLen;
+
+      NaturalLen := NextBoundaryPos - BoundaryPos;
+      if NaturalLen < 1 then
+      begin
+        if NextBoundaryPos >= SegStartSource + SegSourceLen then
+          Exit;
+        BoundaryPos := NextBoundaryPos;
+        Inc(TIdx);
+        Continue;
+      end;
+
+      GrainTL := NaturalLen * Ratio;
+
+      if (OffsetIntoSeg < AccumTimeline + GrainTL) or
+        (NextBoundaryPos >= SegStartSource + SegSourceLen) then
+      begin
+        AGrainStartSource := BoundaryPos;
+        AGrainSourceLen := NaturalLen;
+        AGrainStartTimeline := Trunc(AccumTimeline);
+        AGrainTimelineLenF := GrainTL;
+        Exit(True);
+      end;
+
+      AccumTimeline := AccumTimeline + GrainTL;
+      BoundaryPos := NextBoundaryPos;
+      Inc(TIdx);
+    end;
+  end;
+
 begin
   if Clip^.MarkerCount < 2 then
     Exit(AClipRelativeFrame);
@@ -401,22 +473,29 @@ begin
     warp markers you placed) - one big loop repeat at the tail of a long
     segment is what makes a stretch sound like an obvious loop; many small
     grains is what makes it sound natural. }
-  GrainSourceLen := (WarpGrainMs * ProjectSampleRate) div 1000;
-  if GrainSourceLen > SegSourceLen then
-    GrainSourceLen := SegSourceLen;
-  if GrainSourceLen < 1 then
-    GrainSourceLen := 1;
-  GrainCount := SegSourceLen div GrainSourceLen;
-  if GrainCount < 1 then
-    GrainCount := 1;
-  GrainSourceLen := SegSourceLen div GrainCount; { re-tile evenly, no remainder grain }
+  HaveTransientGrain := FindTransientGrain(GrainStartSource, GrainSourceLen,
+    GrainStartTimeline, GrainTimelineLenF);
 
-  GrainTimelineLenF := SegTimelineLen / GrainCount;
-  GrainIndex := Trunc(OffsetIntoSeg / GrainTimelineLenF);
-  if GrainIndex >= GrainCount then
-    GrainIndex := GrainCount - 1;
-  GrainStartTimeline := Trunc(GrainIndex * GrainTimelineLenF);
-  GrainStartSource := SegStartSource + GrainIndex * GrainSourceLen;
+  if not HaveTransientGrain then
+  begin
+    GrainSourceLen := (WarpGrainMs * ProjectSampleRate) div 1000;
+    if GrainSourceLen > SegSourceLen then
+      GrainSourceLen := SegSourceLen;
+    if GrainSourceLen < 1 then
+      GrainSourceLen := 1;
+    GrainCount := SegSourceLen div GrainSourceLen;
+    if GrainCount < 1 then
+      GrainCount := 1;
+    GrainSourceLen := SegSourceLen div GrainCount; { re-tile evenly, no remainder grain }
+
+    GrainTimelineLenF := SegTimelineLen / GrainCount;
+    GrainIndex := Trunc(OffsetIntoSeg / GrainTimelineLenF);
+    if GrainIndex >= GrainCount then
+      GrainIndex := GrainCount - 1;
+    GrainStartTimeline := Trunc(GrainIndex * GrainTimelineLenF);
+    GrainStartSource := SegStartSource + GrainIndex * GrainSourceLen;
+  end;
+
   GrainOffsetIntoGrain := OffsetIntoSeg - GrainStartTimeline;
 
   if GrainOffsetIntoGrain < GrainSourceLen then
@@ -459,6 +538,46 @@ begin
     LoopLen := 1;
   Period := 2 * LoopLen;
   Phase := Overflow mod Period;
+
+  { A reversal flips the read pointer's direction outright - a slope
+    discontinuity zero-crossing snapping (which only fixes amplitude
+    discontinuities) can't touch. Blend the two candidate POSITIONS on
+    either side of each reversal so the read pointer's trajectory turns
+    around smoothly instead of snapping instantly; both candidates reference
+    the same underlying audio (just approached from opposite directions), so
+    blending positions here - unlike across unrelated grains - is a
+    legitimate smoothing of one continuous path. }
+  FadeFrames := (WarpReversalFadeMs * ProjectSampleRate) / 1000;
+  if FadeFrames > LoopLen / 2 then
+    FadeFrames := LoopLen / 2;
+  if FadeFrames < 1 then
+    FadeFrames := 1;
+
+  { valley: reversal at Phase = LoopLen (forward pass hands off to backward) }
+  if Abs(Phase - LoopLen) < FadeFrames then
+  begin
+    FadeT := (Phase - LoopLen + FadeFrames) / (2 * FadeFrames);
+    PosA := LoopRegionEnd - Phase;
+    PosB := LoopRegionStart + (Phase - LoopLen);
+    Exit(PosA * (1 - FadeT) + PosB * FadeT);
+  end;
+
+  { peak: reversal at Phase = 0 / Period (backward pass hands off to forward) }
+  DistToPeak := Phase;
+  if Period - Phase < DistToPeak then
+    DistToPeak := Period - Phase;
+  if DistToPeak < FadeFrames then
+  begin
+    if Phase > Period - FadeFrames then
+      SignedOffset := Phase - Period
+    else
+      SignedOffset := Phase;
+    FadeT := (SignedOffset + FadeFrames) / (2 * FadeFrames);
+    PosB := LoopRegionStart + (Phase - LoopLen);
+    PosA := LoopRegionEnd - SignedOffset;
+    Exit(PosB * (1 - FadeT) + PosA * FadeT);
+  end;
+
   if Phase < LoopLen then
     Result := LoopRegionEnd - Phase
   else

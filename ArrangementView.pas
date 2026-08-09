@@ -405,6 +405,12 @@ begin
     Items[i].WarpMode := Clip.WarpMode;
     Items[i].DetuneSemitones := Clip.PitchSemitones;
 
+    Items[i].TransientCount := Length(Project.SampleTransients[Clip.SampleID]);
+    if Items[i].TransientCount > 0 then
+      Items[i].Transients := PInt64(Project.SampleTransients[Clip.SampleID])
+    else
+      Items[i].Transients := nil;
+
     MarkerCount := Length(Clip.WarpMarkers);
     if MarkerCount > MaxClipWarpMarkers then
       MarkerCount := MaxClipWarpMarkers;
