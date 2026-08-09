@@ -21,6 +21,8 @@ const
   ekPhaser = 7;
   ekSidechain = 8;
   ekDrowning = 9;
+  ekHighpass = 10;
+  ekBandpass = 11;
 
   { classic vintage-style chorus (think Ableton Live 1/2's Chorus, or a
     tracker's chorus command) - just a short modulated delay line per
@@ -82,6 +84,9 @@ type
   TEffect = record
     Kind: Integer;
     LowpassFreqHz: Single;
+    HighpassFreqHz: Single;
+    BandpassFreqHz: Single;
+    BandpassQ: Single;
     EQFreqHz: array[0..MaxEQBands - 1] of Single;
     EQGainDb: array[0..MaxEQBands - 1] of Single;
     LimiterThresholdDb: Single;
@@ -118,6 +123,8 @@ type
 
   TEffectChannelState = record
     LowpassBq: TBiquadState;
+    HighpassBq: TBiquadState;
+    BandpassBq: TBiquadState;
     EQBq: array[0..MaxEQBands - 1] of TBiquadState;
   end;
 
@@ -135,9 +142,14 @@ type
   TEffectState = record
     Channels: array[0..1] of TEffectChannelState; { L, R }
     LowpassCoeffs: TBiquadCoeffs;
+    HighpassCoeffs: TBiquadCoeffs;
+    BandpassCoeffs: TBiquadCoeffs;
     EQCoeffs: array[0..MaxEQBands - 1] of TBiquadCoeffs;
     LastSampleRate: Integer;
     LastLowpassFreq: Single;
+    LastHighpassFreq: Single;
+    LastBandpassFreq: Single;
+    LastBandpassQ: Single;
     LastEQFreq: array[0..MaxEQBands - 1] of Single;
     LastEQGain: array[0..MaxEQBands - 1] of Single;
     LimiterGain: Single; { current smoothed gain reduction, linked across L/R
@@ -227,6 +239,13 @@ begin
   case AKind of
     ekLowpass:
       AEffect.LowpassFreqHz := 8000;
+    ekHighpass:
+      AEffect.HighpassFreqHz := 100;
+    ekBandpass:
+      begin
+        AEffect.BandpassFreqHz := 1000;
+        AEffect.BandpassQ := 1.0;
+      end;
     ekEQ4:
       begin
         { sane low/low-mid/high-mid/high spread, unity gain (0dB) to start }
@@ -456,6 +475,34 @@ begin
         end;
         L := ProcessBiquad(AState.Channels[0].LowpassBq, AState.LowpassCoeffs, L);
         R := ProcessBiquad(AState.Channels[1].LowpassBq, AState.LowpassCoeffs, R);
+        AState.LastSampleRate := ASampleRate;
+      end;
+    ekHighpass:
+      begin
+        Freq := ClampFreq(AEffect.HighpassFreqHz, ASampleRate);
+        if (ASampleRate <> AState.LastSampleRate) or
+          (Freq <> AState.LastHighpassFreq) then
+        begin
+          ComputeHighpassBiquad(Freq, ASampleRate, LowpassQ, AState.HighpassCoeffs);
+          AState.LastHighpassFreq := Freq;
+        end;
+        L := ProcessBiquad(AState.Channels[0].HighpassBq, AState.HighpassCoeffs, L);
+        R := ProcessBiquad(AState.Channels[1].HighpassBq, AState.HighpassCoeffs, R);
+        AState.LastSampleRate := ASampleRate;
+      end;
+    ekBandpass:
+      begin
+        Freq := ClampFreq(AEffect.BandpassFreqHz, ASampleRate);
+        if (ASampleRate <> AState.LastSampleRate) or
+          (Freq <> AState.LastBandpassFreq) or
+          (AEffect.BandpassQ <> AState.LastBandpassQ) then
+        begin
+          ComputeBandpassBiquad(Freq, ASampleRate, AEffect.BandpassQ, AState.BandpassCoeffs);
+          AState.LastBandpassFreq := Freq;
+          AState.LastBandpassQ := AEffect.BandpassQ;
+        end;
+        L := ProcessBiquad(AState.Channels[0].BandpassBq, AState.BandpassCoeffs, L);
+        R := ProcessBiquad(AState.Channels[1].BandpassBq, AState.BandpassCoeffs, R);
         AState.LastSampleRate := ASampleRate;
       end;
     ekEQ4:

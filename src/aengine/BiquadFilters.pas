@@ -14,6 +14,8 @@ type
   end;
 
 procedure ComputeLowpassBiquad(AFc, AFs, AQ: Double; out ACoeffs: TBiquadCoeffs);
+procedure ComputeHighpassBiquad(AFc, AFs, AQ: Double; out ACoeffs: TBiquadCoeffs);
+procedure ComputeBandpassBiquad(AFc, AFs, AQ: Double; out ACoeffs: TBiquadCoeffs);
 procedure ComputePeakingBiquad(AFc, AFs, AQ, AGainDb: Double; out ACoeffs: TBiquadCoeffs);
 function ProcessBiquad(var AState: TBiquadState; const ACoeffs: TBiquadCoeffs;
   AInput: Single): Single;
@@ -34,6 +36,36 @@ begin
   ACoeffs.B0 := ((1 - cosw0) / 2) / a0;
   ACoeffs.B1 := (1 - cosw0) / a0;
   ACoeffs.B2 := ACoeffs.B0;
+  ACoeffs.A1 := (-2 * cosw0) / a0;
+  ACoeffs.A2 := (1 - alpha) / a0;
+end;
+
+procedure ComputeHighpassBiquad(AFc, AFs, AQ: Double; out ACoeffs: TBiquadCoeffs);
+var
+  w0, alpha, cosw0, a0: Double;
+begin
+  w0 := 2 * Pi * AFc / AFs;
+  alpha := Sin(w0) / (2 * AQ);
+  cosw0 := Cos(w0);
+  a0 := 1 + alpha;
+  ACoeffs.B0 := ((1 + cosw0) / 2) / a0;
+  ACoeffs.B1 := (-(1 + cosw0)) / a0;
+  ACoeffs.B2 := ACoeffs.B0;
+  ACoeffs.A1 := (-2 * cosw0) / a0;
+  ACoeffs.A2 := (1 - alpha) / a0;
+end;
+
+procedure ComputeBandpassBiquad(AFc, AFs, AQ: Double; out ACoeffs: TBiquadCoeffs);
+var
+  w0, alpha, cosw0, a0: Double;
+begin
+  w0 := 2 * Pi * AFc / AFs;
+  alpha := Sin(w0) / (2 * AQ);
+  cosw0 := Cos(w0);
+  a0 := 1 + alpha;
+  ACoeffs.B0 := alpha / a0;
+  ACoeffs.B1 := 0;
+  ACoeffs.B2 := -alpha / a0;
   ACoeffs.A1 := (-2 * cosw0) / a0;
   ACoeffs.A2 := (1 - alpha) / a0;
 end;

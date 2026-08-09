@@ -116,6 +116,7 @@ type
     procedure ViewZoomInClick(Sender: TObject);
     procedure ViewZoomOutClick(Sender: TObject);
     procedure TrackAddClick(Sender: TObject);
+    procedure TrackDeleteClick(Sender: TObject);
     procedure HelpAboutClick(Sender: TObject);
     procedure StopClick(Sender: TObject);
     procedure PlayPauseClick(Sender: TObject);
@@ -157,6 +158,8 @@ type
     procedure DeferredRebuildEffectWidgets(Data: PtrInt);
     procedure AddEffectToCurrentTrack(AKind: Integer);
     procedure AddLowpassEffectClick(Sender: TObject);
+    procedure AddHighpassEffectClick(Sender: TObject);
+    procedure AddBandpassEffectClick(Sender: TObject);
     procedure AddEQ4EffectClick(Sender: TObject);
     procedure AddLimiterEffectClick(Sender: TObject);
     procedure AddChorusEffectClick(Sender: TObject);
@@ -245,7 +248,7 @@ var
   FileMenu, EditMenu, ViewMenu, TrackMenu, HelpMenu, UndoItem,
   ZoomInItem, ZoomOutItem, CopyItem, PasteItem, DuplicateItem, SplitItem,
   DeleteItem, ConsolidateItem,
-  AddTrackItem: TMenuItem;
+  AddTrackItem, DeleteTrackItem: TMenuItem;
 begin
   FMainMenu := TMainMenu.Create(Self);
   Menu := FMainMenu;
@@ -291,6 +294,8 @@ begin
   TrackMenu := AddMenu('&Track');
   AddTrackItem := AddItem(TrackMenu, '&Add Track', @TrackAddClick);
   AddTrackItem.ShortCut := Menus.ShortCut(Ord('N'), [ssCtrl]);
+  DeleteTrackItem := AddItem(TrackMenu, '&Delete Track', @TrackDeleteClick);
+  DeleteTrackItem.ShortCut := Menus.ShortCut(Ord('D'), [ssCtrl]);
 
   HelpMenu := AddMenu('&Help');
   AddItem(HelpMenu, '&About...', @HelpAboutClick);
@@ -1053,6 +1058,20 @@ begin
     ShowMessage(Format('Maximum of %d tracks reached.', [Project.MaxTracks]));
 end;
 
+procedure TForm1.TrackDeleteClick(Sender: TObject);
+begin
+  if FArrangementView.SelectedTrack < 0 then
+  begin
+    ShowMessage('Select a track to delete.');
+    Exit;
+  end;
+  if Project.DeleteTrack(FArrangementView.SelectedTrack) then
+  begin
+    FArrangementView.ClearSelection;
+    FArrangementView.Invalidate;
+  end;
+end;
+
 procedure TForm1.HelpAboutClick(Sender: TObject);
 begin
   ShowMessage('Eris' + LineEnding + 'A linear-timeline, audio-only DAW.');
@@ -1696,6 +1715,16 @@ begin
   AddEffectToCurrentTrack(Effects.ekLowpass);
 end;
 
+procedure TForm1.AddHighpassEffectClick(Sender: TObject);
+begin
+  AddEffectToCurrentTrack(Effects.ekHighpass);
+end;
+
+procedure TForm1.AddBandpassEffectClick(Sender: TObject);
+begin
+  AddEffectToCurrentTrack(Effects.ekBandpass);
+end;
+
 procedure TForm1.AddEQ4EffectClick(Sender: TObject);
 begin
   AddEffectToCurrentTrack(Effects.ekEQ4);
@@ -1762,6 +1791,8 @@ begin
 
   FiltersItem := AddCategory('Filters');
   AddEffectItem(FiltersItem, 'LP', @AddLowpassEffectClick);
+  AddEffectItem(FiltersItem, 'HP', @AddHighpassEffectClick);
+  AddEffectItem(FiltersItem, 'BP', @AddBandpassEffectClick);
 
   EQItem := AddCategory('EQ');
   AddEffectItem(EQItem, '4', @AddEQ4EffectClick);

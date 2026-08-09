@@ -33,6 +33,11 @@ var
   SampleTransients: array of TFrameArray;
   TempoBPM: Single = DefaultTempoBPM;
 
+  { tracks that have been deleted are marked as inactive; used to maintain
+    track numbering so deleted track numbers are never reused }
+  TrackActive: array[0..MaxTracks - 1] of Boolean;
+  NextTrackID: Integer = 1;
+
   { keyboard-play instrument assigned to each track via the device panel;
     -1 means no instrument loaded }
   TrackInstrument: array[0..MaxTracks - 1] of Integer;
@@ -81,6 +86,7 @@ procedure PushUndoSnapshot(ATrackIndex: Integer);
 function PopUndo(out ATrackIndex: Integer): Boolean;
 
 function AddTrack: Boolean;
+function DeleteTrack(ATrackIndex: Integer): Boolean;
 procedure NewProject;
 
 { Ableton-style tempo change: rescales every clip's Position/Length and warp
@@ -110,6 +116,7 @@ var
 begin
   for i := 0 to MaxTracks - 1 do
   begin
+    TrackActive[i] := i < DefaultTrackCount;
     TrackInstrument[i] := -1;
     TrackOctave[i] := 0;
     TrackVolume[i] := 1.0;
@@ -251,6 +258,7 @@ begin
   if TrackCount >= MaxTracks then
     Exit(False);
   Tracks[TrackCount].Clips := nil;
+  TrackActive[TrackCount] := True;
   TrackInstrument[TrackCount] := -1;
   TrackOctave[TrackCount] := 0;
   TrackVolume[TrackCount] := 1.0;
@@ -261,6 +269,36 @@ begin
   TrackSwingPercent[TrackCount] := 50;
   TrackSwingDivision[TrackCount] := 16;
   Inc(TrackCount);
+  Inc(NextTrackID);
+  Result := True;
+end;
+
+function DeleteTrack(ATrackIndex: Integer): Boolean;
+var
+  t: Integer;
+begin
+  if (ATrackIndex < 0) or (ATrackIndex >= TrackCount) or not TrackActive[ATrackIndex] then
+    Exit(False);
+
+  TrackActive[ATrackIndex] := False;
+
+  for t := ATrackIndex to TrackCount - 2 do
+  begin
+    Tracks[t] := Tracks[t + 1];
+    TrackActive[t] := TrackActive[t + 1];
+    TrackInstrument[t] := TrackInstrument[t + 1];
+    TrackOctave[t] := TrackOctave[t + 1];
+    TrackVolume[t] := TrackVolume[t + 1];
+    TrackInstrumentStart[t] := TrackInstrumentStart[t + 1];
+    TrackInstrumentEnd[t] := TrackInstrumentEnd[t + 1];
+    TrackEnabled[t] := TrackEnabled[t + 1];
+    TrackEffectCount[t] := TrackEffectCount[t + 1];
+    TrackSwingPercent[t] := TrackSwingPercent[t + 1];
+    TrackSwingDivision[t] := TrackSwingDivision[t + 1];
+    Move(TrackEffects[t + 1, 0], TrackEffects[t, 0], SizeOf(TrackEffects[t]));
+  end;
+
+  Dec(TrackCount);
   Result := True;
 end;
 
@@ -282,6 +320,7 @@ begin
     Tracks[i].Clips := nil;
 
   TrackCount := DefaultTrackCount;
+  NextTrackID := DefaultTrackCount + 1;
   InitTrackInstruments;
   MasterEffectCount := 0;
   TempoBPM := DefaultTempoBPM;

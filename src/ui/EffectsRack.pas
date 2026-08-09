@@ -24,6 +24,12 @@ type
     FOnRackChanged: TEffectRackChangedEvent;
     FLPSlider: TTrackBar;
     FLPValueLabel: TLabel;
+    FHPSlider: TTrackBar;
+    FHPValueLabel: TLabel;
+    FBPSlider: TTrackBar;
+    FBPValueLabel: TLabel;
+    FBPQSlider: TTrackBar;
+    FBPQValueLabel: TLabel;
     FEQFreqEdit: array[0..Effects.MaxEQBands - 1] of TEdit;
     FEQGainSlider: array[0..Effects.MaxEQBands - 1] of TTrackBar;
     FLimiterThresholdSlider: TTrackBar;
@@ -55,6 +61,9 @@ type
     function EffectPtr: PEffect;
     procedure DeleteClick(Sender: TObject);
     procedure LPSliderChange(Sender: TObject);
+    procedure HPSliderChange(Sender: TObject);
+    procedure BPSliderChange(Sender: TObject);
+    procedure BPQSliderChange(Sender: TObject);
     procedure EQFreqEditDone(Sender: TObject);
     procedure EQGainSliderChange(Sender: TObject);
     procedure LimiterThresholdSliderChange(Sender: TObject);
@@ -83,6 +92,8 @@ type
     procedure DrowningDecaySliderChange(Sender: TObject);
     procedure DrowningMixSliderChange(Sender: TObject);
     procedure BuildLowpass;
+    procedure BuildHighpass;
+    procedure BuildBandpass;
     procedure BuildEQ4;
     procedure BuildLimiter;
     procedure BuildChorus;
@@ -257,6 +268,18 @@ begin
         DeleteButton.Left := Width - Px(28);
         BuildLowpass;
       end;
+    Effects.ekHighpass:
+      begin
+        Width := Px(200);
+        DeleteButton.Left := Width - Px(28);
+        BuildHighpass;
+      end;
+    Effects.ekBandpass:
+      begin
+        Width := Px(200);
+        DeleteButton.Left := Width - Px(28);
+        BuildBandpass;
+      end;
     Effects.ekEQ4:
       begin
         Width := Px(EQLeftMargin + Effects.MaxEQBands * (EQBandWidth + EQBandGap) + EQLeftMargin);
@@ -346,6 +369,85 @@ begin
   FLPValueLabel.Left := Px(8);
   FLPValueLabel.Top := Px(140);
   FLPValueLabel.Caption := Format('%d Hz', [Round(EffectPtr^.LowpassFreqHz)]);
+end;
+
+procedure TEffectWidget.BuildHighpass;
+var
+  Lbl: TLabel;
+begin
+  Lbl := TLabel.Create(Owner);
+  Lbl.Parent := Self;
+  Lbl.Left := Px(8);
+  Lbl.Top := Px(40);
+  Lbl.Caption := 'Cutoff frequency';
+
+  FHPSlider := TTrackBar.Create(Owner);
+  FHPSlider.Parent := Self;
+  FHPSlider.Left := Px(8);
+  FHPSlider.Top := Px(68);
+  FHPSlider.Width := Width - Px(16);
+  FHPSlider.Height := Px(60);
+  FHPSlider.Min := 0;
+  FHPSlider.Max := 100;
+  FHPSlider.Position := FreqToLogSlider(EffectPtr^.HighpassFreqHz);
+  FHPSlider.OnChange := @HPSliderChange;
+
+  FHPValueLabel := TLabel.Create(Owner);
+  FHPValueLabel.Parent := Self;
+  FHPValueLabel.Left := Px(8);
+  FHPValueLabel.Top := Px(140);
+  FHPValueLabel.Caption := Format('%d Hz', [Round(EffectPtr^.HighpassFreqHz)]);
+end;
+
+procedure TEffectWidget.BuildBandpass;
+var
+  Lbl: TLabel;
+begin
+  Lbl := TLabel.Create(Owner);
+  Lbl.Parent := Self;
+  Lbl.Left := Px(8);
+  Lbl.Top := Px(40);
+  Lbl.Caption := 'Center frequency';
+
+  FBPSlider := TTrackBar.Create(Owner);
+  FBPSlider.Parent := Self;
+  FBPSlider.Left := Px(8);
+  FBPSlider.Top := Px(68);
+  FBPSlider.Width := Width - Px(16);
+  FBPSlider.Height := Px(60);
+  FBPSlider.Min := 0;
+  FBPSlider.Max := 100;
+  FBPSlider.Position := FreqToLogSlider(EffectPtr^.BandpassFreqHz);
+  FBPSlider.OnChange := @BPSliderChange;
+
+  FBPValueLabel := TLabel.Create(Owner);
+  FBPValueLabel.Parent := Self;
+  FBPValueLabel.Left := Px(8);
+  FBPValueLabel.Top := Px(140);
+  FBPValueLabel.Caption := Format('%d Hz', [Round(EffectPtr^.BandpassFreqHz)]);
+
+  Lbl := TLabel.Create(Owner);
+  Lbl.Parent := Self;
+  Lbl.Left := Px(8);
+  Lbl.Top := Px(160);
+  Lbl.Caption := 'Q (bandwidth)';
+
+  FBPQSlider := TTrackBar.Create(Owner);
+  FBPQSlider.Parent := Self;
+  FBPQSlider.Left := Px(8);
+  FBPQSlider.Top := Px(188);
+  FBPQSlider.Width := Width - Px(16);
+  FBPQSlider.Height := Px(60);
+  FBPQSlider.Min := 0;
+  FBPQSlider.Max := 100;
+  FBPQSlider.Position := Round(EffectPtr^.BandpassQ * 20);
+  FBPQSlider.OnChange := @BPQSliderChange;
+
+  FBPQValueLabel := TLabel.Create(Owner);
+  FBPQValueLabel.Parent := Self;
+  FBPQValueLabel.Left := Px(8);
+  FBPQValueLabel.Top := Px(260);
+  FBPQValueLabel.Caption := Format('Q: %.2f', [EffectPtr^.BandpassQ]);
 end;
 
 procedure TEffectWidget.BuildEQ4;
@@ -1100,6 +1202,33 @@ begin
   Freq := LogSliderToFreq(FLPSlider.Position);
   EffectPtr^.LowpassFreqHz := Freq;
   FLPValueLabel.Caption := Format('%d Hz', [Round(Freq)]);
+end;
+
+procedure TEffectWidget.HPSliderChange(Sender: TObject);
+var
+  Freq: Single;
+begin
+  Freq := LogSliderToFreq(FHPSlider.Position);
+  EffectPtr^.HighpassFreqHz := Freq;
+  FHPValueLabel.Caption := Format('%d Hz', [Round(Freq)]);
+end;
+
+procedure TEffectWidget.BPSliderChange(Sender: TObject);
+var
+  Freq: Single;
+begin
+  Freq := LogSliderToFreq(FBPSlider.Position);
+  EffectPtr^.BandpassFreqHz := Freq;
+  FBPValueLabel.Caption := Format('%d Hz', [Round(Freq)]);
+end;
+
+procedure TEffectWidget.BPQSliderChange(Sender: TObject);
+var
+  Q: Single;
+begin
+  Q := FBPQSlider.Position / 20;
+  EffectPtr^.BandpassQ := Q;
+  FBPQValueLabel.Caption := Format('Q: %.2f', [Q]);
 end;
 
 procedure TEffectWidget.EQFreqEditDone(Sender: TObject);
