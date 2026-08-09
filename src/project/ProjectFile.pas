@@ -459,17 +459,45 @@ var
   Clip: TClip;
   Sample: TSample;
   Buffer: PSingle;
-  Frame, OutIdx: Int64;
+  TrackBuffers: array[0..Project.MaxTracks - 1] of PSingle;
+  TrackEffectState: array[0..Project.MaxTracks - 1, 0..Effects.MaxEffectsPerTrack - 1] of
+    Effects.TEffectState;
+  Frame, OutIdx, SampleIdx: Int64;
   SP1200St: TSP1200State;
   MasterEffectState: array[0..Effects.MaxEffectsPerTrack - 1] of Effects.TEffectState;
   L, R: Single;
   e: Integer;
   RenderBeatFrames, SwungPos: Int64;
+
+  { Offline equivalent of AudioEngine.FillBlock's SidechainLevelFor - reads
+    straight off the source track's raw (pre-FX) buffer at the current
+    Frame rather than realtime's post-FX/one-frame-stale TrackTapLevel; a
+    deliberate, documented approximation (matching this codebase's existing
+    tolerance for that exact class of gap) rather than restructuring this
+    whole render to be frame-major just for sidechain parity. }
+  function SidechainLevelFor(ASourceTrack: Integer): Single;
+  var
+    SL, SR: Single;
+  begin
+    if (ASourceTrack < 0) or (ASourceTrack >= Project.MaxTracks) or
+      (TrackBuffers[ASourceTrack] = nil) then
+      Result := 0
+    else
+    begin
+      SL := Abs(TrackBuffers[ASourceTrack][Frame * OutChannels]);
+      SR := Abs(TrackBuffers[ASourceTrack][Frame * OutChannels + 1]);
+      if SL > SR then Result := SL else Result := SR;
+    end;
+  end;
+
 begin
   Result := False;
   RenderBeatFrames := Round((AudioEngine.ProjectSampleRate * 60) / Project.TempoBPM);
   ProjectLengthFrames := 0;
   for t := 0 to Project.TrackCount - 1 do
+  begin
+    if not Project.TrackEnabled[t] then
+      Continue;
     for i := 0 to High(Project.Tracks[t].Clips) do
     begin
       Clip := Project.Tracks[t].Clips[i];
@@ -478,15 +506,30 @@ begin
       if SwungPos + Clip.Length > ProjectLengthFrames then
         ProjectLengthFrames := SwungPos + Clip.Length;
     end;
+  end;
 
   if ProjectLengthFrames <= 0 then
     Exit;
 
   GetMem(Buffer, ProjectLengthFrames * OutChannels * SizeOf(Single));
+  FillChar(TrackBuffers, SizeOf(TrackBuffers), 0);
   try
     FillChar(Buffer^, ProjectLengthFrames * OutChannels * SizeOf(Single), 0);
 
+    { each enabled track renders into its OWN scratch buffer first - needed
+      so its insert-FX chain (below) can run on just that track's signal,
+      exactly like AudioEngine.FillBlock's per-track TrackL/TrackR does,
+      before summing into the master buffer. Previously every clip summed
+      straight into the master buffer and Project.TrackEffects was never
+      even read here, so insert effects silently never applied to a bounce. }
     for t := 0 to Project.TrackCount - 1 do
+    begin
+      if not Project.TrackEnabled[t] then
+        Continue;
+
+      GetMem(TrackBuffers[t], ProjectLengthFrames * OutChannels * SizeOf(Single));
+      FillChar(TrackBuffers[t]^, ProjectLengthFrames * OutChannels * SizeOf(Single), 0);
+
       for i := 0 to High(Project.Tracks[t].Clips) do
       begin
         Clip := Project.Tracks[t].Clips[i];
@@ -505,12 +548,12 @@ begin
             making bounces audibly diverge from what was heard live }
           if Sample.Channels = 1 then
           begin
-            Buffer[OutIdx] := Buffer[OutIdx] +
+            TrackBuffers[t][OutIdx] := TrackBuffers[t][OutIdx] +
               DetunedSample(Clip.WarpMarkers, Frame, Clip.PitchSemitones, Clip.Offset,
                 Sample.Data, Sample.FrameCount, Sample.Channels,
                 AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length,
                 Project.SampleTransients[Clip.SampleID]) * Clip.Gain;
-            Buffer[OutIdx + 1] := Buffer[OutIdx + 1] +
+            TrackBuffers[t][OutIdx + 1] := TrackBuffers[t][OutIdx + 1] +
               DetunedSample(Clip.WarpMarkers, Frame, Clip.PitchSemitones, Clip.Offset,
                 Sample.Data, Sample.FrameCount, Sample.Channels,
                 AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length,
@@ -518,12 +561,12 @@ begin
           end
           else
           begin
-            Buffer[OutIdx] := Buffer[OutIdx] +
+            TrackBuffers[t][OutIdx] := TrackBuffers[t][OutIdx] +
               DetunedSample(Clip.WarpMarkers, Frame, Clip.PitchSemitones, Clip.Offset,
                 Sample.Data, Sample.FrameCount, Sample.Channels,
                 AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length,
                 Project.SampleTransients[Clip.SampleID]) * Clip.Gain;
-            Buffer[OutIdx + 1] := Buffer[OutIdx + 1] +
+            TrackBuffers[t][OutIdx + 1] := TrackBuffers[t][OutIdx + 1] +
               DetunedSample(Clip.WarpMarkers, Frame, Clip.PitchSemitones, Clip.Offset,
                 Sample.Data, Sample.FrameCount, Sample.Channels,
                 AudioEngine.ProjectSampleRate, Clip.WarpMode, 1, Clip.Length,
@@ -531,6 +574,36 @@ begin
           end;
         end;
       end;
+    end;
+
+    { per-track insert effects (mirrors the master-effect loop below, just
+      per-track), then sum into the master buffer }
+    for t := 0 to Project.TrackCount - 1 do
+    begin
+      if not Project.TrackEnabled[t] then
+        Continue;
+
+      if Project.TrackEffectCount[t] > 0 then
+      begin
+        for e := 0 to Effects.MaxEffectsPerTrack - 1 do
+          Effects.EffectStateReset(TrackEffectState[t][e]);
+        for Frame := 0 to ProjectLengthFrames - 1 do
+        begin
+          L := TrackBuffers[t][Frame * OutChannels];
+          R := TrackBuffers[t][Frame * OutChannels + 1];
+          for e := 0 to Project.TrackEffectCount[t] - 1 do
+            if Project.TrackEffects[t][e].Kind <> Effects.ekNone then
+              Effects.ProcessEffect(TrackEffectState[t][e], Project.TrackEffects[t][e],
+                L, R, ProjectSampleRate,
+                SidechainLevelFor(Project.TrackEffects[t][e].SidechainSourceTrack));
+          TrackBuffers[t][Frame * OutChannels] := L;
+          TrackBuffers[t][Frame * OutChannels + 1] := R;
+        end;
+      end;
+
+      for SampleIdx := 0 to ProjectLengthFrames * OutChannels - 1 do
+        Buffer[SampleIdx] := Buffer[SampleIdx] + TrackBuffers[t][SampleIdx];
+    end;
 
     if Project.MasterEffectCount > 0 then
     begin
@@ -542,12 +615,10 @@ begin
         R := Buffer[Frame * OutChannels + 1];
         for e := 0 to Project.MasterEffectCount - 1 do
           if Project.MasterEffects[e].Kind <> Effects.ekNone then
-            { 0 for the sidechain level: this offline path sums every track
-              straight into one buffer (see the loop above) with no
-              per-track signal left to key off by the time we get here, and
-              track inserts already aren't rendered offline at all - an
-              ekSidechain on the master bus simply never ducks in a bounce,
-              same class of gap as per-track FX not rendering here. }
+            { 0 for the sidechain level: per-track signal no longer exists
+              distinctly by the time a master effect runs (every track's
+              already been summed into Buffer just above), same as before -
+              only per-track inserts gained real sidechain support here. }
             Effects.ProcessEffect(MasterEffectState[e], Project.MasterEffects[e], L, R,
               ProjectSampleRate, 0);
         Buffer[Frame * OutChannels] := L;
@@ -565,6 +636,9 @@ begin
     Result := EncodeWav(AOutputPath, Buffer, ProjectLengthFrames, OutChannels,
       ProjectSampleRate);
   finally
+    for t := 0 to Project.MaxTracks - 1 do
+      if TrackBuffers[t] <> nil then
+        FreeMem(TrackBuffers[t]);
     FreeMem(Buffer);
   end;
 end;

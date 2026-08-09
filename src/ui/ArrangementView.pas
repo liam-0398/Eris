@@ -6,7 +6,7 @@ interface
 
 uses
   Classes, SysUtils, Math, Types, Forms, Controls, Graphics, LCLType, StdCtrls,
-  FileBrowser, SampleTypes, Project, AudioEngine, Waveform;
+  FileBrowser, SampleTypes, Project, AudioEngine, Waveform, ClipOverwrite;
 
 type
   TFileDropEvent = procedure(Sender: TObject; ATrackIndex: Integer;
@@ -14,7 +14,19 @@ type
 
   TSeekEvent = procedure(Sender: TObject; AFrameOffset: Int64) of object;
 
-  TDragMode = (dmNone, dmMove, dmResizeLeft, dmResizeRight, dmRangeSelect);
+  TDragMode = (dmNone, dmMove, dmResizeLeft, dmResizeRight, dmRangeSelect, dmGroupMove);
+
+  { One clip being dragged as part of a multi-clip group move (started by
+    grabbing a clip that's part of the active range selection). OrigTrack/
+    OrigClipIndex is where it lives in Project.Tracks right now - needed at
+    MouseUp to pull it back out of there; CurrentTrack/CurrentClip is its
+    live, dragged position, which DrawClips renders from during the drag. }
+  TGroupDragItem = record
+    OrigTrack, OrigClipIndex: Integer;
+    CurrentTrack: Integer;
+    CurrentClip: TClip;
+  end;
+  TGroupDragItemArray = array of TGroupDragItem;
 
   TArrangementView = class(TCustomControl)
   private
@@ -66,6 +78,12 @@ type
       FRangeDragStartTrack: Integer;
       FRangeStartFrame, FRangeEndFrame: Int64;
       FRangeStartTrack, FRangeEndTrack: Integer;
+      FGroupDragItems: TGroupDragItemArray;
+      FGroupDragGrabItemIndex: Integer;
+      FGroupDragGrabTrack: Integer;
+      FGroupDragGrabOrigPosition: Int64;
+      FGroupDragFrameDelta: Int64;
+      FGroupDragTrackDelta: Integer;
     function LaneWidth: Integer;
     function ContentHeight: Integer;
     function ContentEndFrame: Int64;
@@ -84,6 +102,8 @@ type
     function XToVolume(X: Integer): Single;
     function HitTestVolumeSlider(ATrackIndex, Y: Integer): Boolean;
     function MuteButtonRect(ATrackIndex: Integer): TRect;
+    function ClipOverlapsRange(const AClip: TClip; ARangeStart, ARangeEnd: Int64): Boolean;
+    procedure BuildGroupDragItems(ARangeStart, ARangeEnd: Int64; AT1, AT2: Integer);
     procedure SelectClip(ATrack, AClip: Integer);
     procedure UpdateEngineLoop;
     procedure SetScrollFrame(AFrame: Int64);
@@ -93,6 +113,7 @@ type
     procedure DrawRuler;
     procedure DrawLoopMarkers;
     procedure DrawTrackHeaders;
+    procedure DrawOneClip(ATrack: Integer; const AClip: TClip; AIsSelected: Boolean);
     procedure DrawClips;
     procedure DrawCursor;
     procedure DrawRangeSelection;
@@ -122,6 +143,7 @@ type
     procedure DuplicateSelection;
     procedure SplitAtCursor;
     procedure DeleteSelection;
+    procedure ConsolidateSelection;
     procedure RescaleTimeReferences(ARatio: Double);
     property KeyboardTrack: Integer read FKeyboardTrack;
     property SelectedTrack: Integer read FSelectedTrack;
@@ -318,6 +340,37 @@ begin
     Result := True;
     Exit;
   end;
+end;
+
+{ Shared overlap test - same check CopySelection/DuplicateSelection/
+  DeleteSelection's range branches already do inline, factored out so a
+  group-move drag can reuse it too. }
+function TArrangementView.ClipOverlapsRange(const AClip: TClip;
+  ARangeStart, ARangeEnd: Int64): Boolean;
+begin
+  Result := (AClip.Position + AClip.Length > ARangeStart) and
+    (AClip.Position < ARangeEnd);
+end;
+
+{ Populates FGroupDragItems with every clip on tracks [AT1, AT2] that
+  overlaps [ARangeStart, ARangeEnd) - the set of clips a group-move drag
+  carries together. }
+procedure TArrangementView.BuildGroupDragItems(ARangeStart, ARangeEnd: Int64;
+  AT1, AT2: Integer);
+var
+  t, i: Integer;
+begin
+  FGroupDragItems := nil;
+  for t := AT1 to AT2 do
+    for i := 0 to High(Project.Tracks[t].Clips) do
+      if ClipOverlapsRange(Project.Tracks[t].Clips[i], ARangeStart, ARangeEnd) then
+      begin
+        SetLength(FGroupDragItems, Length(FGroupDragItems) + 1);
+        FGroupDragItems[High(FGroupDragItems)].OrigTrack := t;
+        FGroupDragItems[High(FGroupDragItems)].OrigClipIndex := i;
+        FGroupDragItems[High(FGroupDragItems)].CurrentTrack := t;
+        FGroupDragItems[High(FGroupDragItems)].CurrentClip := Project.Tracks[t].Clips[i];
+      end;
 end;
 
 function TArrangementView.VolumeKnobX(ATrackIndex: Integer): Integer;
@@ -639,62 +692,92 @@ begin
   Canvas.Brush.Style := bsSolid;
 end;
 
+{ Renders one clip - factored out of DrawClips so a group-move drag can call
+  it a second time for clips at their live (possibly different-track)
+  dragged position, not just for the Project.Tracks[t].Clips[i] array in
+  track order. }
+procedure TArrangementView.DrawOneClip(ATrack: Integer; const AClip: TClip;
+  AIsSelected: Boolean);
+var
+  R: TRect;
+  ClipName: string;
+begin
+  R := ClipPixelRect(ATrack, AClip);
+  if (R.Right < 0) or (R.Left > LaneWidth) then
+    Exit;
+
+  { neutral dark interior so the waveform (drawn in the track's color)
+    reads clearly against it, full width - no horizontal border/inset }
+  Canvas.Brush.Color := clBlack;
+  Canvas.FillRect(R);
+  if AClip.SampleID <= High(Project.SamplePeaks) then
+    DrawWaveform(Canvas, Rect(R.Left, R.Top + 14, R.Right, R.Bottom),
+      Project.SamplePeaks[AClip.SampleID],
+      Project.SamplePool[AClip.SampleID].FrameCount, AClip.Offset,
+      AClip.Offset + AClip.Length, AClip.WarpMarkers, FTrackColors[ATrack],
+      AClip.WarpMode, Project.SampleTransients[AClip.SampleID]);
+
+  { border only (Frame, not Rectangle - Rectangle also fills the interior
+    with the current brush, which would erase the waveform just drawn) }
+  if AIsSelected then
+    Canvas.Pen.Color := clRed
+  else
+    Canvas.Pen.Color := FTrackColors[ATrack];
+  Canvas.Pen.Width := 2;
+  Canvas.Frame(R);
+  Canvas.Pen.Width := 1;
+
+  Canvas.Brush.Style := bsClear;
+  Canvas.Font.Color := clWhite;
+  if AClip.SampleID <= High(Project.SampleNames) then
+    ClipName := Project.SampleNames[AClip.SampleID]
+  else
+    ClipName := '';
+  Canvas.TextOut(R.Left + 4, R.Top + 2, ClipName);
+  Canvas.Font.Color := clWindowText;
+  Canvas.Brush.Style := bsSolid;
+end;
+
 procedure TArrangementView.DrawClips;
 var
-  t, i: Integer;
+  t, i, g: Integer;
   Clip: TClip;
-  R: TRect;
-  IsSelected, IsDragging: Boolean;
-  ClipName: string;
+  IsSelected, IsDragging, Suppress: Boolean;
 begin
   for t := 0 to Project.TrackCount - 1 do
     for i := 0 to High(Project.Tracks[t].Clips) do
     begin
-      IsDragging := FDragActive and (FDragMode <> dmNone) and (t = FDragTrack) and
-        (i = FDragClip);
+      { during a group move, every dragged clip's ORIGINAL slot is skipped
+        here - it's redrawn below at its live (possibly different-track)
+        position instead }
+      Suppress := False;
+      if FDragActive and (FDragMode = dmGroupMove) then
+        for g := 0 to High(FGroupDragItems) do
+          if (FGroupDragItems[g].OrigTrack = t) and
+            (FGroupDragItems[g].OrigClipIndex = i) then
+          begin
+            Suppress := True;
+            Break;
+          end;
+      if Suppress then
+        Continue;
+
+      IsDragging := FDragActive and (FDragMode in [dmMove, dmResizeLeft, dmResizeRight]) and
+        (t = FDragTrack) and (i = FDragClip);
       if IsDragging then
         Clip := FDragCurrentClip
       else
         Clip := Project.Tracks[t].Clips[i];
 
-      R := ClipPixelRect(t, Clip);
-      if (R.Right < 0) or (R.Left > LaneWidth) then
-        Continue;
-
       IsSelected := (t = FSelectedTrack) and (i = FSelectedClip);
-
-      { neutral dark interior so the waveform (drawn in the track's color)
-        reads clearly against it, full width - no horizontal border/inset }
-      Canvas.Brush.Color := clBlack;
-      Canvas.FillRect(R);
-      if Clip.SampleID <= High(Project.SamplePeaks) then
-        DrawWaveform(Canvas, Rect(R.Left, R.Top + 14, R.Right, R.Bottom),
-          Project.SamplePeaks[Clip.SampleID],
-          Project.SamplePool[Clip.SampleID].FrameCount, Clip.Offset,
-          Clip.Offset + Clip.Length, Clip.WarpMarkers, FTrackColors[t], Clip.WarpMode,
-          Project.SampleTransients[Clip.SampleID]);
-
-      { border only (Frame, not Rectangle - Rectangle also fills the
-        interior with the current brush, which would erase the waveform
-        just drawn) }
-      if IsSelected then
-        Canvas.Pen.Color := clRed
-      else
-        Canvas.Pen.Color := FTrackColors[t];
-      Canvas.Pen.Width := 2;
-      Canvas.Frame(R);
-      Canvas.Pen.Width := 1;
-
-      Canvas.Brush.Style := bsClear;
-      Canvas.Font.Color := clWhite;
-      if Clip.SampleID <= High(Project.SampleNames) then
-        ClipName := Project.SampleNames[Clip.SampleID]
-      else
-        ClipName := '';
-      Canvas.TextOut(R.Left + 4, R.Top + 2, ClipName);
-      Canvas.Font.Color := clWindowText;
-      Canvas.Brush.Style := bsSolid;
+      DrawOneClip(t, Clip, IsSelected);
     end;
+
+  if FDragActive and (FDragMode = dmGroupMove) then
+    for g := 0 to High(FGroupDragItems) do
+      DrawOneClip(FGroupDragItems[g].CurrentTrack, FGroupDragItems[g].CurrentClip,
+        (FGroupDragItems[g].OrigTrack = FSelectedTrack) and
+        (FGroupDragItems[g].OrigClipIndex = FSelectedClip));
 end;
 
 procedure TArrangementView.DrawCursor;
@@ -845,6 +928,9 @@ var
   TrackIndex, ClipIndex: Integer;
   Mode: TDragMode;
   Frame: Int64;
+  t1, t2, g: Integer;
+  RangeStart, RangeEnd: Int64;
+  GroupHasClickedClip: Boolean;
 begin
   inherited MouseDown(Button, Shift, X, Y);
 
@@ -956,18 +1042,62 @@ begin
 
   if HitTestClip(TrackIndex, X, ClipIndex, Mode) then
   begin
-    FRangeSelectActive := False;
-    SelectClip(TrackIndex, ClipIndex);
-    FDragMode := Mode;
-    FDragActive := True;
-    FDragTrack := TrackIndex;
-    FDragClip := ClipIndex;
-    FDragOrigClip := Project.Tracks[TrackIndex].Clips[ClipIndex];
-    FDragCurrentClip := FDragOrigClip;
-    if Mode = dmMove then
-      FDragGrabOffsetFrames := XToFrame(X) - FDragOrigClip.Position;
-    Project.PushUndoSnapshot(TrackIndex);
-    Invalidate;
+    { grabbing a clip that's part of the active range selection drags the
+      WHOLE selection together, Ableton-style - but only on a plain move
+      grab; grabbing a resize handle within a multi-selection still resizes
+      just that one clip, matching Ableton. }
+    GroupHasClickedClip := False;
+    if FRangeSelectActive and (Mode = dmMove) then
+    begin
+      t1 := Min(FRangeStartTrack, FRangeEndTrack);
+      t2 := Max(FRangeStartTrack, FRangeEndTrack);
+      RangeStart := Min(FRangeStartFrame, FRangeEndFrame);
+      RangeEnd := Max(FRangeStartFrame, FRangeEndFrame);
+      BuildGroupDragItems(RangeStart, RangeEnd, t1, t2);
+      for g := 0 to High(FGroupDragItems) do
+        if (FGroupDragItems[g].OrigTrack = TrackIndex) and
+          (FGroupDragItems[g].OrigClipIndex = ClipIndex) then
+        begin
+          GroupHasClickedClip := True;
+          FGroupDragGrabItemIndex := g;
+          Break;
+        end;
+    end;
+
+    if GroupHasClickedClip then
+    begin
+      { SelectClip (not a direct field assignment) so MainForm's warp
+        widget/RP-BT toggle stay in sync with whichever clip was grabbed,
+        same as the single-clip dmMove path below - it doesn't touch
+        FRangeSelectActive, so the active selection survives this call }
+      SelectClip(TrackIndex, ClipIndex);
+      FDragMode := dmGroupMove;
+      FDragActive := True;
+      FGroupDragGrabTrack := TrackIndex;
+      FGroupDragGrabOrigPosition := Project.Tracks[TrackIndex].Clips[ClipIndex].Position;
+      FDragGrabOffsetFrames := XToFrame(X) - FGroupDragGrabOrigPosition;
+      FGroupDragFrameDelta := 0;
+      FGroupDragTrackDelta := 0;
+      { undo snapshots for a group move are taken at MouseUp, once the full
+        set of touched tracks is known - see the dmGroupMove case there }
+      Invalidate;
+    end
+    else
+    begin
+      FGroupDragItems := nil;
+      FRangeSelectActive := False;
+      SelectClip(TrackIndex, ClipIndex);
+      FDragMode := Mode;
+      FDragActive := True;
+      FDragTrack := TrackIndex;
+      FDragClip := ClipIndex;
+      FDragOrigClip := Project.Tracks[TrackIndex].Clips[ClipIndex];
+      FDragCurrentClip := FDragOrigClip;
+      if Mode = dmMove then
+        FDragGrabOffsetFrames := XToFrame(X) - FDragOrigClip.Position;
+      Project.PushUndoSnapshot(TrackIndex);
+      Invalidate;
+    end;
   end
   else
   begin
@@ -998,7 +1128,8 @@ procedure TArrangementView.MouseMove(Shift: TShiftState; X, Y: Integer);
 var
   MouseFrame, NewPosition, NewEnd, MinPos, MaxPos, MinEnd, Delta: Int64;
   FreePlacement: Boolean;
-  TargetTrack, Row: Integer;
+  TargetTrack, Row, g, GroupMinTrack, GroupMaxTrack: Integer;
+  GroupMinPosition, OrigPos: Int64;
 begin
   inherited MouseMove(Shift, X, Y);
 
@@ -1082,6 +1213,59 @@ begin
         if FRangeEndFrame <> FRangeStartFrame then
           FRangeSelectActive := True;
       end;
+    dmGroupMove:
+      begin
+        if Length(FGroupDragItems) = 0 then
+          Exit;
+
+        NewPosition := MouseFrame - FDragGrabOffsetFrames;
+        if not FreePlacement then
+          NewPosition := SnapFrame(NewPosition);
+        FGroupDragFrameDelta := NewPosition - FGroupDragGrabOrigPosition;
+
+        { clamp the delta for the group AS A WHOLE (not per-item) so relative
+          spacing survives instead of compressing - only the earliest item's
+          position can't go negative, matching dmMove's own clamp }
+        GroupMinPosition := -1;
+        for g := 0 to High(FGroupDragItems) do
+        begin
+          OrigPos := Project.Tracks[FGroupDragItems[g].OrigTrack].
+            Clips[FGroupDragItems[g].OrigClipIndex].Position;
+          if (GroupMinPosition < 0) or (OrigPos < GroupMinPosition) then
+            GroupMinPosition := OrigPos;
+        end;
+        if GroupMinPosition + FGroupDragFrameDelta < 0 then
+          FGroupDragFrameDelta := -GroupMinPosition;
+
+        TargetTrack := TrackIndexAtY(Y);
+        if TargetTrack >= 0 then
+        begin
+          FGroupDragTrackDelta := TargetTrack - FGroupDragGrabTrack;
+
+          GroupMinTrack := FGroupDragItems[0].OrigTrack;
+          GroupMaxTrack := FGroupDragItems[0].OrigTrack;
+          for g := 1 to High(FGroupDragItems) do
+          begin
+            if FGroupDragItems[g].OrigTrack < GroupMinTrack then
+              GroupMinTrack := FGroupDragItems[g].OrigTrack;
+            if FGroupDragItems[g].OrigTrack > GroupMaxTrack then
+              GroupMaxTrack := FGroupDragItems[g].OrigTrack;
+          end;
+          if GroupMinTrack + FGroupDragTrackDelta < 0 then
+            FGroupDragTrackDelta := -GroupMinTrack;
+          if GroupMaxTrack + FGroupDragTrackDelta > Project.TrackCount - 1 then
+            FGroupDragTrackDelta := Project.TrackCount - 1 - GroupMaxTrack;
+        end;
+
+        for g := 0 to High(FGroupDragItems) do
+        begin
+          FGroupDragItems[g].CurrentClip := Project.Tracks[FGroupDragItems[g].OrigTrack].
+            Clips[FGroupDragItems[g].OrigClipIndex];
+          FGroupDragItems[g].CurrentClip.Position :=
+            FGroupDragItems[g].CurrentClip.Position + FGroupDragFrameDelta;
+          FGroupDragItems[g].CurrentTrack := FGroupDragItems[g].OrigTrack + FGroupDragTrackDelta;
+        end;
+      end;
   else
     Exit;
   end;
@@ -1095,6 +1279,10 @@ var
   OrigTrack: Integer;
   DiscardMarkers: TWarpMarkerArray;
   SplitRel, SplitSource: Int64;
+  t, g, i, GrabbedTrack, GrabbedIdx: Integer;
+  Snapshotted: array[0..Project.MaxTracks - 1] of Boolean;
+  NewClips: TClipArray;
+  HasGroupItem, IsGroupMember: Boolean;
 begin
   inherited MouseUp(Button, Shift, X, Y);
 
@@ -1208,6 +1396,105 @@ begin
         { see the matching comment in dmResizeLeft above }
         if Assigned(FOnClipSelectionChanged) then
           FOnClipSelectionChanged(Self);
+      end;
+    dmGroupMove:
+      begin
+        if Length(FGroupDragItems) > 0 then
+        begin
+          FillChar(Snapshotted, SizeOf(Snapshotted), 0);
+
+          { phase 1: pull every dragged clip out of its ORIGINAL slot, per
+            track, by rebuilding that track's array with the group's
+            indices filtered out - same snapshot-then-filter approach
+            DuplicateSelection already uses, so removing several clips from
+            one track never trips over shifting indices }
+          for t := 0 to Project.TrackCount - 1 do
+          begin
+            HasGroupItem := False;
+            for g := 0 to High(FGroupDragItems) do
+              if FGroupDragItems[g].OrigTrack = t then
+              begin
+                HasGroupItem := True;
+                Break;
+              end;
+            if not HasGroupItem then
+              Continue;
+
+            if not Snapshotted[t] then
+            begin
+              Project.PushUndoSnapshot(t);
+              Snapshotted[t] := True;
+            end;
+
+            NewClips := nil;
+            for i := 0 to High(Project.Tracks[t].Clips) do
+            begin
+              IsGroupMember := False;
+              for g := 0 to High(FGroupDragItems) do
+                if (FGroupDragItems[g].OrigTrack = t) and
+                  (FGroupDragItems[g].OrigClipIndex = i) then
+                begin
+                  IsGroupMember := True;
+                  Break;
+                end;
+              if not IsGroupMember then
+              begin
+                SetLength(NewClips, Length(NewClips) + 1);
+                NewClips[High(NewClips)] := Project.Tracks[t].Clips[i];
+              end;
+            end;
+            Project.ReplaceTrackClips(t, NewClips);
+          end;
+
+          { phase 2: commit each item into its live destination - by now
+            every group member has already been removed from every track's
+            array, so CommitClipToTrack's internal OverwriteClips only ever
+            punches genuinely foreign (non-group) clips, never another
+            group member, even where two members land close together }
+          for g := 0 to High(FGroupDragItems) do
+          begin
+            if not Snapshotted[FGroupDragItems[g].CurrentTrack] then
+            begin
+              Project.PushUndoSnapshot(FGroupDragItems[g].CurrentTrack);
+              Snapshotted[FGroupDragItems[g].CurrentTrack] := True;
+            end;
+            Project.CommitClipToTrack(FGroupDragItems[g].CurrentTrack,
+              FGroupDragItems[g].CurrentClip);
+          end;
+
+          for t := 0 to Project.TrackCount - 1 do
+            if Snapshotted[t] then
+              PushTrackToEngine(t);
+
+          { the grabbed clip's index in its destination track's array isn't
+            known until every commit above has run (CommitClipToTrack can
+            insert/remove neighbors), and FSelectedClip is still pointing at
+            its stale ORIGINAL index - find its new index by Position (only
+            one clip can occupy a given Position on a track after
+            OverwriteClips has run) and reselect it there, or every other
+            operation that trusts FSelectedTrack/FSelectedClip (the RP/BT
+            toggle, Delete, ...) would silently act on the wrong clip. }
+          GrabbedTrack := FGroupDragItems[FGroupDragGrabItemIndex].CurrentTrack;
+          GrabbedIdx := -1;
+          for g := 0 to High(Project.Tracks[GrabbedTrack].Clips) do
+            if Project.Tracks[GrabbedTrack].Clips[g].Position =
+              FGroupDragItems[FGroupDragGrabItemIndex].CurrentClip.Position then
+            begin
+              GrabbedIdx := g;
+              Break;
+            end;
+          if GrabbedIdx >= 0 then
+            SelectClip(GrabbedTrack, GrabbedIdx);
+
+          { move the persisted range selection along with the group,
+            Ableton-style - same idea as DuplicateSelection advancing its
+            own selection after duplicating }
+          FRangeStartFrame := FRangeStartFrame + FGroupDragFrameDelta;
+          FRangeEndFrame := FRangeEndFrame + FGroupDragFrameDelta;
+          FRangeStartTrack := FRangeStartTrack + FGroupDragTrackDelta;
+          FRangeEndTrack := FRangeEndTrack + FGroupDragTrackDelta;
+        end;
+        FGroupDragItems := nil;
       end;
   end;
 
@@ -1395,8 +1682,35 @@ begin
 end;
 
 procedure TArrangementView.DeleteSelection;
+var
+  t1, t2, t: Integer;
+  RangeStart, RangeEnd: Int64;
 begin
-  if (FSelectedTrack >= 0) and (FSelectedClip >= 0) and
+  if FRangeSelectActive then
+  begin
+    t1 := Min(FRangeStartTrack, FRangeEndTrack);
+    t2 := Max(FRangeStartTrack, FRangeEndTrack);
+    RangeStart := Min(FRangeStartFrame, FRangeEndFrame);
+    RangeEnd := Max(FRangeStartFrame, FRangeEndFrame);
+    if RangeEnd <= RangeStart then
+      Exit;
+
+    { OverwriteClips already does exactly "punch this time window out of a
+      track's clips, trimming/splitting partial overlaps with correct
+      warp-marker handling" - the same primitive single-clip drop-collision
+      uses (Project.CommitClipToTrack) - just without appending a new clip
+      back afterward. }
+    for t := t1 to t2 do
+    begin
+      Project.PushUndoSnapshot(t);
+      Project.ReplaceTrackClips(t,
+        ClipOverwrite.OverwriteClips(Project.Tracks[t].Clips, RangeStart,
+        RangeEnd - RangeStart));
+      PushTrackToEngine(t);
+    end;
+    Invalidate;
+  end
+  else if (FSelectedTrack >= 0) and (FSelectedClip >= 0) and
     (FSelectedClip <= High(Project.Tracks[FSelectedTrack].Clips)) then
   begin
     Project.PushUndoSnapshot(FSelectedTrack);
@@ -1405,6 +1719,125 @@ begin
     SelectClip(FSelectedTrack, -1);
     Invalidate;
   end;
+end;
+
+{ Ableton-style "Consolidate": bounces the selected time range on ONE track
+  into a single new clip. Only ever acts on a single-track selection - a
+  range spanning more than one track is a no-op, by design (no per-track
+  fan-out). }
+procedure TArrangementView.ConsolidateSelection;
+const
+  OutChannels = 2;
+var
+  t, i: Integer;
+  RangeStart, RangeEnd, RangeLen, OutFrame, OutIdx, ClipRelFrame: Int64;
+  Clip: TClip;
+  Sample: TSample;
+  NewSample: TSample;
+  NewClip: TClip;
+  Buffer: PSingle;
+  HasContent: Boolean;
+begin
+  if not FRangeSelectActive then
+    Exit;
+  if FRangeStartTrack <> FRangeEndTrack then
+    Exit;
+
+  t := FRangeStartTrack;
+  if (t < 0) or (t >= Project.TrackCount) then
+    Exit;
+  RangeStart := Min(FRangeStartFrame, FRangeEndFrame);
+  RangeEnd := Max(FRangeStartFrame, FRangeEndFrame);
+  if RangeEnd <= RangeStart then
+    Exit;
+  RangeLen := RangeEnd - RangeStart;
+
+  HasContent := False;
+  for i := 0 to High(Project.Tracks[t].Clips) do
+    if (Project.Tracks[t].Clips[i].Position + Project.Tracks[t].Clips[i].Length > RangeStart) and
+      (Project.Tracks[t].Clips[i].Position < RangeEnd) then
+    begin
+      HasContent := True;
+      Break;
+    end;
+  if not HasContent then
+    Exit; { nothing in range on this track - no point in a silent clip }
+
+  GetMem(Buffer, RangeLen * OutChannels * SizeOf(Single));
+  FillChar(Buffer^, RangeLen * OutChannels * SizeOf(Single), 0);
+
+  { render exactly like ProjectFile.RenderProjectToWav's offline bounce - same
+    per-clip DetunedSample primitive, so warp mode/detune/transient-grain
+    behavior all match live playback with no new DSP. }
+  for i := 0 to High(Project.Tracks[t].Clips) do
+  begin
+    Clip := Project.Tracks[t].Clips[i];
+    if (Clip.Position + Clip.Length <= RangeStart) or (Clip.Position >= RangeEnd) then
+      Continue;
+    Sample := Project.SamplePool[Clip.SampleID];
+
+    for OutFrame := 0 to RangeLen - 1 do
+    begin
+      ClipRelFrame := (RangeStart + OutFrame) - Clip.Position;
+      if (ClipRelFrame < 0) or (ClipRelFrame >= Clip.Length) then
+        Continue;
+      OutIdx := OutFrame * OutChannels;
+
+      if Sample.Channels = 1 then
+      begin
+        Buffer[OutIdx] := Buffer[OutIdx] +
+          DetunedSample(Clip.WarpMarkers, ClipRelFrame, Clip.PitchSemitones, Clip.Offset,
+            Sample.Data, Sample.FrameCount, Sample.Channels,
+            AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length,
+            Project.SampleTransients[Clip.SampleID]) * Clip.Gain;
+        Buffer[OutIdx + 1] := Buffer[OutIdx + 1] +
+          DetunedSample(Clip.WarpMarkers, ClipRelFrame, Clip.PitchSemitones, Clip.Offset,
+            Sample.Data, Sample.FrameCount, Sample.Channels,
+            AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length,
+            Project.SampleTransients[Clip.SampleID]) * Clip.Gain;
+      end
+      else
+      begin
+        Buffer[OutIdx] := Buffer[OutIdx] +
+          DetunedSample(Clip.WarpMarkers, ClipRelFrame, Clip.PitchSemitones, Clip.Offset,
+            Sample.Data, Sample.FrameCount, Sample.Channels,
+            AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length,
+            Project.SampleTransients[Clip.SampleID]) * Clip.Gain;
+        Buffer[OutIdx + 1] := Buffer[OutIdx + 1] +
+          DetunedSample(Clip.WarpMarkers, ClipRelFrame, Clip.PitchSemitones, Clip.Offset,
+            Sample.Data, Sample.FrameCount, Sample.Channels,
+            AudioEngine.ProjectSampleRate, Clip.WarpMode, 1, Clip.Length,
+            Project.SampleTransients[Clip.SampleID]) * Clip.Gain;
+      end;
+    end;
+  end;
+
+  FillChar(NewSample, SizeOf(NewSample), 0);
+  NewSample.Data := Buffer;
+  NewSample.FrameCount := RangeLen;
+  NewSample.Channels := OutChannels;
+  NewSample.SampleRate := AudioEngine.ProjectSampleRate;
+  NewSample.BaseNote := 60.0;
+
+  { WarpMarkers left unset (nil) - a fresh dynamic-array field, same
+    convention MainForm.FinalizeRecording uses for its own new TClip; fewer
+    than 2 markers means "plain, unwarped" everywhere this is read. }
+  NewClip.SampleID := Project.AddSampleToPool(NewSample, 'Consolidated', '');
+  NewClip.Offset := 0;
+  NewClip.Length := RangeLen;
+  NewClip.Position := RangeStart;
+  NewClip.TrackID := t;
+  NewClip.PitchSemitones := 0;
+  NewClip.Gain := 1.0;
+  NewClip.WarpMode := SampleTypes.WarpModeBeats;
+
+  Project.PushUndoSnapshot(t);
+  { CommitClipToTrack already punches every existing clip inside
+    [RangeStart, RangeEnd) via the same OverwriteClips path DeleteSelection's
+    range branch above uses directly - no separate punch step needed here. }
+  Project.CommitClipToTrack(t, NewClip);
+  PushTrackToEngine(t);
+  Invalidate;
 end;
 
 procedure TArrangementView.SplitAtCursor;
@@ -1509,6 +1942,11 @@ begin
   else if Key = Ord('E') then
   begin
     SplitAtCursor;
+    Key := 0;
+  end
+  else if Key = Ord('J') then
+  begin
+    ConsolidateSelection;
     Key := 0;
   end;
 end;

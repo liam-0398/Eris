@@ -96,6 +96,7 @@ type
     procedure EditDuplicateClick(Sender: TObject);
     procedure EditSplitClick(Sender: TObject);
     procedure EditDeleteClick(Sender: TObject);
+    procedure EditConsolidateClick(Sender: TObject);
     procedure ViewZoomInClick(Sender: TObject);
     procedure ViewZoomOutClick(Sender: TObject);
     procedure TrackAddClick(Sender: TObject);
@@ -227,7 +228,8 @@ procedure TForm1.BuildMenu;
 var
   FileMenu, EditMenu, ViewMenu, TrackMenu, HelpMenu, UndoItem,
   ZoomInItem, ZoomOutItem, CopyItem, PasteItem, DuplicateItem, SplitItem,
-  DeleteItem, OpenItem, SaveItem, SaveAsItem, AddTrackItem: TMenuItem;
+  DeleteItem, ConsolidateItem, OpenItem, SaveItem, SaveAsItem,
+  AddTrackItem: TMenuItem;
 begin
   FMainMenu := TMainMenu.Create(Self);
   Menu := FMainMenu;
@@ -259,6 +261,8 @@ begin
   SplitItem.ShortCut := Menus.ShortCut(Ord('E'), [ssCtrl]);
   DeleteItem := AddItem(EditMenu, 'D&elete', @EditDeleteClick);
   DeleteItem.ShortCut := Menus.ShortCut(VK_DELETE, []);
+  ConsolidateItem := AddItem(EditMenu, 'Conso&lidate', @EditConsolidateClick);
+  ConsolidateItem.ShortCut := Menus.ShortCut(Ord('J'), [ssCtrl]);
   AddSeparator(EditMenu);
   AddItem(EditMenu, '&Preferences...', @EditPreferencesClick);
 
@@ -906,6 +910,13 @@ begin
   if ActiveControl is TCustomEdit then
     Exit;
   FArrangementView.DeleteSelection;
+end;
+
+procedure TForm1.EditConsolidateClick(Sender: TObject);
+begin
+  if ActiveControl is TCustomEdit then
+    Exit;
+  FArrangementView.ConsolidateSelection;
 end;
 
 procedure TForm1.ViewZoomInClick(Sender: TObject);
