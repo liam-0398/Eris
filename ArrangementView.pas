@@ -122,6 +122,7 @@ type
     procedure DuplicateSelection;
     procedure SplitAtCursor;
     procedure DeleteSelection;
+    procedure RescaleTimeReferences(ARatio: Double);
     property KeyboardTrack: Integer read FKeyboardTrack;
     property SelectedTrack: Integer read FSelectedTrack;
     property SelectedClipIndex: Integer read FSelectedClip;
@@ -785,6 +786,24 @@ end;
 procedure TArrangementView.ClearSelection;
 begin
   SelectClip(-1, -1);
+  Invalidate;
+end;
+
+{ Companion to Project.RescaleForTempoChange - the clips moved, so the
+  cursor and loop points (frame positions this view owns, not Project's)
+  need to move by the same ratio to stay at the same musical position
+  rather than pointing at whatever now happens to be at their old frame. }
+procedure TArrangementView.RescaleTimeReferences(ARatio: Double);
+begin
+  if FLoopStart >= 0 then
+    FLoopStart := Round(FLoopStart * ARatio);
+  if FLoopEnd >= 0 then
+    FLoopEnd := Round(FLoopEnd * ARatio);
+  UpdateEngineLoop;
+
+  FCursorFrame := Round(FCursorFrame * ARatio);
+  AudioEngineSeek(FCursorFrame);
+
   Invalidate;
 end;
 

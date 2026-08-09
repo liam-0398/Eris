@@ -79,6 +79,16 @@ function PopUndo(out ATrackIndex: Integer): Boolean;
 function AddTrack: Boolean;
 procedure NewProject;
 
+{ Ableton-style tempo change: rescales every clip's Position/Length and warp
+  markers' TimelineFrame (never SourceFrame/Offset - those are source-domain
+  and tempo-independent) by AOldBPM/ANewBPM, so the whole arrangement plays
+  back faster/slower while staying locked to the same bars/beats, instead of
+  just moving the ruler labels underneath an unchanged recording. A clip
+  that was never explicitly warped gets a synthesized whole-clip warp first
+  (matching Ableton's own default Beats/pitch-preserving behavior) so it
+  actually stretches instead of just getting truncated/left short. }
+procedure RescaleForTempoChange(AOldBPM, ANewBPM: Single);
+
 implementation
 
 type
@@ -267,6 +277,51 @@ begin
   InitTrackInstruments;
   MasterEffectCount := 0;
   TempoBPM := DefaultTempoBPM;
+end;
+
+procedure RescaleForTempoChange(AOldBPM, ANewBPM: Single);
+var
+  Ratio: Double;
+  t, i, m: Integer;
+  Clip: TClip;
+begin
+  if (AOldBPM <= 0) or (ANewBPM <= 0) or (AOldBPM = ANewBPM) then
+    Exit;
+  { frames-per-beat = SampleRate*60/BPM, so a frame position at a fixed beat
+    scales by OldBPM/NewBPM - raise tempo, everything happens in fewer
+    frames, i.e. sooner/faster }
+  Ratio := AOldBPM / ANewBPM;
+
+  for t := 0 to TrackCount - 1 do
+  begin
+    if Length(Tracks[t].Clips) = 0 then
+      Continue;
+    PushUndoSnapshot(t);
+    for i := 0 to High(Tracks[t].Clips) do
+    begin
+      Clip := Tracks[t].Clips[i];
+
+      if Length(Clip.WarpMarkers) < 2 then
+      begin
+        SetLength(Clip.WarpMarkers, 2);
+        Clip.WarpMarkers[0].SourceFrame := 0;
+        Clip.WarpMarkers[0].TimelineFrame := 0;
+        Clip.WarpMarkers[1].SourceFrame := Clip.Length;
+        Clip.WarpMarkers[1].TimelineFrame := Round(Clip.Length * Ratio);
+      end
+      else
+        for m := 0 to High(Clip.WarpMarkers) do
+          Clip.WarpMarkers[m].TimelineFrame :=
+            Round(Clip.WarpMarkers[m].TimelineFrame * Ratio);
+
+      { keep Length exactly matching the last marker's TimelineFrame -
+        everything downstream assumes they agree exactly }
+      Clip.Length := Clip.WarpMarkers[High(Clip.WarpMarkers)].TimelineFrame;
+      Clip.Position := Round(Clip.Position * Ratio);
+
+      Tracks[t].Clips[i] := Clip;
+    end;
+  end;
 end;
 
 initialization

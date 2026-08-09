@@ -1041,6 +1041,8 @@ end;
 procedure TForm1.TempoEditEditingDone(Sender: TObject);
 var
   Value: Integer;
+  OldBPM: Single;
+  t: Integer;
 begin
   if not TryStrToInt(Trim(FTempoEdit.Text), Value) then
     Value := Round(Project.DefaultTempoBPM);
@@ -1049,7 +1051,22 @@ begin
   else if Value > 999 then
     Value := 999;
   FTempoEdit.Text := IntToStr(Value);
-  Project.TempoBPM := Value;
+
+  OldBPM := Project.TempoBPM;
+  if Value <> Round(OldBPM) then
+  begin
+    { Ableton-style: the arrangement stays locked to the same bars/beats,
+      so it actually plays faster/slower - not just a relabeled ruler over
+      an unchanged recording. See Project.RescaleForTempoChange. }
+    Project.RescaleForTempoChange(OldBPM, Value);
+    Project.TempoBPM := Value;
+    FArrangementView.RescaleTimeReferences(OldBPM / Value);
+    for t := 0 to Project.TrackCount - 1 do
+      FArrangementView.RefreshTrack(t);
+  end
+  else
+    Project.TempoBPM := Value;
+
   FArrangementView.Invalidate;
 end;
 
