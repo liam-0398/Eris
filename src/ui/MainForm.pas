@@ -730,6 +730,7 @@ begin
   FArrangementView.OnKeyboardTrackChanged := @ArrangementViewKeyboardTrackChanged;
   FArrangementView.OnClipSelectionChanged := @ArrangementViewClipSelectionChanged;
 
+  HandleNeeded; { force the align pass so ClientWidth below is real, not a stale pre-handle default }
   TransportPanelResize(FTransportPanel);
 
   FPlaybackPollTimer := TTimer.Create(Self);
@@ -1194,6 +1195,7 @@ begin
   FGridTrackBar.Top := (FTransportPanel.ClientHeight - FGridTrackBar.Height) div 2;
   FGridLabel.Left := FGridTrackBar.Left - FGridLabel.Width - Gap;
   FGridLabel.Top := Px(19);
+
 end;
 
 procedure TForm1.GridTrackBarChange(Sender: TObject);

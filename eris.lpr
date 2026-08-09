@@ -17,7 +17,11 @@ uses
 
 begin
   RequireDerivedFormResource:=True;
-  Application.Scaled:=True;
+  { Every widget is hand-positioned via UIScale.Px() - the LCL's own automatic
+    DPI auto-scaling (which guesses a "design PPI" baked in at build time) has
+    no .lfm-based baseline to compare against for these code-only forms, and
+    was found stacking an extra unwanted scale factor on top of Px(). }
+  Application.Scaled:=False;
   {$PUSH}{$WARN 5044 OFF}
   Application.MainFormOnTaskbar:=True;
   {$POP}
