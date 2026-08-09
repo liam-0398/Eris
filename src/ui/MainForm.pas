@@ -64,7 +64,8 @@ type
     FDropHintLabel: TLabel;
     FWarpWidget: TPanel;
     FWarpEditor: TWarpEditor;
-    FWarpRepitchToggle: TSpeedButton;
+    FWarpRepitchButton: TSpeedButton;
+    FWarpBeatsButton: TSpeedButton;
     FClipGainSlider: TTrackBar;
     FClipGainValueLabel: TLabel;
     FClipDetuneSlider: TTrackBar;
@@ -114,8 +115,10 @@ type
     procedure ArrangementViewClipSelectionChanged(Sender: TObject);
     procedure WarpEditorClipChanged(Sender: TObject);
     procedure InstrumentEditorChanged(Sender: TObject);
-    procedure WarpRepitchToggleClick(Sender: TObject);
-    procedure UpdateWarpRepitchToggleLook;
+    procedure WarpRepitchButtonClick(Sender: TObject);
+    procedure WarpBeatsButtonClick(Sender: TObject);
+    procedure SetSelectedClipWarpMode(AMode: Integer);
+    procedure UpdateWarpModeButtons;
     procedure ClipGainSliderChange(Sender: TObject);
     procedure ClipDetuneSliderChange(Sender: TObject);
     procedure UpdateClipControls;
@@ -541,21 +544,36 @@ begin
   WarpButtonsPanel := AddZoomButtons(FWarpWidget, @WarpZoomInClick, @WarpZoomOutClick);
   WarpButtonsPanel.Width := Px(34); { a bit wider than the plain zoom column, so the toggle isn't tiny }
 
-  { Re-Pitch toggle - the classic continuous vari-speed warp (same tech as
-    keyboard pitch-shifting), as an alternative to the default Beats mode.
-    Lives in the same left-side handle as the zoom +/- buttons. State is
-    shown by color/caption, not just the native pressed-look, which is too
-    subtle to notice at a glance. }
-  FWarpRepitchToggle := TSpeedButton.Create(Self);
-  FWarpRepitchToggle.Parent := WarpButtonsPanel;
-  FWarpRepitchToggle.Caption := 'RP';
-  FWarpRepitchToggle.Align := alBottom;
-  FWarpRepitchToggle.Height := Px(40);
-  FWarpRepitchToggle.Font.Style := [fsBold];
-  FWarpRepitchToggle.ShowHint := True;
-  FWarpRepitchToggle.Hint := 'Re-Pitch warp mode (continuous vari-speed, changes pitch)' +
-    LineEnding + 'instead of the default Beats mode (preserves pitch)';
-  FWarpRepitchToggle.OnClick := @WarpRepitchToggleClick;
+  { Warp mode - two dedicated buttons instead of one toggle that renamed
+    itself, since a single relabeling button read as ambiguous (couldn't
+    tell "this names the active mode" from "this names what clicking does").
+    RP sits above BT in the same left-side handle as the zoom +/- buttons.
+    Same GroupIndex + AllowAllUp=False makes them mutually exclusive
+    natively - exactly one is ever Down, matching WarpMode always being
+    either Beats or RePitch. Created BT first, RP second: same-edge
+    (alBottom) docking stacks later-added controls above earlier ones, so
+    RP ends up above BT as asked. }
+  FWarpBeatsButton := TSpeedButton.Create(Self);
+  FWarpBeatsButton.Parent := WarpButtonsPanel;
+  FWarpBeatsButton.Caption := 'BT';
+  FWarpBeatsButton.Align := alBottom;
+  FWarpBeatsButton.Height := Px(28);
+  FWarpBeatsButton.Font.Style := [fsBold];
+  FWarpBeatsButton.GroupIndex := 1;
+  FWarpBeatsButton.AllowAllUp := False;
+  FWarpBeatsButton.ShowHint := True;
+  FWarpBeatsButton.OnClick := @WarpBeatsButtonClick;
+
+  FWarpRepitchButton := TSpeedButton.Create(Self);
+  FWarpRepitchButton.Parent := WarpButtonsPanel;
+  FWarpRepitchButton.Caption := 'RP';
+  FWarpRepitchButton.Align := alBottom;
+  FWarpRepitchButton.Height := Px(28);
+  FWarpRepitchButton.Font.Style := [fsBold];
+  FWarpRepitchButton.GroupIndex := 1;
+  FWarpRepitchButton.AllowAllUp := False;
+  FWarpRepitchButton.ShowHint := True;
+  FWarpRepitchButton.OnClick := @WarpRepitchButtonClick;
 
   { per-clip gain trim and pitch detune - sits between the zoom/RP button
     column and the waveform itself. Detune never changes the clip's own
@@ -1124,10 +1142,12 @@ begin
       FArrangementView.SelectedClipIndex);
     FWarpWidget.Visible := True;
     RefreshWarpWidgetSize;
-    FWarpRepitchToggle.Down :=
-      Project.Tracks[FArrangementView.SelectedTrack].Clips[FArrangementView.SelectedClipIndex].WarpMode
-      = SampleTypes.WarpModeRePitch;
-    UpdateWarpRepitchToggleLook;
+    if Project.Tracks[FArrangementView.SelectedTrack].Clips[FArrangementView.SelectedClipIndex].WarpMode
+      = SampleTypes.WarpModeRePitch then
+      FWarpRepitchButton.Down := True
+    else
+      FWarpBeatsButton.Down := True;
+    UpdateWarpModeButtons;
     UpdateClipControls;
   end
   else
@@ -1148,31 +1168,83 @@ begin
     nothing needs to be pushed ahead of time }
 end;
 
-procedure TForm1.WarpRepitchToggleClick(Sender: TObject);
+procedure TForm1.WarpRepitchButtonClick(Sender: TObject);
+begin
+  SetSelectedClipWarpMode(SampleTypes.WarpModeRePitch);
+end;
+
+procedure TForm1.WarpBeatsButtonClick(Sender: TObject);
+begin
+  SetSelectedClipWarpMode(SampleTypes.WarpModeBeats);
+end;
+
+procedure TForm1.SetSelectedClipWarpMode(AMode: Integer);
 var
   Track, ClipIdx: Integer;
+  PrevMode: Integer;
+  FirstSource, LastSource, SourceSpan: Int64;
+  NewMarkers: TWarpMarkerArray;
 begin
-  { TSpeedButton only auto-toggles Down for grouped buttons (GroupIndex <> 0)
-    - this one is standalone (GroupIndex = 0), so a plain click never flips
-    Down on its own; flip it ourselves }
-  FWarpRepitchToggle.Down := not FWarpRepitchToggle.Down;
-
   Track := FArrangementView.SelectedTrack;
   ClipIdx := FArrangementView.SelectedClipIndex;
   if (Track < 0) or (ClipIdx < 0) or
     (ClipIdx > High(Project.Tracks[Track].Clips)) then
   begin
-    FWarpRepitchToggle.Down := False; { nothing selected - nothing to toggle }
-    UpdateWarpRepitchToggleLook;
+    UpdateWarpModeButtons;
     Exit;
   end;
 
-  if FWarpRepitchToggle.Down then
-    Project.Tracks[Track].Clips[ClipIdx].WarpMode := SampleTypes.WarpModeRePitch
-  else
-    Project.Tracks[Track].Clips[ClipIdx].WarpMode := SampleTypes.WarpModeBeats;
+  PrevMode := Project.Tracks[Track].Clips[ClipIdx].WarpMode;
 
-  UpdateWarpRepitchToggleLook;
+  if (AMode = SampleTypes.WarpModeRePitch) and (PrevMode = SampleTypes.WarpModeBeats) then
+  begin
+    { Beats mode's Length is free to be any pitch-preserving stretch/squeeze
+      of the source, possibly across several markers each with their own
+      ratio. Carrying that straight into RePitch would turn it into an
+      arbitrary, un-asked-for pitch shift (and a per-segment one, not a
+      single rate). Reset to a plain 2-marker, rate-1 tracker resample of
+      the same source material instead - true tracker style, one segment,
+      no incidental pitch change from the mode switch itself. An actual
+      resample pitch/length then comes from deliberately dragging the clip
+      edge or the warp editor's end marker afterward (both already force
+      RePitch and rescale Length/markers together, per the shift-drag fix
+      above) - the "use warp markers to resample" option stays available,
+      it just isn't triggered by the mode switch alone. }
+    if Length(Project.Tracks[Track].Clips[ClipIdx].WarpMarkers) >= 2 then
+    begin
+      FirstSource := Project.Tracks[Track].Clips[ClipIdx].WarpMarkers[0].SourceFrame;
+      LastSource := Project.Tracks[Track].Clips[ClipIdx].WarpMarkers[
+        High(Project.Tracks[Track].Clips[ClipIdx].WarpMarkers)].SourceFrame;
+    end
+    else
+    begin
+      FirstSource := 0;
+      LastSource := Project.Tracks[Track].Clips[ClipIdx].Length;
+    end;
+    SourceSpan := LastSource - FirstSource;
+
+    SetLength(NewMarkers, 2);
+    NewMarkers[0].SourceFrame := FirstSource;
+    NewMarkers[0].TimelineFrame := 0;
+    NewMarkers[1].SourceFrame := LastSource;
+    NewMarkers[1].TimelineFrame := SourceSpan;
+
+    Project.Tracks[Track].Clips[ClipIdx].WarpMarkers := NewMarkers;
+    Project.Tracks[Track].Clips[ClipIdx].Length := SourceSpan;
+  end;
+
+  Project.Tracks[Track].Clips[ClipIdx].WarpMode := AMode;
+
+  { Project.Tracks holds the UI/offline copy of the clip. The realtime
+    audio thread plays from its OWN fixed-size TPlaybackClip copy (see
+    CLAUDE.md "Two independently-maintained copies of the warp/pitch
+    algorithm") and only ever picks up a change when PushTrackToEngine
+    sends a fresh snapshot up the ring buffer. The old single-toggle
+    handler never called this, so WarpMode changed in the data model and
+    on screen but never audibly - clicking it did nothing you could hear. }
+  FArrangementView.PushTrackToEngine(Track);
+
+  UpdateWarpModeButtons;
   FArrangementView.RefreshTrack(Track);
   FWarpEditor.Invalidate;
 end;
@@ -1264,30 +1336,38 @@ begin
     FSwingValueLabel.Caption := IntToStr(SwingDetents[BestIdx]) + '%';
 end;
 
-procedure TForm1.UpdateWarpRepitchToggleLook;
+procedure TForm1.UpdateWarpModeButtons;
 begin
-  { Caption names the mode that's CURRENTLY ACTIVE, not the button's own
-    pressed state and not what clicking it does - a static "RP" label that
-    only changed color read as ambiguous (easy to miss which of two similar
-    shades is "on"). Two different two-letter labels plus two very
-    different hues together tell the mode at a glance even in a small
-    button, and don't rely on Down's native pressed-look at all. }
-  if FWarpRepitchToggle.Down then
+  { Two separate buttons instead of one relabeling toggle: whichever mode is
+    ACTIVE gets a bright, distinct color and stays visibly pressed (native
+    GroupIndex behavior); the inactive one goes back to plain button face.
+    Two different fixed captions ("RP" always means RePitch, "BT" always
+    means Beats) plus which one is lit together remove any doubt about
+    which mode a clip is in - nothing here relies on a single button
+    renaming itself. }
+  if FWarpRepitchButton.Down then
   begin
-    FWarpRepitchToggle.Caption := 'RP';
-    FWarpRepitchToggle.Color := clLime;
-    FWarpRepitchToggle.Font.Color := clBlack;
-    FWarpRepitchToggle.Hint := 'Warp mode: Re-Pitch (continuous vari-speed, changes pitch)' +
-      LineEnding + 'Click for Beats mode (grain-based, preserves pitch)';
+    FWarpRepitchButton.Color := clLime;
+    FWarpRepitchButton.Font.Color := clBlack;
   end
   else
   begin
-    FWarpRepitchToggle.Caption := 'BT';
-    FWarpRepitchToggle.Color := clSkyBlue;
-    FWarpRepitchToggle.Font.Color := clBlack;
-    FWarpRepitchToggle.Hint := 'Warp mode: Beats (grain-based, preserves pitch)' +
-      LineEnding + 'Click for Re-Pitch mode (continuous vari-speed, changes pitch)';
+    FWarpRepitchButton.Color := clBtnFace;
+    FWarpRepitchButton.Font.Color := clWindowText;
   end;
+  FWarpRepitchButton.Hint := 'Warp mode: Re-Pitch (continuous vari-speed, changes pitch)';
+
+  if FWarpBeatsButton.Down then
+  begin
+    FWarpBeatsButton.Color := clSkyBlue;
+    FWarpBeatsButton.Font.Color := clBlack;
+  end
+  else
+  begin
+    FWarpBeatsButton.Color := clBtnFace;
+    FWarpBeatsButton.Font.Color := clWindowText;
+  end;
+  FWarpBeatsButton.Hint := 'Warp mode: Beats (grain-based, preserves pitch)';
 end;
 
 procedure TForm1.ClipGainSliderChange(Sender: TObject);

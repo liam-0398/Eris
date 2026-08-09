@@ -85,7 +85,6 @@ type
     function HitTestVolumeSlider(ATrackIndex, Y: Integer): Boolean;
     function MuteButtonRect(ATrackIndex: Integer): TRect;
     procedure SelectClip(ATrack, AClip: Integer);
-    procedure PushTrackToEngine(ATrackIndex: Integer);
     procedure UpdateEngineLoop;
     procedure SetScrollFrame(AFrame: Int64);
     procedure UpdateScrollBarRange;
@@ -112,6 +111,7 @@ type
   public
     constructor Create(AOwner: TComponent); override;
     procedure RefreshTrack(ATrackIndex: Integer);
+    procedure PushTrackToEngine(ATrackIndex: Integer);
     procedure SetCursorFrame(AFrameOffset: Int64);
     procedure ClearSelection;
     procedure ZoomIn;
