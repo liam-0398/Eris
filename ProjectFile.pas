@@ -340,9 +340,9 @@ begin
 
         for Frame := 0 to Clip.Length - 1 do
         begin
-          SrcPos := Clip.Offset + WarpedSourcePosition(Clip.WarpMarkers, Frame,
-            Sample.Data, Sample.FrameCount, Sample.Channels, AudioEngine.ProjectSampleRate,
-            Clip.WarpMode);
+          SrcPos := Clip.Offset + DetunedSourcePosition(Clip.WarpMarkers, Frame,
+            Clip.PitchSemitones, Sample.Data, Sample.FrameCount, Sample.Channels,
+            AudioEngine.ProjectSampleRate, Clip.WarpMode);
           if (SrcPos < 0) or (SrcPos >= Sample.FrameCount) then
             Continue;
 

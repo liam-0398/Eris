@@ -402,6 +402,7 @@ begin
     Items[i].Position := Clip.Position;
     Items[i].Gain := Clip.Gain * Project.TrackVolume[ATrackIndex];
     Items[i].WarpMode := Clip.WarpMode;
+    Items[i].DetuneSemitones := Clip.PitchSemitones;
 
     MarkerCount := Length(Clip.WarpMarkers);
     if MarkerCount > MaxClipWarpMarkers then

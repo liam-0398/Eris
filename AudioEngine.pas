@@ -21,6 +21,8 @@ type
     MarkerSource: array[0..MaxClipWarpMarkers - 1] of Int64;
     MarkerTimeline: array[0..MaxClipWarpMarkers - 1] of Int64;
     WarpMode: Integer; { 0 = Beats (loop/truncate, preserves pitch), 1 = RePitch (vari-speed) }
+    DetuneSemitones: Single; { independent pitch trim that never changes the
+      clip's own Length/Position - see DetunedClipSourcePosition }
   end;
   PPlaybackClip = ^TPlaybackClip;
 
@@ -463,6 +465,57 @@ begin
     Result := LoopRegionStart + (Phase - LoopLen);
 end;
 
+{ Independent per-clip pitch trim (the "Detune" slider) that never touches
+  Length/Position - added on top of ClipSourcePosition rather than inside
+  it, so Beats/RePitch warping itself is completely untouched.
+
+  Splits the timeline into small fixed grains (DetuneGrainMs each). Each
+  grain's own natural source span is whatever ClipSourcePosition already
+  says it should be (its start/end anchors) - that's true regardless of
+  warp mode, so detune composes with either one for free. Within the grain,
+  the source read advances at the pitch-shifted rate instead of 1:1; when
+  that runs past the grain's natural span (pitching up needs less source
+  than the grain's timeline allotment) or would undershoot it (pitching
+  down), it ping-pongs within that exact span - the same "bounce instead of
+  hard-loop" trick already used above for time-stretch, just applied to a
+  much smaller, fixed-size grain. }
+function DetunedClipSourcePosition(Clip: PPlaybackClip; AClipRelativeFrame: Int64): Double;
+const
+  DetuneGrainMs = 25; { small on purpose - keeps the worst-case mismatch at
+    each grain boundary (where this simplified technique can't perfectly
+    reconnect for an arbitrary pitch ratio) as small as practical }
+var
+  Rate, Phase, Period, AnchorStart, AnchorEnd, GrainNaturalSourceLen, ConsumedSource: Double;
+  GrainFrames, GrainIndex, GrainStartTimeline, GrainOffsetIntoGrain: Int64;
+begin
+  if Clip^.DetuneSemitones = 0 then
+    Exit(ClipSourcePosition(Clip, AClipRelativeFrame));
+
+  Rate := Exp((Clip^.DetuneSemitones / 12) * Ln(2));
+  GrainFrames := (DetuneGrainMs * ProjectSampleRate) div 1000;
+  if GrainFrames < 1 then
+    GrainFrames := 1;
+
+  GrainIndex := AClipRelativeFrame div GrainFrames;
+  GrainStartTimeline := GrainIndex * GrainFrames;
+  GrainOffsetIntoGrain := AClipRelativeFrame - GrainStartTimeline;
+
+  AnchorStart := ClipSourcePosition(Clip, GrainStartTimeline);
+  AnchorEnd := ClipSourcePosition(Clip, GrainStartTimeline + GrainFrames);
+  GrainNaturalSourceLen := AnchorEnd - AnchorStart;
+  if GrainNaturalSourceLen < 1 then
+    GrainNaturalSourceLen := 1;
+
+  ConsumedSource := GrainOffsetIntoGrain * Rate;
+
+  Period := 2 * GrainNaturalSourceLen;
+  Phase := ConsumedSource - Trunc(ConsumedSource / Period) * Period;
+  if Phase < GrainNaturalSourceLen then
+    Result := AnchorStart + Phase
+  else
+    Result := AnchorStart + (Period - Phase);
+end;
+
 { SP-1200-style swing: if APosition falls on an odd step of the given
   division (8th or 16th notes), delay it later by a fraction of that step's
   length. ASwingPercent follows the SP-1200's own convention - 50 = straight,
@@ -528,7 +581,7 @@ begin
           if (ClipRelFrame < 0) or (ClipRelFrame >= Clip^.Length) then
             Continue;
 
-          SrcPos := Clip^.Offset + ClipSourcePosition(Clip, ClipRelFrame);
+          SrcPos := Clip^.Offset + DetunedClipSourcePosition(Clip, ClipRelFrame);
           if (SrcPos < 0) or (SrcPos >= Clip^.FrameCount) then
             Continue;
 

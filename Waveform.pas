@@ -78,6 +78,16 @@ function SplitWarpMarkers(const AMarkers: TWarpMarkerArray; ASplitFrame: Int64;
   out ALeftMarkers, ARightMarkers: TWarpMarkerArray;
   AWarpMode: Integer = WarpModeBeats; ASampleRate: Integer = 44100): Int64;
 
+{ Independent per-clip pitch trim (the "Detune" slider) layered on top of
+  WarpedSourcePosition rather than inside it, so Beats/RePitch warping
+  itself is completely untouched by this - see
+  AudioEngine.DetunedClipSourcePosition (the realtime engine's own copy of
+  the identical trick) for the full explanation. Used by offline render
+  (ProjectFile.RenderProjectToWav) so a bounce matches live playback. }
+function DetunedSourcePosition(const AMarkers: TWarpMarkerArray;
+  ATimelineFrame: Int64; ADetuneSemitones: Single; AData: PSingle;
+  AFrameCount, AChannels, ASampleRate: Integer; AWarpMode: Integer): Double;
+
 { Draws the waveform for [AStartFrame, AEndFrame) of a sample (out of
   ATotalFrameCount frames covered by APeaks) into ARect. When AMarkers has
   fewer than 2 entries this is a plain linear stretch; otherwise each pixel
@@ -278,6 +288,46 @@ begin
     Result := LoopRegionEnd - Phase
   else
     Result := LoopRegionStart + (Phase - LoopLen);
+end;
+
+function DetunedSourcePosition(const AMarkers: TWarpMarkerArray;
+  ATimelineFrame: Int64; ADetuneSemitones: Single; AData: PSingle;
+  AFrameCount, AChannels, ASampleRate: Integer; AWarpMode: Integer): Double;
+const
+  DetuneGrainMs = 25; { small on purpose - see AudioEngine.DetunedClipSourcePosition }
+var
+  Rate, Phase, Period, AnchorStart, AnchorEnd, GrainNaturalSourceLen, ConsumedSource: Double;
+  GrainFrames, GrainIndex, GrainStartTimeline, GrainOffsetIntoGrain: Int64;
+begin
+  if ADetuneSemitones = 0 then
+    Exit(WarpedSourcePosition(AMarkers, ATimelineFrame, AData, AFrameCount,
+      AChannels, ASampleRate, AWarpMode));
+
+  Rate := Exp((ADetuneSemitones / 12) * Ln(2));
+  GrainFrames := (DetuneGrainMs * ASampleRate) div 1000;
+  if GrainFrames < 1 then
+    GrainFrames := 1;
+
+  GrainIndex := ATimelineFrame div GrainFrames;
+  GrainStartTimeline := GrainIndex * GrainFrames;
+  GrainOffsetIntoGrain := ATimelineFrame - GrainStartTimeline;
+
+  AnchorStart := WarpedSourcePosition(AMarkers, GrainStartTimeline, AData,
+    AFrameCount, AChannels, ASampleRate, AWarpMode);
+  AnchorEnd := WarpedSourcePosition(AMarkers, GrainStartTimeline + GrainFrames,
+    AData, AFrameCount, AChannels, ASampleRate, AWarpMode);
+  GrainNaturalSourceLen := AnchorEnd - AnchorStart;
+  if GrainNaturalSourceLen < 1 then
+    GrainNaturalSourceLen := 1;
+
+  ConsumedSource := GrainOffsetIntoGrain * Rate;
+
+  Period := 2 * GrainNaturalSourceLen;
+  Phase := ConsumedSource - Trunc(ConsumedSource / Period) * Period;
+  if Phase < GrainNaturalSourceLen then
+    Result := AnchorStart + Phase
+  else
+    Result := AnchorStart + (Period - Phase);
 end;
 
 function SplitWarpMarkers(const AMarkers: TWarpMarkerArray; ASplitFrame: Int64;

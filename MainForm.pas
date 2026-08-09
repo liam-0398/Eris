@@ -25,6 +25,11 @@ type
       { SP-1200's own swing settings: 50 = straight/off, then its five real
         detents. Slider Position is an index into this array. }
       SwingDetents: array[0..5] of Integer = (50, 54, 58, 63, 67, 71);
+      { per-clip gain trim and pitch detune, shown on the warp widget }
+      ClipGainMinDb = -24;
+      ClipGainMaxDb = 24;
+      ClipDetuneMinSemitones = -12;
+      ClipDetuneMaxSemitones = 12;
     var
     FMainMenu: TMainMenu;
     FTransportPanel: TPanel;
@@ -60,6 +65,10 @@ type
     FWarpWidget: TPanel;
     FWarpEditor: TWarpEditor;
     FWarpRepitchToggle: TSpeedButton;
+    FClipGainSlider: TTrackBar;
+    FClipGainValueLabel: TLabel;
+    FClipDetuneSlider: TTrackBar;
+    FClipDetuneValueLabel: TLabel;
     FInstrumentEditorWidget: TPanel;
     FInstrumentEditor: TInstrumentEditor;
     FDeviceScrollBar: TScrollBar;
@@ -107,6 +116,9 @@ type
     procedure InstrumentEditorChanged(Sender: TObject);
     procedure WarpRepitchToggleClick(Sender: TObject);
     procedure UpdateWarpRepitchToggleLook;
+    procedure ClipGainSliderChange(Sender: TObject);
+    procedure ClipDetuneSliderChange(Sender: TObject);
+    procedure UpdateClipControls;
     procedure MetronomeToggleClick(Sender: TObject);
     procedure UpdateMetronomeToggleLook;
     procedure SwingDivisionButtonClick(Sender: TObject);
@@ -284,7 +296,8 @@ procedure TForm1.BuildLayout;
   end;
 
 var
-  WarpButtonsPanel: TPanel;
+  WarpButtonsPanel, ClipControlsPanel: TPanel;
+  GainLbl, DetuneLbl: TLabel;
 begin
   Width := 1280;
   Height := 800;
@@ -538,6 +551,70 @@ begin
   FWarpRepitchToggle.Hint := 'Re-Pitch warp mode (continuous vari-speed, changes pitch)' +
     LineEnding + 'instead of the default Beats mode (preserves pitch)';
   FWarpRepitchToggle.OnClick := @WarpRepitchToggleClick;
+
+  { per-clip gain trim and pitch detune - sits between the zoom/RP button
+    column and the waveform itself. Detune never changes the clip's own
+    Length/Position (see AudioEngine.DetunedClipSourcePosition) - it's an
+    independent pitch nudge, not a re-warp. }
+  ClipControlsPanel := TPanel.Create(Self);
+  ClipControlsPanel.Parent := FWarpWidget;
+  ClipControlsPanel.Align := alLeft;
+  ClipControlsPanel.Width := Px(80);
+  ClipControlsPanel.BevelOuter := bvNone;
+
+  GainLbl := TLabel.Create(Self);
+  GainLbl.Parent := ClipControlsPanel;
+  GainLbl.Left := Px(4);
+  GainLbl.Top := Px(4);
+  GainLbl.Caption := 'Gain';
+
+  FClipGainSlider := TTrackBar.Create(Self);
+  FClipGainSlider.Parent := ClipControlsPanel;
+  FClipGainSlider.Left := Px(4);
+  FClipGainSlider.Top := Px(20);
+  FClipGainSlider.Width := Px(32);
+  FClipGainSlider.Height := Px(130);
+  FClipGainSlider.Orientation := trVertical;
+  FClipGainSlider.Reversed := True; { up = more gain, same convention as the EQ }
+  FClipGainSlider.Min := ClipGainMinDb;
+  FClipGainSlider.Max := ClipGainMaxDb;
+  FClipGainSlider.Position := 0;
+  FClipGainSlider.ShowHint := True;
+  FClipGainSlider.Hint := 'Clip gain trim (dB)';
+  FClipGainSlider.OnChange := @ClipGainSliderChange;
+
+  FClipGainValueLabel := TLabel.Create(Self);
+  FClipGainValueLabel.Parent := ClipControlsPanel;
+  FClipGainValueLabel.Left := Px(4);
+  FClipGainValueLabel.Top := Px(154);
+  FClipGainValueLabel.Caption := '0 dB';
+
+  DetuneLbl := TLabel.Create(Self);
+  DetuneLbl.Parent := ClipControlsPanel;
+  DetuneLbl.Left := Px(42);
+  DetuneLbl.Top := Px(4);
+  DetuneLbl.Caption := 'Detune';
+
+  FClipDetuneSlider := TTrackBar.Create(Self);
+  FClipDetuneSlider.Parent := ClipControlsPanel;
+  FClipDetuneSlider.Left := Px(42);
+  FClipDetuneSlider.Top := Px(20);
+  FClipDetuneSlider.Width := Px(32);
+  FClipDetuneSlider.Height := Px(130);
+  FClipDetuneSlider.Orientation := trVertical;
+  FClipDetuneSlider.Reversed := True; { up = higher pitch }
+  FClipDetuneSlider.Min := ClipDetuneMinSemitones;
+  FClipDetuneSlider.Max := ClipDetuneMaxSemitones;
+  FClipDetuneSlider.Position := 0;
+  FClipDetuneSlider.ShowHint := True;
+  FClipDetuneSlider.Hint := 'Pitch detune (semitones) - does not change the clip''s length';
+  FClipDetuneSlider.OnChange := @ClipDetuneSliderChange;
+
+  FClipDetuneValueLabel := TLabel.Create(Self);
+  FClipDetuneValueLabel.Parent := ClipControlsPanel;
+  FClipDetuneValueLabel.Left := Px(42);
+  FClipDetuneValueLabel.Top := Px(154);
+  FClipDetuneValueLabel.Caption := '0 st';
 
   FWarpEditor := TWarpEditor.Create(Self);
   FWarpEditor.Parent := FWarpWidget;
@@ -1000,6 +1077,7 @@ begin
       Project.Tracks[FArrangementView.SelectedTrack].Clips[FArrangementView.SelectedClipIndex].WarpMode
       = SampleTypes.WarpModeRePitch;
     UpdateWarpRepitchToggleLook;
+    UpdateClipControls;
   end
   else
     FWarpWidget.Visible := False;
@@ -1148,6 +1226,55 @@ begin
     FWarpRepitchToggle.Color := clBtnFace;
     FWarpRepitchToggle.Font.Color := clWindowText;
   end;
+end;
+
+procedure TForm1.ClipGainSliderChange(Sender: TObject);
+var
+  Track, ClipIdx: Integer;
+  GainDb: Integer;
+begin
+  Track := FArrangementView.SelectedTrack;
+  ClipIdx := FArrangementView.SelectedClipIndex;
+  if (Track < 0) or (ClipIdx < 0) or (ClipIdx > High(Project.Tracks[Track].Clips)) then
+    Exit;
+  GainDb := FClipGainSlider.Position;
+  Project.Tracks[Track].Clips[ClipIdx].Gain := Power(10, GainDb / 20);
+  FClipGainValueLabel.Caption := Format('%d dB', [GainDb]);
+  FArrangementView.RefreshTrack(Track);
+end;
+
+procedure TForm1.ClipDetuneSliderChange(Sender: TObject);
+var
+  Track, ClipIdx: Integer;
+  Semitones: Integer;
+begin
+  Track := FArrangementView.SelectedTrack;
+  ClipIdx := FArrangementView.SelectedClipIndex;
+  if (Track < 0) or (ClipIdx < 0) or (ClipIdx > High(Project.Tracks[Track].Clips)) then
+    Exit;
+  Semitones := FClipDetuneSlider.Position;
+  Project.Tracks[Track].Clips[ClipIdx].PitchSemitones := Semitones;
+  FClipDetuneValueLabel.Caption := Format('%d st', [Semitones]);
+  FArrangementView.RefreshTrack(Track);
+end;
+
+procedure TForm1.UpdateClipControls;
+var
+  Track, ClipIdx, GainDb: Integer;
+begin
+  Track := FArrangementView.SelectedTrack;
+  ClipIdx := FArrangementView.SelectedClipIndex;
+  if (Track < 0) or (ClipIdx < 0) or (ClipIdx > High(Project.Tracks[Track].Clips)) then
+    Exit;
+
+  GainDb := Round(20 * Log10(Project.Tracks[Track].Clips[ClipIdx].Gain));
+  if GainDb < ClipGainMinDb then GainDb := ClipGainMinDb;
+  if GainDb > ClipGainMaxDb then GainDb := ClipGainMaxDb;
+  FClipGainSlider.Position := GainDb;
+  FClipGainValueLabel.Caption := Format('%d dB', [GainDb]);
+
+  FClipDetuneSlider.Position := Round(Project.Tracks[Track].Clips[ClipIdx].PitchSemitones);
+  FClipDetuneValueLabel.Caption := Format('%d st', [FClipDetuneSlider.Position]);
 end;
 
 procedure TForm1.WarpZoomInClick(Sender: TObject);
