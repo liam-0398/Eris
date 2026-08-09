@@ -5,7 +5,10 @@ unit WavDecoder;
 interface
 
 uses
-  Classes, SysUtils, SampleTypes;
+  Classes, SysUtils, SampleTypes, AiffDecoder;
+  { Mp3Decoder is not wired in yet - it doesn't exist as a unit yet, this
+    is a deliberate midpoint so AIFF support and the sample-load thread fix
+    can be built and tested independently of the still-unwritten MP3 port }
 
 type
   TDecodeFunc = function(const APath: string; out ASample: TSample): Boolean;
@@ -242,8 +245,11 @@ begin
 end;
 
 const
-  Decoders: array[0..0] of TDecoderEntry = (
-    (Ext: '.wav'; Decode: @DecodeWav)
+  Decoders: array[0..2] of TDecoderEntry = (
+    (Ext: '.wav'; Decode: @DecodeWav),
+    (Ext: '.aiff'; Decode: @DecodeAiff),
+    (Ext: '.aif'; Decode: @DecodeAiff)
+    { .mp3 added once Mp3Decoder exists }
   );
 
 function DecodeSampleFile(const APath: string; out ASample: TSample): Boolean;

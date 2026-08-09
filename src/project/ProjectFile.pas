@@ -197,9 +197,16 @@ type
 
 constructor TSampleLoadThread.Create(const AJobs: TSampleLoadJobArray);
 begin
-  inherited Create(True); { suspended - Execute won't run before Start }
-  FreeOnTerminate := False;
+  { fields are set BEFORE calling the inherited constructor, which starts
+    the thread immediately (CreateSuspended=False) - Execute only ever
+    sees a fully-populated FJobs. Matches AudioEngine.TPlaybackThread, the
+    only other TThread in this codebase: suspended creation (Create(True)
+    + a later .Start) hung indefinitely here - FPC's suspended-thread
+    emulation on Linux/cthreads never actually resumed, so WaitFor blocked
+    the GUI thread forever on every project open. }
   FJobs := Copy(AJobs, 0, Length(AJobs));
+  inherited Create(False);
+  FreeOnTerminate := False;
 end;
 
 procedure TSampleLoadThread.Execute;
@@ -250,6 +257,8 @@ begin
   ChunkSize := (Length(AJobs) + ThreadCount - 1) div ThreadCount;
   SetLength(Threads, ThreadCount);
 
+  { each thread starts running as soon as it's constructed (Create(False) -
+    see the constructor's comment) - no separate Start pass needed }
   for w := 0 to ThreadCount - 1 do
   begin
     StartIdx := w * ChunkSize;
@@ -259,8 +268,6 @@ begin
     Threads[w] := TSampleLoadThread.Create(Copy(AJobs, StartIdx, EndIdx - StartIdx));
   end;
 
-  for w := 0 to ThreadCount - 1 do
-    Threads[w].Start;
   for w := 0 to ThreadCount - 1 do
   begin
     Threads[w].WaitFor;

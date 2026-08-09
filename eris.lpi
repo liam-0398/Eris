@@ -34,105 +34,105 @@
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
-        <Filename Value="MainForm.pas"/>
+        <Filename Value="src/ui/MainForm.pas"/>
         <IsPartOfProject Value="True"/>
         <ComponentName Value="Form1"/>
         <ResourceBaseClass Value="Form"/>
       </Unit>
       <Unit>
-        <Filename Value="ArrangementView.pas"/>
+        <Filename Value="src/ui/ArrangementView.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
-        <Filename Value="PrefsForm.pas"/>
+        <Filename Value="src/ui/PrefsForm.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
-        <Filename Value="FileBrowser.pas"/>
+        <Filename Value="src/ui/FileBrowser.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
-        <Filename Value="ALSA.pas"/>
+        <Filename Value="src/abackend/ALSA.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
-        <Filename Value="AudioBackend.pas"/>
+        <Filename Value="src/abackend/AudioBackend.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
-        <Filename Value="ALSABackend.pas"/>
+        <Filename Value="src/abackend/ALSABackend.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
-        <Filename Value="SampleTypes.pas"/>
+        <Filename Value="src/util/SampleTypes.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
-        <Filename Value="WavDecoder.pas"/>
+        <Filename Value="src/util/WavDecoder.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
-        <Filename Value="AudioEngine.pas"/>
+        <Filename Value="src/aengine/AudioEngine.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
-        <Filename Value="ClipOverwrite.pas"/>
+        <Filename Value="src/project/ClipOverwrite.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
-        <Filename Value="Project.pas"/>
+        <Filename Value="src/project/Project.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
-        <Filename Value="Resample.pas"/>
+        <Filename Value="src/aengine/Resample.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
-        <Filename Value="ProjectFile.pas"/>
+        <Filename Value="src/project/ProjectFile.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
-        <Filename Value="Waveform.pas"/>
+        <Filename Value="src/aengine/Waveform.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
-        <Filename Value="WarpEditor.pas"/>
+        <Filename Value="src/ui/WarpEditor.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
-        <Filename Value="InstrumentEditor.pas"/>
+        <Filename Value="src/ui/InstrumentEditor.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
-        <Filename Value="SP1200.pas"/>
+        <Filename Value="src/aengine/SP1200.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
-        <Filename Value="BiquadFilters.pas"/>
+        <Filename Value="src/aengine/BiquadFilters.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
-        <Filename Value="Effects.pas"/>
+        <Filename Value="src/aengine/Effects.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
-        <Filename Value="EffectsRack.pas"/>
+        <Filename Value="src/ui/EffectsRack.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
-        <Filename Value="TarArchive.pas"/>
+        <Filename Value="src/util/TarArchive.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
-        <Filename Value="UIScale.pas"/>
+        <Filename Value="src/ui/UIScale.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
-        <Filename Value="DirectSound.pas"/>
+        <Filename Value="src/abackend/DirectSound.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
-        <Filename Value="DirectSoundBackend.pas"/>
+        <Filename Value="src/abackend/DirectSoundBackend.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit>
     </Units>
@@ -143,6 +143,7 @@
       <Filename Value="eris"/>
     </Target>
     <SearchPaths>
+      <OtherUnitFiles Value="src/aengine;src/abackend;src/project;src/ui;src/util"/>
       <IncludeFiles Value="$(ProjOutDir)"/>
       <UnitOutputDirectory Value="lib/$(TargetCPU)-$(TargetOS)"/>
     </SearchPaths>

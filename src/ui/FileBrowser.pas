@@ -20,7 +20,7 @@ type
     FListBox: TListBox;
     FCurrentDir: string;
     FOnFileActivate: TFileActivateEvent;
-    function HasWavExtension(const AName: string): Boolean;
+    function HasSampleExtension(const AName: string): Boolean;
     procedure Populate;
     procedure ListBoxDblClick(Sender: TObject);
     procedure HomeButtonClick(Sender: TObject);
@@ -36,7 +36,10 @@ type
 implementation
 
 const
-  WavExtension = '.wav';
+  { every extension DecodeSampleFile can actually open - kept in sync with
+    WavDecoder's own Decoders table by hand, since this panel only lists
+    files, it doesn't decode them }
+  SampleExtensions: array[0..3] of string = ('.wav', '.aiff', '.aif', '.mp3');
   DefaultBrowseDir = '/NFS/Music/Production/';
 
 constructor TFileBrowser.Create(AOwner: TComponent);
@@ -97,11 +100,16 @@ begin
     SetDirectory(GetUserDir);
 end;
 
-function TFileBrowser.HasWavExtension(const AName: string): Boolean;
+function TFileBrowser.HasSampleExtension(const AName: string): Boolean;
+var
+  Ext: string;
+  i: Integer;
 begin
-  Result := (Length(AName) > Length(WavExtension)) and
-    (CompareText(Copy(AName, Length(AName) - Length(WavExtension) + 1,
-      Length(WavExtension)), WavExtension) = 0);
+  Result := False;
+  Ext := LowerCase(ExtractFileExt(AName));
+  for i := 0 to High(SampleExtensions) do
+    if Ext = SampleExtensions[i] then
+      Exit(True);
 end;
 
 procedure TFileBrowser.Populate;
@@ -123,7 +131,7 @@ begin
           Continue;
         if (SearchRec.Attr and faDirectory) <> 0 then
           Dirs.Add(SearchRec.Name + PathDelim)
-        else if HasWavExtension(SearchRec.Name) then
+        else if HasSampleExtension(SearchRec.Name) then
           Files.Add(SearchRec.Name);
       until FindNext(SearchRec) <> 0;
       FindClose(SearchRec);
