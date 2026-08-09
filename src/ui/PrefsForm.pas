@@ -19,6 +19,7 @@ type
     FCancelButton: TButton;
     procedure BuildLayout;
     procedure SP1200ComboChange(Sender: TObject);
+    procedure OKButtonClick(Sender: TObject);
   public
     constructor Create(AOwner: TComponent); override;
   end;
@@ -37,6 +38,8 @@ begin
 end;
 
 procedure TPrefsForm.BuildLayout;
+var
+  CurrentBufferSizeIdx: Integer;
 
   function AddRow(const ALabel: string; ATop: Integer): TComboBox;
   var
@@ -83,7 +86,12 @@ begin
   FBufferSizeCombo.Items.Add('512');
   FBufferSizeCombo.Items.Add('1024');
   FBufferSizeCombo.Items.Add('2048');
-  FBufferSizeCombo.ItemIndex := 2;
+  CurrentBufferSizeIdx := FBufferSizeCombo.Items.IndexOf(
+    IntToStr(AudioEngineGetBufferSize));
+  if CurrentBufferSizeIdx >= 0 then
+    FBufferSizeCombo.ItemIndex := CurrentBufferSizeIdx
+  else
+    FBufferSizeCombo.ItemIndex := 2;
 
   FSP1200Combo := AddRow('SP-1200 emulation:', 160);
   FSP1200Combo.Items.Add('Off');
@@ -102,6 +110,7 @@ begin
   FOKButton.Top := 200;
   FOKButton.Width := 75;
   FOKButton.Default := True;
+  FOKButton.OnClick := @OKButtonClick;
 
   FCancelButton := TButton.Create(Self);
   FCancelButton.Parent := Self;
@@ -116,6 +125,18 @@ end;
 procedure TPrefsForm.SP1200ComboChange(Sender: TObject);
 begin
   AudioEngineSetSP1200Enabled(FSP1200Combo.ItemIndex = 1);
+end;
+
+procedure TPrefsForm.OKButtonClick(Sender: TObject);
+var
+  NewBufferSize: Integer;
+begin
+  { applied on OK rather than on the combo's own OnChange, unlike SP-1200
+    above - this one stops/reopens the audio backend (see
+    AudioEngineSetBufferSize), which would otherwise restart on every
+    keystroke/scroll through the dropdown }
+  if TryStrToInt(FBufferSizeCombo.Text, NewBufferSize) then
+    AudioEngineSetBufferSize(NewBufferSize);
 end;
 
 end.

@@ -773,6 +773,7 @@ begin
 
     FCurrentProjectPath := Dlg.FileName;
     RefreshAllTracksUI;
+    ShowMessage('Loaded "' + Dlg.FileName + '".');
   finally
     Dlg.Free;
   end;
@@ -783,7 +784,9 @@ begin
   if FCurrentProjectPath = '' then
     FileSaveAsClick(Sender)
   else if not SaveProject(FCurrentProjectPath) then
-    ShowMessage('Could not save project "' + FCurrentProjectPath + '".');
+    ShowMessage('Could not save project "' + FCurrentProjectPath + '".')
+  else
+    ShowMessage('Saved "' + FCurrentProjectPath + '".');
 end;
 
 procedure TForm1.FileSaveAsClick(Sender: TObject);
@@ -810,6 +813,7 @@ begin
     end;
 
     FCurrentProjectPath := Path;
+    ShowMessage('Saved "' + Path + '".');
   finally
     Dlg.Free;
   end;

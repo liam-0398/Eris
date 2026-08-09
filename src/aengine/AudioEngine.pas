@@ -50,6 +50,13 @@ function AudioEngineGetSP1200Enabled: Boolean;
 procedure AudioEngineSetMetronomeEnabled(AEnabled: Boolean);
 function AudioEngineGetMetronomeEnabled: Boolean;
 
+{ Buffer size (frames per callback). Changing it stops the realtime thread,
+  closes the backend, reopens it at the new size, and restarts the thread -
+  fully serialized on the calling (main) thread, per CLAUDE.md's rule for
+  runtime backend/device changes. Must not be called from the audio thread. }
+function AudioEngineGetBufferSize: Integer;
+procedure AudioEngineSetBufferSize(ANewBufferSize: Integer);
+
 { SP-1200-style per-track swing, shared by the realtime engine (FillBlock)
   and the offline render path (ProjectFile.RenderProjectToWav) so bounced
   audio can never drift from what was heard live. See the implementation
@@ -80,7 +87,7 @@ uses
   Resample, Project, SP1200, Effects;
 
 const
-  BlockFrames = 512;
+  DefaultBlockFrames = 512;
   OutputChannels = 2;
   RingBufferCapacity = 32;
   MaxTracks = Project.MaxTracks;
@@ -132,6 +139,7 @@ type
 
 var
   Backend: TAudioBackend;
+  BlockFrames: Integer;
   PlaybackThread: TPlaybackThread;
   MixBuffer: PSingle;
 
@@ -1112,6 +1120,7 @@ begin
   for e := 0 to Effects.MaxEffectsPerTrack - 1 do
     Effects.EffectStateReset(MasterEffectState[e]);
 
+  BlockFrames := DefaultBlockFrames;
   GetMem(MixBuffer, BlockFrames * OutputChannels * SizeOf(Single));
 
   RecordCapacityFrames := MaxRecordSeconds * ProjectSampleRate;
@@ -1289,6 +1298,38 @@ end;
 function AudioEngineGetMetronomeEnabled: Boolean;
 begin
   Result := MetronomeEnabled;
+end;
+
+function AudioEngineGetBufferSize: Integer;
+begin
+  Result := BlockFrames;
+end;
+
+procedure AudioEngineSetBufferSize(ANewBufferSize: Integer);
+begin
+  if ANewBufferSize = BlockFrames then
+    Exit;
+
+  { fully stop the realtime thread before touching Backend/MixBuffer - same
+    ordering as AudioEngineShutdown, so the callback can never run against a
+    closed device or a buffer sized for the old BlockFrames }
+  if PlaybackThread <> nil then
+  begin
+    PlaybackThread.Terminate;
+    PlaybackThread.WaitFor;
+    FreeAndNil(PlaybackThread);
+  end;
+
+  Backend.Close;
+
+  FreeMem(MixBuffer);
+  BlockFrames := ANewBufferSize;
+  GetMem(MixBuffer, BlockFrames * OutputChannels * SizeOf(Single));
+
+  Backend.Open(ProjectSampleRate, OutputChannels, BlockFrames);
+
+  PlaybackThread := TPlaybackThread.Create(False);
+  PlaybackThread.FreeOnTerminate := False;
 end;
 
 procedure AudioEngineStartCountIn(ATrackIndex: Integer);
