@@ -166,13 +166,115 @@ begin
   DeleteDirectory(Dir, False);
 end;
 
+const
+  { decode + peak/transient analysis is pure CPU+file-I/O work with no
+    shared mutable state (WavDecoder's only global is a read-only decoder
+    table; ComputeWaveformPeaks/DetectTransients touch only their own
+    arguments) - safe to fan out across threads. Capped at a small fixed
+    count rather than querying core count, matching the project's "keep
+    dependencies short" preference over pulling in a CPU-count API. }
+  MaxSampleLoadThreads = 4;
+
+type
+  TSampleLoadJob = record
+    Index: Integer;
+    StoredPath, ResolvedPath: string;
+  end;
+  TSampleLoadJobArray = array of TSampleLoadJob;
+
+  { Each thread owns a disjoint slice of sample-pool indices, pre-sized by
+    the caller before any thread starts - writes to Project.SamplePool[i]
+    etc. from different threads never touch the same array element, so no
+    locking is needed despite the arrays being shared globals. }
+  TSampleLoadThread = class(TThread)
+  private
+    FJobs: TSampleLoadJobArray;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(const AJobs: TSampleLoadJobArray);
+  end;
+
+constructor TSampleLoadThread.Create(const AJobs: TSampleLoadJobArray);
+begin
+  inherited Create(True); { suspended - Execute won't run before Start }
+  FreeOnTerminate := False;
+  FJobs := Copy(AJobs, 0, Length(AJobs));
+end;
+
+procedure TSampleLoadThread.Execute;
+var
+  i, Idx: Integer;
+  Sample, EmptySample: TSample;
+begin
+  FillChar(EmptySample, SizeOf(EmptySample), 0);
+  for i := 0 to High(FJobs) do
+  begin
+    Idx := FJobs[i].Index;
+    if DecodeSampleFile(FJobs[i].ResolvedPath, Sample) then
+    begin
+      Project.SamplePool[Idx] := Sample;
+      Project.SampleNames[Idx] := ExtractFileName(FJobs[i].StoredPath);
+    end
+    else
+    begin
+      Project.SamplePool[Idx] := EmptySample;
+      Project.SampleNames[Idx] := '(missing: ' + ExtractFileName(FJobs[i].StoredPath) + ')';
+    end;
+    Project.SamplePaths[Idx] := FJobs[i].StoredPath;
+    { mirrors Project.AddSampleToPool exactly - analyze whatever ended up
+      in the pool slot, real or empty }
+    Project.SamplePeaks[Idx] := ComputeWaveformPeaks(Project.SamplePool[Idx]);
+    Project.SampleTransients[Idx] := DetectTransients(Project.SamplePool[Idx].Data,
+      Project.SamplePool[Idx].FrameCount, Project.SamplePool[Idx].Channels,
+      Project.SamplePool[Idx].SampleRate);
+  end;
+end;
+
+{ Decodes every sample referenced by the project in parallel. Project.
+  SamplePool/SampleNames/SamplePaths/SamplePeaks/SampleTransients must
+  already be sized to Length(AJobs) - each job's Index is its slot in
+  those arrays - before this is called. }
+procedure LoadSamplesThreaded(const AJobs: TSampleLoadJobArray);
+var
+  ThreadCount, ChunkSize, w, StartIdx, EndIdx: Integer;
+  Threads: array of TSampleLoadThread;
+begin
+  if Length(AJobs) = 0 then
+    Exit;
+
+  ThreadCount := Length(AJobs);
+  if ThreadCount > MaxSampleLoadThreads then
+    ThreadCount := MaxSampleLoadThreads;
+
+  ChunkSize := (Length(AJobs) + ThreadCount - 1) div ThreadCount;
+  SetLength(Threads, ThreadCount);
+
+  for w := 0 to ThreadCount - 1 do
+  begin
+    StartIdx := w * ChunkSize;
+    EndIdx := StartIdx + ChunkSize;
+    if EndIdx > Length(AJobs) then
+      EndIdx := Length(AJobs);
+    Threads[w] := TSampleLoadThread.Create(Copy(AJobs, StartIdx, EndIdx - StartIdx));
+  end;
+
+  for w := 0 to ThreadCount - 1 do
+    Threads[w].Start;
+  for w := 0 to ThreadCount - 1 do
+  begin
+    Threads[w].WaitFor;
+    Threads[w].Free;
+  end;
+end;
+
 function LoadProject(const APath: string): Boolean;
 var
   Dir, IniPath, Section, Prefix, StoredPath, ResolvedPath: string;
   Ini: TIniFile;
   t, i, m, e, SampleCount, ClipCount, MarkerCount: Integer;
-  Sample, EmptySample: TSample;
   Clip: TClip;
+  SampleJobs: TSampleLoadJobArray;
 begin
   Result := False;
 
@@ -197,7 +299,6 @@ begin
     Exit;
 
   Project.NewProject;
-  FillChar(EmptySample, SizeOf(EmptySample), 0);
 
   Ini := TIniFile.Create(IniPath);
   try
@@ -216,6 +317,17 @@ begin
       Project.MasterEffects[e] := LoadEffect(Ini, 'Master', 'Effect' + IntToStr(e) + '.');
 
     SampleCount := Ini.ReadInteger('Samples', 'Count', 0);
+
+    { pre-size every output array once, up front, so the worker threads can
+      write to their own disjoint indices with no locking and no risk of a
+      concurrent SetLength reallocating out from under another thread }
+    SetLength(Project.SamplePool, SampleCount);
+    SetLength(Project.SampleNames, SampleCount);
+    SetLength(Project.SamplePaths, SampleCount);
+    SetLength(Project.SamplePeaks, SampleCount);
+    SetLength(Project.SampleTransients, SampleCount);
+
+    SetLength(SampleJobs, SampleCount);
     for i := 0 to SampleCount - 1 do
     begin
       StoredPath := Ini.ReadString('Samples', 'Path' + IntToStr(i), '');
@@ -225,12 +337,12 @@ begin
       if not FileExists(ResolvedPath) then
         ResolvedPath := StoredPath;
 
-      if DecodeSampleFile(ResolvedPath, Sample) then
-        Project.AddSampleToPool(Sample, ExtractFileName(StoredPath), StoredPath)
-      else
-        Project.AddSampleToPool(EmptySample, '(missing: ' + ExtractFileName(StoredPath) + ')',
-          StoredPath);
+      SampleJobs[i].Index := i;
+      SampleJobs[i].StoredPath := StoredPath;
+      SampleJobs[i].ResolvedPath := ResolvedPath;
     end;
+
+    LoadSamplesThreaded(SampleJobs);
 
     for t := 0 to Project.TrackCount - 1 do
     begin
