@@ -9,6 +9,8 @@ non-destructive clip editing with two independent time-warp modes, a
 per-track/master effects chain, and an SP-1200 lo-fi emulation mode baked
 identically into live monitoring and offline export.
 
+DISCLAIMER: HEAVY LLM usage. I know decent Pascal but do not know about audio engineering and decided to just go forth with having an LLM implement what I wanted instead of putting in the years to do it myself. I do plan to rewrite it bit by bit but the focus currently is having a usable DAW that does exactly what I want, written in the language I want and adhering to the constraints I want. Every idea and technical decision is my own but the implementation is brought to you by Claude.  
+
 ## Features
 
 - **Arrangement view**: multi-track linear timeline (up to 16 tracks),
