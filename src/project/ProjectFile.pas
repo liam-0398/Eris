@@ -4,6 +4,79 @@ unit ProjectFile;
 
 interface
 
+uses
+  Classes;
+
+type
+  { Thin TThread wrappers so File > Open/Save/Export and single-file sample
+    import (drag-to-timeline, "use as instrument") can run off the UI
+    thread - Open/Save pack or unpack a tar archive (TarArchive.pas) plus
+    decode every referenced sample, and Export renders the whole
+    arrangement; all four are slow enough on a real project/sample to read
+    as "not responding" if run inline on the calling event handler.
+
+    Same immediate-start pattern as TSampleLoadThread below (Create(True)
+    hangs under FPC's Linux/cthreads suspended-thread emulation - see that
+    class's constructor comment): the caller assigns OnTerminate right
+    after construction, which is safe despite the thread already running,
+    because TThread delivers OnTerminate via Synchronize, and Synchronize
+    can't be serviced until the main thread returns to its message loop -
+    which can't happen before the OnTerminate assignment below does. }
+  TProjectLoadThread = class(TThread)
+  private
+    FPath: string;
+    FSuccess: Boolean;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(const APath: string);
+    property Path: string read FPath;
+    property Success: Boolean read FSuccess;
+  end;
+
+  TProjectSaveThread = class(TThread)
+  private
+    FPath: string;
+    FSuccess: Boolean;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(const APath: string);
+    property Path: string read FPath;
+    property Success: Boolean read FSuccess;
+  end;
+
+  TProjectRenderThread = class(TThread)
+  private
+    FPath: string;
+    FSuccess: Boolean;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(const APath: string);
+    property Path: string read FPath;
+    property Success: Boolean read FSuccess;
+  end;
+
+  { Decodes one sample file and adds it to the pool off the UI thread - the
+    same decode+peak+transient cost LoadSamplesThreaded fans out across a
+    pool for a whole project, here done for the single file a drag-drop or
+    "use as instrument" action just picked. }
+  TSampleImportThread = class(TThread)
+  private
+    FPath: string;
+    FDisplayName: string;
+    FSuccess: Boolean;
+    FSampleID: Integer;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(const APath, ADisplayName: string);
+    property Path: string read FPath;
+    property Success: Boolean read FSuccess;
+    property SampleID: Integer read FSampleID;
+  end;
+
 function SaveProject(const APath: string): Boolean;
 function LoadProject(const APath: string): Boolean;
 function RenderProjectToWav(const AOutputPath: string): Boolean;
@@ -11,8 +84,62 @@ function RenderProjectToWav(const AOutputPath: string): Boolean;
 implementation
 
 uses
-  SysUtils, Classes, IniFiles, FileUtil, SampleTypes, Project, WavDecoder,
-  AudioEngine, Resample, Waveform, SP1200, TarArchive, Effects;
+  SysUtils, IniFiles, FileUtil, SampleTypes, Project, WavDecoder,
+  AudioEngine, Resample, Waveform, SP1200, TarArchive, Effects, ThreadUtil;
+
+constructor TProjectLoadThread.Create(const APath: string);
+begin
+  FPath := APath;
+  FreeOnTerminate := True;
+  inherited Create(False);
+end;
+
+procedure TProjectLoadThread.Execute;
+begin
+  FSuccess := LoadProject(FPath);
+end;
+
+constructor TProjectSaveThread.Create(const APath: string);
+begin
+  FPath := APath;
+  FreeOnTerminate := True;
+  inherited Create(False);
+end;
+
+procedure TProjectSaveThread.Execute;
+begin
+  FSuccess := SaveProject(FPath);
+end;
+
+constructor TProjectRenderThread.Create(const APath: string);
+begin
+  FPath := APath;
+  FreeOnTerminate := True;
+  inherited Create(False);
+end;
+
+procedure TProjectRenderThread.Execute;
+begin
+  FSuccess := RenderProjectToWav(FPath);
+end;
+
+constructor TSampleImportThread.Create(const APath, ADisplayName: string);
+begin
+  FPath := APath;
+  FDisplayName := ADisplayName;
+  FSampleID := -1;
+  FreeOnTerminate := True;
+  inherited Create(False);
+end;
+
+procedure TSampleImportThread.Execute;
+var
+  Sample: TSample;
+begin
+  FSuccess := DecodeSampleFile(FPath, Sample);
+  if FSuccess then
+    FSampleID := Project.AddSampleToPool(Sample, FDisplayName, FPath);
+end;
 
 { Every field of TEffect is written/read unconditionally regardless of Kind -
   it's a flat tagged record, so this is simpler and safer than branching per
@@ -341,14 +468,12 @@ begin
   DeleteDirectory(Dir, False);
 end;
 
-const
-  { decode + peak/transient analysis is pure CPU+file-I/O work with no
-    shared mutable state (WavDecoder's only global is a read-only decoder
-    table; ComputeWaveformPeaks/DetectTransients touch only their own
-    arguments) - safe to fan out across threads. Capped at a small fixed
-    count rather than querying core count, matching the project's "keep
-    dependencies short" preference over pulling in a CPU-count API. }
-  MaxSampleLoadThreads = 4;
+{ decode + peak/transient analysis is pure CPU+file-I/O work with no shared
+  mutable state (WavDecoder's only global is a read-only decoder table;
+  ComputeWaveformPeaks/DetectTransients touch only their own arguments) -
+  safe to fan out across threads. Capped via ThreadUtil.WorkerThreadCap
+  (hardware threads - 1, floor 2) rather than a fixed count, so a big
+  project's sample load actually scales with the machine it's running on. }
 
 type
   TSampleLoadJob = record
@@ -433,8 +558,8 @@ begin
     Exit;
 
   ThreadCount := Length(AJobs);
-  if ThreadCount > MaxSampleLoadThreads then
-    ThreadCount := MaxSampleLoadThreads;
+  if ThreadCount > ThreadUtil.WorkerThreadCap then
+    ThreadCount := ThreadUtil.WorkerThreadCap;
 
   ChunkSize := (Length(AJobs) + ThreadCount - 1) div ThreadCount;
   SetLength(Threads, ThreadCount);

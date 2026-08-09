@@ -7,7 +7,7 @@ interface
 uses
   Classes, SysUtils, Math, Forms, Controls, Graphics, Dialogs, Menus, ExtCtrls,
   StdCtrls, ComCtrls, Buttons, LCLType, ArrangementView, PrefsForm, FileBrowser,
-  SampleTypes, WavDecoder, AudioEngine, Project, ProjectFile, WarpEditor,
+  SampleTypes, AudioEngine, Project, ProjectFile, WarpEditor,
   InstrumentEditor, Effects, EffectsRack, UIScale;
 
 type
@@ -78,10 +78,26 @@ type
     FLastEffectsRackTrack: Integer;
     FPlaybackPollTimer: TTimer;
     FCurrentProjectPath: string;
+    FNewMenuItem: TMenuItem;
+    FOpenMenuItem: TMenuItem;
+    FSaveMenuItem: TMenuItem;
+    FSaveAsMenuItem: TMenuItem;
+    FExportMenuItem: TMenuItem;
+    FBackgroundBusy: Boolean;
+    FPendingImportTrack: Integer;
+    FPendingImportFrame: Int64;
 
     procedure BuildMenu;
     procedure BuildLayout;
     procedure RefreshAllTracksUI;
+    procedure SetBackgroundBusy(ABusy: Boolean; const AStatusText: string;
+      AHideProjectViews: Boolean);
+    procedure StartProjectSave(const APath: string);
+    procedure ProjectLoadThreadTerminate(Sender: TObject);
+    procedure ProjectSaveThreadTerminate(Sender: TObject);
+    procedure ProjectRenderThreadTerminate(Sender: TObject);
+    procedure TimelineImportThreadTerminate(Sender: TObject);
+    procedure InstrumentImportThreadTerminate(Sender: TObject);
 
     procedure FileNewClick(Sender: TObject);
     procedure FileOpenClick(Sender: TObject);
@@ -228,22 +244,22 @@ procedure TForm1.BuildMenu;
 var
   FileMenu, EditMenu, ViewMenu, TrackMenu, HelpMenu, UndoItem,
   ZoomInItem, ZoomOutItem, CopyItem, PasteItem, DuplicateItem, SplitItem,
-  DeleteItem, ConsolidateItem, OpenItem, SaveItem, SaveAsItem,
+  DeleteItem, ConsolidateItem,
   AddTrackItem: TMenuItem;
 begin
   FMainMenu := TMainMenu.Create(Self);
   Menu := FMainMenu;
 
   FileMenu := AddMenu('&File');
-  AddItem(FileMenu, '&New', @FileNewClick);
-  OpenItem := AddItem(FileMenu, '&Open...', @FileOpenClick);
-  OpenItem.ShortCut := Menus.ShortCut(Ord('O'), [ssCtrl]);
-  SaveItem := AddItem(FileMenu, '&Save', @FileSaveClick);
-  SaveItem.ShortCut := Menus.ShortCut(Ord('S'), [ssCtrl]);
-  SaveAsItem := AddItem(FileMenu, 'Save &As...', @FileSaveAsClick);
-  SaveAsItem.ShortCut := Menus.ShortCut(Ord('S'), [ssCtrl, ssShift]);
+  FNewMenuItem := AddItem(FileMenu, '&New', @FileNewClick);
+  FOpenMenuItem := AddItem(FileMenu, '&Open...', @FileOpenClick);
+  FOpenMenuItem.ShortCut := Menus.ShortCut(Ord('O'), [ssCtrl]);
+  FSaveMenuItem := AddItem(FileMenu, '&Save', @FileSaveClick);
+  FSaveMenuItem.ShortCut := Menus.ShortCut(Ord('S'), [ssCtrl]);
+  FSaveAsMenuItem := AddItem(FileMenu, 'Save &As...', @FileSaveAsClick);
+  FSaveAsMenuItem.ShortCut := Menus.ShortCut(Ord('S'), [ssCtrl, ssShift]);
   AddSeparator(FileMenu);
-  AddItem(FileMenu, '&Export...', @FileExportClick);
+  FExportMenuItem := AddItem(FileMenu, '&Export...', @FileExportClick);
   AddSeparator(FileMenu);
   AddItem(FileMenu, 'E&xit', @FileExitClick);
 
@@ -732,8 +748,48 @@ begin
   UpdateDevicePanel;
 end;
 
+{ Central on/off switch for every background project operation (Open/Save/
+  Export/import). Disables the controls that could start a second one or
+  mutate Project state out from under it, and - for Open and import, which
+  actually resize Project.SamplePool/Tracks arrays the arrangement/device
+  panel paint from - hides those views entirely for the duration, since a
+  disabled-but-visible control still paints on any expose event. Save and
+  Export only ever read Project state, so a concurrent (read-only) repaint
+  alongside them is harmless and they don't need hiding. }
+procedure TForm1.SetBackgroundBusy(ABusy: Boolean; const AStatusText: string;
+  AHideProjectViews: Boolean);
+begin
+  FBackgroundBusy := ABusy;
+  FNewMenuItem.Enabled := not ABusy;
+  FOpenMenuItem.Enabled := not ABusy;
+  FSaveMenuItem.Enabled := not ABusy;
+  FSaveAsMenuItem.Enabled := not ABusy;
+  FExportMenuItem.Enabled := not ABusy;
+  FArrangementView.Enabled := not ABusy;
+  FFileBrowser.Enabled := not ABusy;
+  FDevicePanel.Enabled := not ABusy;
+
+  if ABusy and AHideProjectViews then
+  begin
+    FArrangementView.Visible := False;
+    FDevicePanel.Visible := False;
+  end
+  else if not ABusy then
+  begin
+    FArrangementView.Visible := True;
+    FDevicePanel.Visible := True;
+  end;
+
+  if ABusy then
+    Caption := 'Eris - ' + AStatusText
+  else
+    Caption := 'Eris';
+end;
+
 procedure TForm1.FileNewClick(Sender: TObject);
 begin
+  if FBackgroundBusy then
+    Exit;
   { Stop is only a queued command for the audio thread to pick up - if we
     let NewProject free every sample's memory before that thread has
     actually drained it and stopped touching TrackClips/LiveNotes, it can
@@ -751,6 +807,8 @@ procedure TForm1.FileOpenClick(Sender: TObject);
 var
   Dlg: TOpenDialog;
 begin
+  if FBackgroundBusy then
+    Exit;
   Dlg := TOpenDialog.Create(Self);
   try
     Dlg.Title := 'Open Eris Project';
@@ -759,34 +817,48 @@ begin
       Exit;
 
     { see FileNewClick - must be fully stopped (not just have the Stop
-      command queued) before LoadProject's NewProject call frees the old
-      project's sample memory out from under a still-running audio thread }
+      command queued) before the background thread's LoadProject call
+      frees the old project's sample memory out from under a still-running
+      audio thread }
     AudioEngineStop;
     while AudioEngineIsPlaying do
       Sleep(1);
 
-    if not LoadProject(Dlg.FileName) then
-    begin
-      ShowMessage('Could not load project "' + Dlg.FileName + '".');
-      Exit;
-    end;
-
-    FCurrentProjectPath := Dlg.FileName;
-    RefreshAllTracksUI;
-    ShowMessage('Loaded "' + Dlg.FileName + '".');
+    SetBackgroundBusy(True, 'Opening...', True);
+    with TProjectLoadThread.Create(Dlg.FileName) do
+      OnTerminate := @ProjectLoadThreadTerminate;
   finally
     Dlg.Free;
   end;
 end;
 
+procedure TForm1.ProjectLoadThreadTerminate(Sender: TObject);
+var
+  Ok: Boolean;
+  Path: string;
+begin
+  Ok := TProjectLoadThread(Sender).Success;
+  Path := TProjectLoadThread(Sender).Path;
+  SetBackgroundBusy(False, '', False);
+  if not Ok then
+  begin
+    ShowMessage('Could not load project "' + Path + '".');
+    Exit;
+  end;
+
+  FCurrentProjectPath := Path;
+  RefreshAllTracksUI;
+  ShowMessage('Loaded "' + Path + '".');
+end;
+
 procedure TForm1.FileSaveClick(Sender: TObject);
 begin
+  if FBackgroundBusy then
+    Exit;
   if FCurrentProjectPath = '' then
     FileSaveAsClick(Sender)
-  else if not SaveProject(FCurrentProjectPath) then
-    ShowMessage('Could not save project "' + FCurrentProjectPath + '".')
   else
-    ShowMessage('Saved "' + FCurrentProjectPath + '".');
+    StartProjectSave(FCurrentProjectPath);
 end;
 
 procedure TForm1.FileSaveAsClick(Sender: TObject);
@@ -794,6 +866,8 @@ var
   Dlg: TSaveDialog;
   Path: string;
 begin
+  if FBackgroundBusy then
+    Exit;
   Dlg := TSaveDialog.Create(Self);
   try
     Dlg.Title := 'Save Eris Project As';
@@ -806,17 +880,35 @@ begin
     if LowerCase(ExtractFileExt(Path)) <> '.er' then
       Path := Path + '.er';
 
-    if not SaveProject(Path) then
-    begin
-      ShowMessage('Could not save project "' + Path + '".');
-      Exit;
-    end;
-
-    FCurrentProjectPath := Path;
-    ShowMessage('Saved "' + Path + '".');
+    StartProjectSave(Path);
   finally
     Dlg.Free;
   end;
+end;
+
+procedure TForm1.StartProjectSave(const APath: string);
+begin
+  SetBackgroundBusy(True, 'Saving...', False);
+  with TProjectSaveThread.Create(APath) do
+    OnTerminate := @ProjectSaveThreadTerminate;
+end;
+
+procedure TForm1.ProjectSaveThreadTerminate(Sender: TObject);
+var
+  Ok: Boolean;
+  Path: string;
+begin
+  Ok := TProjectSaveThread(Sender).Success;
+  Path := TProjectSaveThread(Sender).Path;
+  SetBackgroundBusy(False, '', False);
+  if not Ok then
+  begin
+    ShowMessage('Could not save project "' + Path + '".');
+    Exit;
+  end;
+
+  FCurrentProjectPath := Path;
+  ShowMessage('Saved "' + Path + '".');
 end;
 
 procedure TForm1.FileExportClick(Sender: TObject);
@@ -824,6 +916,8 @@ var
   Dlg: TSaveDialog;
   Path: string;
 begin
+  if FBackgroundBusy then
+    Exit;
   Dlg := TSaveDialog.Create(Self);
   try
     Dlg.Title := 'Export Arrangement to WAV';
@@ -836,13 +930,26 @@ begin
     if LowerCase(ExtractFileExt(Path)) <> '.wav' then
       Path := Path + '.wav';
 
-    if not RenderProjectToWav(Path) then
-      ShowMessage('Nothing to export - the arrangement is empty.')
-    else
-      ShowMessage('Exported to "' + Path + '".');
+    SetBackgroundBusy(True, 'Exporting...', False);
+    with TProjectRenderThread.Create(Path) do
+      OnTerminate := @ProjectRenderThreadTerminate;
   finally
     Dlg.Free;
   end;
+end;
+
+procedure TForm1.ProjectRenderThreadTerminate(Sender: TObject);
+var
+  Ok: Boolean;
+  Path: string;
+begin
+  Ok := TProjectRenderThread(Sender).Success;
+  Path := TProjectRenderThread(Sender).Path;
+  SetBackgroundBusy(False, '', False);
+  if not Ok then
+    ShowMessage('Nothing to export - the arrangement is empty.')
+  else
+    ShowMessage('Exported to "' + Path + '".');
 end;
 
 procedure TForm1.FileExitClick(Sender: TObject);
@@ -1114,29 +1221,41 @@ end;
 
 procedure TForm1.ArrangementViewFileDrop(Sender: TObject; ATrackIndex: Integer;
   AFramePosition: Int64; const AFilePath: string);
+begin
+  if FBackgroundBusy then
+    Exit;
+  FPendingImportTrack := ATrackIndex;
+  FPendingImportFrame := AFramePosition;
+  SetBackgroundBusy(True, 'Importing...', True);
+  with TSampleImportThread.Create(AFilePath, ExtractFileName(AFilePath)) do
+    OnTerminate := @TimelineImportThreadTerminate;
+end;
+
+procedure TForm1.TimelineImportThreadTerminate(Sender: TObject);
 var
-  Sample: TSample;
+  ImportThread: TSampleImportThread;
   Clip: TClip;
 begin
-  if not DecodeSampleFile(AFilePath, Sample) then
+  ImportThread := TSampleImportThread(Sender);
+  SetBackgroundBusy(False, '', False);
+  if not ImportThread.Success then
   begin
-    ShowMessage('Could not load "' + AFilePath + '" as a WAV file.');
+    ShowMessage('Could not load "' + ImportThread.Path + '" as a WAV file.');
     Exit;
   end;
 
-  Clip.SampleID := Project.AddSampleToPool(Sample, ExtractFileName(AFilePath),
-    AFilePath);
+  Clip.SampleID := ImportThread.SampleID;
   Clip.Offset := 0;
-  Clip.Length := Sample.FrameCount;
-  Clip.Position := AFramePosition;
-  Clip.TrackID := ATrackIndex;
+  Clip.Length := Project.SamplePool[ImportThread.SampleID].FrameCount;
+  Clip.Position := FPendingImportFrame;
+  Clip.TrackID := FPendingImportTrack;
   Clip.PitchSemitones := 0;
   Clip.Gain := 1.0;
   Clip.WarpMode := SampleTypes.WarpModeBeats;
 
-  Project.PushUndoSnapshot(ATrackIndex);
-  Project.CommitClipToTrack(ATrackIndex, Clip);
-  FArrangementView.RefreshTrack(ATrackIndex);
+  Project.PushUndoSnapshot(FPendingImportTrack);
+  Project.CommitClipToTrack(FPendingImportTrack, Clip);
+  FArrangementView.RefreshTrack(FPendingImportTrack);
 end;
 
 procedure TForm1.ArrangementViewSeek(Sender: TObject; AFrameOffset: Int64);
@@ -1779,24 +1898,34 @@ begin
 end;
 
 procedure TForm1.LoadInstrumentForKeyboardTrack(const APath: string);
-var
-  Sample: TSample;
-  Track: Integer;
 begin
-  Track := FArrangementView.KeyboardTrack;
-  if Track < 0 then
+  if FBackgroundBusy then
+    Exit;
+  FPendingImportTrack := FArrangementView.KeyboardTrack;
+  if FPendingImportTrack < 0 then
     Exit;
 
-  if not DecodeSampleFile(APath, Sample) then
+  SetBackgroundBusy(True, 'Importing...', True);
+  with TSampleImportThread.Create(APath, ExtractFileName(APath)) do
+    OnTerminate := @InstrumentImportThreadTerminate;
+end;
+
+procedure TForm1.InstrumentImportThreadTerminate(Sender: TObject);
+var
+  ImportThread: TSampleImportThread;
+begin
+  ImportThread := TSampleImportThread(Sender);
+  SetBackgroundBusy(False, '', False);
+  if not ImportThread.Success then
   begin
-    ShowMessage('Could not load "' + APath + '" as a WAV file.');
+    ShowMessage('Could not load "' + ImportThread.Path + '" as a WAV file.');
     Exit;
   end;
 
-  Project.TrackInstrument[Track] := Project.AddSampleToPool(Sample,
-    ExtractFileName(APath), APath);
-  Project.TrackInstrumentStart[Track] := 0;
-  Project.TrackInstrumentEnd[Track] := Sample.FrameCount;
+  Project.TrackInstrument[FPendingImportTrack] := ImportThread.SampleID;
+  Project.TrackInstrumentStart[FPendingImportTrack] := 0;
+  Project.TrackInstrumentEnd[FPendingImportTrack] :=
+    Project.SamplePool[ImportThread.SampleID].FrameCount;
   UpdateDevicePanel;
 end;
 
