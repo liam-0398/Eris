@@ -395,9 +395,17 @@ var
 
     Ratio := SegTimelineLen / SegSourceLen;
 
+    { Clip^.Transients holds ABSOLUTE positions within the whole sample file
+      (that's the frame of reference DetectTransients works in, and the same
+      cached array is shared by every clip that chops a different region out
+      of the same sample) - but SegStartSource/SegSourceLen are CLIP-relative
+      (relative to Clip^.Offset, same as MarkerSource). Every comparison
+      against them has to translate by -Clip^.Offset first, or a clip that
+      doesn't start at frame 0 of its source (any sample chop) compares
+      transients against the wrong region entirely. }
     TIdx := 0;
     while (TIdx < Clip^.TransientCount) and
-      ((Clip^.Transients + TIdx)^ <= SegStartSource) do
+      ((Clip^.Transients + TIdx)^ - Clip^.Offset <= SegStartSource) do
       Inc(TIdx);
 
     BoundaryPos := SegStartSource;
@@ -406,8 +414,8 @@ var
     while True do
     begin
       if (TIdx < Clip^.TransientCount) and
-        ((Clip^.Transients + TIdx)^ < SegStartSource + SegSourceLen) then
-        NextBoundaryPos := (Clip^.Transients + TIdx)^
+        ((Clip^.Transients + TIdx)^ - Clip^.Offset < SegStartSource + SegSourceLen) then
+        NextBoundaryPos := (Clip^.Transients + TIdx)^ - Clip^.Offset
       else
         NextBoundaryPos := SegStartSource + SegSourceLen;
 
