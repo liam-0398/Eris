@@ -134,6 +134,7 @@ type
     function EffectsRackTotalWidth: Integer;
     procedure RebuildEffectWidgets;
     procedure EffectRackChanged(Sender: TObject);
+    procedure DeferredRebuildEffectWidgets(Data: PtrInt);
     procedure AddEffectToCurrentTrack(AKind: Integer);
     procedure AddLowpassEffectClick(Sender: TObject);
     procedure AddEQ4EffectClick(Sender: TObject);
@@ -1418,6 +1419,21 @@ begin
 end;
 
 procedure TForm1.EffectRackChanged(Sender: TObject);
+begin
+  { This fires from TEffectWidget.DeleteClick, which is still on the call
+    stack of the very delete BUTTON's own OnClick - RebuildEffectWidgets
+    Frees every TEffectWidget, including that button's parent widget, while
+    the widgetset (GTK/Qt) is still unwinding the click dispatch for it.
+    Freeing a control from inside its own event handler is a well-known
+    use-after-free trap, and the resulting heap corruption is a very
+    plausible source of the "effects randomly disappearing" reports -
+    corruption is nondeterministic and not necessarily confined to the
+    control that got freed. Deferring the actual rebuild until the click has
+    fully unwound back to the message loop avoids it. }
+  Application.QueueAsyncCall(@DeferredRebuildEffectWidgets, 0);
+end;
+
+procedure TForm1.DeferredRebuildEffectWidgets(Data: PtrInt);
 begin
   RebuildEffectWidgets;
 end;

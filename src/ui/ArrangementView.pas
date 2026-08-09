@@ -942,6 +942,18 @@ begin
       FOnKeyboardTrackChanged(Self);
   end;
 
+  { X >= LaneWidth means this click landed in the header column (and wasn't
+    the mute button/volume slider, both already handled above) - track
+    selection is done, but there's no clip/lane content over there to hit-
+    test or seek to. Without this guard, XToFrame(X) treated a header-
+    column pixel as a timeline position and every header click silently
+    seeked the playhead to whatever frame that pixel happened to map to. }
+  if X >= LaneWidth then
+  begin
+    Invalidate;
+    Exit;
+  end;
+
   if HitTestClip(TrackIndex, X, ClipIndex, Mode) then
   begin
     FRangeSelectActive := False;
