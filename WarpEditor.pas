@@ -47,7 +47,7 @@ type
     function BarBeatLabel(AFrame: Int64): string;
     function HitTestMarker(const AClip: TClip; X: Integer): Integer;
     procedure DeleteMarker(const AClip: TClip; AIndex: Integer);
-    procedure DrawRulerStrip;
+    procedure DrawRulerStrip(const AClip: TClip);
     procedure DrawGrid;
     procedure DrawClipWaveform(const AClip: TClip);
     procedure DrawMarkers(const AClip: TClip);
@@ -203,7 +203,7 @@ begin
   SetClipData(Clip);
 end;
 
-procedure TWarpEditor.DrawRulerStrip;
+procedure TWarpEditor.DrawRulerStrip(const AClip: TClip);
 var
   Beat, BarLen, Frame: Int64;
   x: Integer;
@@ -228,7 +228,9 @@ begin
       Canvas.Pen.Color := clBtnShadow;
     Canvas.Line(x, WarpRulerHeight - 6, x, WarpRulerHeight);
     Canvas.Brush.Style := bsClear;
-    Canvas.TextOut(x + 2, 2, BarBeatLabel(Frame));
+    { correlate with the main arrangement ruler's numbering, not a
+      clip-local count that would always start over at "1.1" }
+    Canvas.TextOut(x + 2, 2, BarBeatLabel(Frame + AClip.Position));
     Canvas.Brush.Style := bsSolid;
     Frame := Frame + Beat;
     x := FrameToX(Frame);
@@ -335,7 +337,7 @@ begin
 
   DrawClipWaveform(Clip);
   DrawGrid;
-  DrawRulerStrip;
+  DrawRulerStrip(Clip);
   DrawMarkers(Clip);
   DrawPlayhead(Clip);
 end;

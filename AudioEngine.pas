@@ -22,7 +22,7 @@ type
     MarkerTimeline: array[0..MaxClipWarpMarkers - 1] of Int64;
     WarpMode: Integer; { 0 = Beats (loop/truncate, preserves pitch), 1 = RePitch (vari-speed) }
     DetuneSemitones: Single; { independent pitch trim that never changes the
-      clip's own Length/Position - see DetunedClipSourcePosition }
+      clip's own Length/Position - see DetunedClipSample }
   end;
   PPlaybackClip = ^TPlaybackClip;
 
@@ -473,28 +473,67 @@ end;
   grain's own natural source span is whatever ClipSourcePosition already
   says it should be (its start/end anchors) - that's true regardless of
   warp mode, so detune composes with either one for free. Within the grain,
-  the source read advances at the pitch-shifted rate instead of 1:1; when
-  that runs past the grain's natural span (pitching up needs less source
-  than the grain's timeline allotment) or would undershoot it (pitching
-  down), it ping-pongs within that exact span - the same "bounce instead of
-  hard-loop" trick already used above for time-stretch, just applied to a
-  much smaller, fixed-size grain. }
-function DetunedClipSourcePosition(Clip: PPlaybackClip; AClipRelativeFrame: Int64): Double;
+  the source read advances at the pitch-shifted rate instead of 1:1,
+  ping-ponging within that natural span if it runs out early or late (same
+  "bounce instead of hard-loop" trick used above for time-stretch).
+
+  For an arbitrary pitch ratio, that ping-ponging generally does NOT land
+  back exactly at the next grain's own start - so the last Overlap frames of
+  every grain crossfade into the NEXT grain's independently-phased read
+  instead of cutting straight to it. That's what actually kills the
+  click/pop at each grain boundary; returning a raw position (no blending)
+  was the first cut at this and audibly clicked every DetuneGrainMs. }
+function DetunedClipSample(Clip: PPlaybackClip; AClipRelativeFrame: Int64;
+  AChannel: Integer): Single;
 const
-  DetuneGrainMs = 25; { small on purpose - keeps the worst-case mismatch at
-    each grain boundary (where this simplified technique can't perfectly
-    reconnect for an arbitrary pitch ratio) as small as practical }
+  DetuneGrainMs = 25;
 var
-  Rate, Phase, Period, AnchorStart, AnchorEnd, GrainNaturalSourceLen, ConsumedSource: Double;
-  GrainFrames, GrainIndex, GrainStartTimeline, GrainOffsetIntoGrain: Int64;
+  Rate, AnchorStart, AnchorEnd, NextAnchorEnd: Double;
+  GrainNaturalSourceLen, NextGrainNaturalSourceLen, ConsumedSource: Double;
+  GrainFrames, GrainIndex, GrainStartTimeline, GrainOffsetIntoGrain, Overlap: Int64;
+  PosCurrent, SampleCurrent, PosNext, SampleNext, FadeT: Double;
+
+  function FloorMod(AValue, APeriod: Double): Double;
+  begin
+    Result := AValue - Trunc(AValue / APeriod) * APeriod;
+    if Result < 0 then
+      Result := Result + APeriod;
+  end;
+
+  function PingPongPos(AAnchorStart, ANaturalLen, AConsumed: Double): Double;
+  var
+    Period, Phase: Double;
+  begin
+    Period := 2 * ANaturalLen;
+    Phase := FloorMod(AConsumed, Period);
+    if Phase < ANaturalLen then
+      Result := AAnchorStart + Phase
+    else
+      Result := AAnchorStart + (Period - Phase);
+  end;
+
+  function SafeInterp(ARelPos: Double): Single;
+  var
+    AbsPos: Double;
+  begin
+    AbsPos := Clip^.Offset + ARelPos;
+    if (AbsPos < 0) or (AbsPos >= Clip^.FrameCount) then
+      Result := 0
+    else
+      Result := Interpolate(Clip^.Data, Clip^.FrameCount, Clip^.Channels, AChannel, AbsPos);
+  end;
+
 begin
   if Clip^.DetuneSemitones = 0 then
-    Exit(ClipSourcePosition(Clip, AClipRelativeFrame));
+    Exit(SafeInterp(ClipSourcePosition(Clip, AClipRelativeFrame)));
 
   Rate := Exp((Clip^.DetuneSemitones / 12) * Ln(2));
   GrainFrames := (DetuneGrainMs * ProjectSampleRate) div 1000;
   if GrainFrames < 1 then
     GrainFrames := 1;
+  Overlap := GrainFrames div 4;
+  if Overlap < 1 then
+    Overlap := 1;
 
   GrainIndex := AClipRelativeFrame div GrainFrames;
   GrainStartTimeline := GrainIndex * GrainFrames;
@@ -507,13 +546,26 @@ begin
     GrainNaturalSourceLen := 1;
 
   ConsumedSource := GrainOffsetIntoGrain * Rate;
+  PosCurrent := PingPongPos(AnchorStart, GrainNaturalSourceLen, ConsumedSource);
+  SampleCurrent := SafeInterp(PosCurrent);
 
-  Period := 2 * GrainNaturalSourceLen;
-  Phase := ConsumedSource - Trunc(ConsumedSource / Period) * Period;
-  if Phase < GrainNaturalSourceLen then
-    Result := AnchorStart + Phase
-  else
-    Result := AnchorStart + (Period - Phase);
+  if GrainOffsetIntoGrain < GrainFrames - Overlap then
+    Exit(SampleCurrent);
+
+  { last Overlap frames of this grain - blend towards the next grain, whose
+    own local offset (and hence its ping-pong phase) starts a bit negative
+    here, i.e. it's already "running" underneath the tail of this one }
+  NextAnchorEnd := ClipSourcePosition(Clip, GrainStartTimeline + 2 * GrainFrames);
+  NextGrainNaturalSourceLen := NextAnchorEnd - AnchorEnd;
+  if NextGrainNaturalSourceLen < 1 then
+    NextGrainNaturalSourceLen := 1;
+
+  PosNext := PingPongPos(AnchorEnd, NextGrainNaturalSourceLen,
+    (GrainOffsetIntoGrain - GrainFrames) * Rate);
+  SampleNext := SafeInterp(PosNext);
+
+  FadeT := (GrainOffsetIntoGrain - (GrainFrames - Overlap)) / Overlap;
+  Result := SampleCurrent * (1 - FadeT) + SampleNext * FadeT;
 end;
 
 { SP-1200-style swing: if APosition falls on an odd step of the given
@@ -547,7 +599,6 @@ procedure FillBlock;
 var
   Frame, t, i, e: Integer;
   GlobalFrame, ClipRelFrame, SwungPos: Int64;
-  SrcPos: Double;
   Clip: PPlaybackClip;
   L, R, TrackL, TrackR, RecL, RecR, ClickVal: Single;
   BeatFrames: Int64;
@@ -581,23 +632,15 @@ begin
           if (ClipRelFrame < 0) or (ClipRelFrame >= Clip^.Length) then
             Continue;
 
-          SrcPos := Clip^.Offset + DetunedClipSourcePosition(Clip, ClipRelFrame);
-          if (SrcPos < 0) or (SrcPos >= Clip^.FrameCount) then
-            Continue;
-
           if Clip^.Channels = 1 then
           begin
-            TrackL := TrackL + Interpolate(Clip^.Data, Clip^.FrameCount,
-              Clip^.Channels, 0, SrcPos) * Clip^.Gain;
-            TrackR := TrackR + Interpolate(Clip^.Data, Clip^.FrameCount,
-              Clip^.Channels, 0, SrcPos) * Clip^.Gain;
+            TrackL := TrackL + DetunedClipSample(Clip, ClipRelFrame, 0) * Clip^.Gain;
+            TrackR := TrackR + DetunedClipSample(Clip, ClipRelFrame, 0) * Clip^.Gain;
           end
           else
           begin
-            TrackL := TrackL + Interpolate(Clip^.Data, Clip^.FrameCount,
-              Clip^.Channels, 0, SrcPos) * Clip^.Gain;
-            TrackR := TrackR + Interpolate(Clip^.Data, Clip^.FrameCount,
-              Clip^.Channels, 1, SrcPos) * Clip^.Gain;
+            TrackL := TrackL + DetunedClipSample(Clip, ClipRelFrame, 0) * Clip^.Gain;
+            TrackR := TrackR + DetunedClipSample(Clip, ClipRelFrame, 1) * Clip^.Gain;
           end;
         end;
 

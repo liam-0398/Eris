@@ -558,8 +558,10 @@ begin
     independent pitch nudge, not a re-warp. }
   ClipControlsPanel := TPanel.Create(Self);
   ClipControlsPanel.Parent := FWarpWidget;
-  ClipControlsPanel.Align := alLeft;
+  ClipControlsPanel.Left := WarpButtonsPanel.Width;
+  ClipControlsPanel.Top := 0;
   ClipControlsPanel.Width := Px(80);
+  ClipControlsPanel.Height := Px(WidgetHeight);
   ClipControlsPanel.BevelOuter := bvNone;
 
   GainLbl := TLabel.Create(Self);
@@ -618,7 +620,15 @@ begin
 
   FWarpEditor := TWarpEditor.Create(Self);
   FWarpEditor.Parent := FWarpWidget;
-  FWarpEditor.Align := alClient;
+  { explicit bounds + right-anchor instead of Align:=alClient - ClipControlsPanel
+    isn't itself Align-managed, so alClient's sibling-avoidance wouldn't have
+    known to leave room for it. Right-anchoring still keeps this filling the
+    rest of FWarpWidget's width as RefreshWarpWidgetSize resizes it. }
+  FWarpEditor.Left := WarpButtonsPanel.Width + ClipControlsPanel.Width;
+  FWarpEditor.Top := 0;
+  FWarpEditor.Width := FWarpWidget.Width - FWarpEditor.Left;
+  FWarpEditor.Height := Px(WidgetHeight);
+  FWarpEditor.Anchors := [akLeft, akTop, akRight];
   FWarpEditor.OnClipChanged := @WarpEditorClipChanged;
 
   { instrument (keyboard-play) waveform editor - shares the same slot as the
@@ -693,6 +703,14 @@ end;
 
 procedure TForm1.FileNewClick(Sender: TObject);
 begin
+  { Stop is only a queued command for the audio thread to pick up - if we
+    let NewProject free every sample's memory before that thread has
+    actually drained it and stopped touching TrackClips/LiveNotes, it can
+    read/crash on freed memory (and never touch playback again after that,
+    which is exactly "can't play, no sound at all" - not just this project). }
+  AudioEngineStop;
+  while AudioEngineIsPlaying do
+    Sleep(1);
   Project.NewProject;
   FCurrentProjectPath := '';
   RefreshAllTracksUI;
@@ -708,6 +726,13 @@ begin
     Dlg.Filter := 'Eris Project (*.er)|*.er';
     if not Dlg.Execute then
       Exit;
+
+    { see FileNewClick - must be fully stopped (not just have the Stop
+      command queued) before LoadProject's NewProject call frees the old
+      project's sample memory out from under a still-running audio thread }
+    AudioEngineStop;
+    while AudioEngineIsPlaying do
+      Sleep(1);
 
     if not LoadProject(Dlg.FileName) then
     begin
@@ -1302,11 +1327,23 @@ begin
 end;
 
 procedure TForm1.RefreshWarpWidgetSize;
+const
+  MinWaveformWidth = 60;
+var
+  MinTotalWidth: Integer;
 begin
   if (FArrangementView.SelectedTrack >= 0) and (FArrangementView.SelectedClipIndex >= 0) and
     (FArrangementView.SelectedClipIndex <= High(Project.Tracks[FArrangementView.SelectedTrack].Clips)) then
+  begin
     FWarpWidget.Width := WarpWidthForFrames(
       Project.Tracks[FArrangementView.SelectedTrack].Clips[FArrangementView.SelectedClipIndex].Length);
+    { the zoom/RP buttons and the gain/detune sliders both take a fixed
+      amount of width off the top - never let the waveform itself collapse
+      to nothing for a short/zoomed-out clip }
+    MinTotalWidth := FWarpEditor.Left + Px(MinWaveformWidth);
+    if FWarpWidget.Width < MinTotalWidth then
+      FWarpWidget.Width := MinTotalWidth;
+  end;
   FWarpEditor.Invalidate;
   UpdateDevicePanelScroll;
 end;

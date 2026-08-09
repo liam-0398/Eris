@@ -5,7 +5,7 @@ unit Waveform;
 interface
 
 uses
-  Graphics, Types, SampleTypes;
+  Graphics, Types, SampleTypes, Resample;
 
 const
   MaxWaveformBins = 4096;
@@ -80,13 +80,16 @@ function SplitWarpMarkers(const AMarkers: TWarpMarkerArray; ASplitFrame: Int64;
 
 { Independent per-clip pitch trim (the "Detune" slider) layered on top of
   WarpedSourcePosition rather than inside it, so Beats/RePitch warping
-  itself is completely untouched by this - see
-  AudioEngine.DetunedClipSourcePosition (the realtime engine's own copy of
-  the identical trick) for the full explanation. Used by offline render
+  itself is completely untouched by this - see AudioEngine.DetunedClipSample
+  (the realtime engine's own copy of the identical trick) for the full
+  explanation, including why this returns an already-blended sample instead
+  of a raw position (crossfades across each grain boundary to avoid a
+  click, since an arbitrary pitch ratio generally can't land back exactly
+  on the next grain's own start). Used by offline render
   (ProjectFile.RenderProjectToWav) so a bounce matches live playback. }
-function DetunedSourcePosition(const AMarkers: TWarpMarkerArray;
-  ATimelineFrame: Int64; ADetuneSemitones: Single; AData: PSingle;
-  AFrameCount, AChannels, ASampleRate: Integer; AWarpMode: Integer): Double;
+function DetunedSample(const AMarkers: TWarpMarkerArray; ATimelineFrame: Int64;
+  ADetuneSemitones: Single; AOffset: Int64; AData: PSingle;
+  AFrameCount, AChannels, ASampleRate: Integer; AWarpMode, AChannel: Integer): Single;
 
 { Draws the waveform for [AStartFrame, AEndFrame) of a sample (out of
   ATotalFrameCount frames covered by APeaks) into ARect. When AMarkers has
@@ -290,23 +293,59 @@ begin
     Result := LoopRegionStart + (Phase - LoopLen);
 end;
 
-function DetunedSourcePosition(const AMarkers: TWarpMarkerArray;
-  ATimelineFrame: Int64; ADetuneSemitones: Single; AData: PSingle;
-  AFrameCount, AChannels, ASampleRate: Integer; AWarpMode: Integer): Double;
+function DetunedSample(const AMarkers: TWarpMarkerArray; ATimelineFrame: Int64;
+  ADetuneSemitones: Single; AOffset: Int64; AData: PSingle;
+  AFrameCount, AChannels, ASampleRate: Integer; AWarpMode, AChannel: Integer): Single;
 const
-  DetuneGrainMs = 25; { small on purpose - see AudioEngine.DetunedClipSourcePosition }
+  DetuneGrainMs = 25;
 var
-  Rate, Phase, Period, AnchorStart, AnchorEnd, GrainNaturalSourceLen, ConsumedSource: Double;
-  GrainFrames, GrainIndex, GrainStartTimeline, GrainOffsetIntoGrain: Int64;
+  Rate, AnchorStart, AnchorEnd, NextAnchorEnd: Double;
+  GrainNaturalSourceLen, NextGrainNaturalSourceLen, ConsumedSource: Double;
+  GrainFrames, GrainIndex, GrainStartTimeline, GrainOffsetIntoGrain, Overlap: Int64;
+  PosCurrent, SampleCurrent, PosNext, SampleNext, FadeT: Double;
+
+  function FloorMod(AValue, APeriod: Double): Double;
+  begin
+    Result := AValue - Trunc(AValue / APeriod) * APeriod;
+    if Result < 0 then
+      Result := Result + APeriod;
+  end;
+
+  function PingPongPos(AAnchorStart, ANaturalLen, AConsumed: Double): Double;
+  var
+    Period, Phase: Double;
+  begin
+    Period := 2 * ANaturalLen;
+    Phase := FloorMod(AConsumed, Period);
+    if Phase < ANaturalLen then
+      Result := AAnchorStart + Phase
+    else
+      Result := AAnchorStart + (Period - Phase);
+  end;
+
+  function SafeInterp(ARelPos: Double): Single;
+  var
+    AbsPos: Double;
+  begin
+    AbsPos := AOffset + ARelPos;
+    if (AbsPos < 0) or (AbsPos >= AFrameCount) then
+      Result := 0
+    else
+      Result := Interpolate(AData, AFrameCount, AChannels, AChannel, AbsPos);
+  end;
+
 begin
   if ADetuneSemitones = 0 then
-    Exit(WarpedSourcePosition(AMarkers, ATimelineFrame, AData, AFrameCount,
-      AChannels, ASampleRate, AWarpMode));
+    Exit(SafeInterp(WarpedSourcePosition(AMarkers, ATimelineFrame, AData,
+      AFrameCount, AChannels, ASampleRate, AWarpMode)));
 
   Rate := Exp((ADetuneSemitones / 12) * Ln(2));
   GrainFrames := (DetuneGrainMs * ASampleRate) div 1000;
   if GrainFrames < 1 then
     GrainFrames := 1;
+  Overlap := GrainFrames div 4;
+  if Overlap < 1 then
+    Overlap := 1;
 
   GrainIndex := ATimelineFrame div GrainFrames;
   GrainStartTimeline := GrainIndex * GrainFrames;
@@ -321,13 +360,24 @@ begin
     GrainNaturalSourceLen := 1;
 
   ConsumedSource := GrainOffsetIntoGrain * Rate;
+  PosCurrent := PingPongPos(AnchorStart, GrainNaturalSourceLen, ConsumedSource);
+  SampleCurrent := SafeInterp(PosCurrent);
 
-  Period := 2 * GrainNaturalSourceLen;
-  Phase := ConsumedSource - Trunc(ConsumedSource / Period) * Period;
-  if Phase < GrainNaturalSourceLen then
-    Result := AnchorStart + Phase
-  else
-    Result := AnchorStart + (Period - Phase);
+  if GrainOffsetIntoGrain < GrainFrames - Overlap then
+    Exit(SampleCurrent);
+
+  NextAnchorEnd := WarpedSourcePosition(AMarkers, GrainStartTimeline + 2 * GrainFrames,
+    AData, AFrameCount, AChannels, ASampleRate, AWarpMode);
+  NextGrainNaturalSourceLen := NextAnchorEnd - AnchorEnd;
+  if NextGrainNaturalSourceLen < 1 then
+    NextGrainNaturalSourceLen := 1;
+
+  PosNext := PingPongPos(AnchorEnd, NextGrainNaturalSourceLen,
+    (GrainOffsetIntoGrain - GrainFrames) * Rate);
+  SampleNext := SafeInterp(PosNext);
+
+  FadeT := (GrainOffsetIntoGrain - (GrainFrames - Overlap)) / Overlap;
+  Result := SampleCurrent * (1 - FadeT) + SampleNext * FadeT;
 end;
 
 function SplitWarpMarkers(const AMarkers: TWarpMarkerArray; ASplitFrame: Int64;

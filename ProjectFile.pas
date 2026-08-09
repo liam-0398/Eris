@@ -303,7 +303,6 @@ var
   Sample: TSample;
   Buffer: PSingle;
   Frame, OutIdx: Int64;
-  SrcPos: Double;
   SP1200St: TSP1200State;
   MasterEffectState: array[0..Effects.MaxEffectsPerTrack - 1] of Effects.TEffectState;
   L, R: Single;
@@ -340,27 +339,29 @@ begin
 
         for Frame := 0 to Clip.Length - 1 do
         begin
-          SrcPos := Clip.Offset + DetunedSourcePosition(Clip.WarpMarkers, Frame,
-            Clip.PitchSemitones, Sample.Data, Sample.FrameCount, Sample.Channels,
-            AudioEngine.ProjectSampleRate, Clip.WarpMode);
-          if (SrcPos < 0) or (SrcPos >= Sample.FrameCount) then
-            Continue;
-
           OutIdx := (SwungPos + Frame) * OutChannels;
 
           if Sample.Channels = 1 then
           begin
             Buffer[OutIdx] := Buffer[OutIdx] +
-              Interpolate(Sample.Data, Sample.FrameCount, Sample.Channels, 0, SrcPos) * Clip.Gain;
+              DetunedSample(Clip.WarpMarkers, Frame, Clip.PitchSemitones, Clip.Offset,
+                Sample.Data, Sample.FrameCount, Sample.Channels,
+                AudioEngine.ProjectSampleRate, Clip.WarpMode, 0) * Clip.Gain;
             Buffer[OutIdx + 1] := Buffer[OutIdx + 1] +
-              Interpolate(Sample.Data, Sample.FrameCount, Sample.Channels, 0, SrcPos) * Clip.Gain;
+              DetunedSample(Clip.WarpMarkers, Frame, Clip.PitchSemitones, Clip.Offset,
+                Sample.Data, Sample.FrameCount, Sample.Channels,
+                AudioEngine.ProjectSampleRate, Clip.WarpMode, 0) * Clip.Gain;
           end
           else
           begin
             Buffer[OutIdx] := Buffer[OutIdx] +
-              Interpolate(Sample.Data, Sample.FrameCount, Sample.Channels, 0, SrcPos) * Clip.Gain;
+              DetunedSample(Clip.WarpMarkers, Frame, Clip.PitchSemitones, Clip.Offset,
+                Sample.Data, Sample.FrameCount, Sample.Channels,
+                AudioEngine.ProjectSampleRate, Clip.WarpMode, 0) * Clip.Gain;
             Buffer[OutIdx + 1] := Buffer[OutIdx + 1] +
-              Interpolate(Sample.Data, Sample.FrameCount, Sample.Channels, 1, SrcPos) * Clip.Gain;
+              DetunedSample(Clip.WarpMarkers, Frame, Clip.PitchSemitones, Clip.Offset,
+                Sample.Data, Sample.FrameCount, Sample.Channels,
+                AudioEngine.ProjectSampleRate, Clip.WarpMode, 1) * Clip.Gain;
           end;
         end;
       end;
