@@ -160,11 +160,11 @@ var
 begin
   BF := BeatFrames;
   if BF <= 0 then
-    Exit('1.1');
+    Exit('1.0');
   TotalBeats := AFrame div BF;
   BarNum := TotalBeats div 4;
   BeatInBar := TotalBeats mod 4;
-  Result := IntToStr(BarNum + 1) + '.' + IntToStr(BeatInBar + 1);
+  Result := IntToStr(BarNum + 1) + '.' + IntToStr(BeatInBar);
 end;
 
 function TWarpEditor.HitTestMarker(const AClip: TClip; X: Integer): Integer;
