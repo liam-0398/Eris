@@ -8,7 +8,7 @@ uses
   SampleTypes, ClipOverwrite, Waveform, Effects;
 
 const
-  MaxTracks = 16;
+  MaxTracks = 32;
   DefaultTrackCount = 4;
   DefaultTempoBPM = 160.0;
   SamplerKeysPerOctave = 12;
@@ -119,7 +119,8 @@ function PopUndo(out ATrackIndex: Integer): Boolean;
 function AddTrack: Boolean;
 function AddInputTrack: Boolean;
 function AddSamplerTrack: Boolean;
-procedure AssignSamplerSlot(ATrackIndex, AKeyIndex, ASampleID: Integer; AStartFrame: Int64);
+procedure AssignSamplerSlot(ATrackIndex, AKeyIndex, ASampleID: Integer;
+  AStartFrame, AEndFrame: Int64);
 function DeleteTrack(ATrackIndex: Integer): Boolean;
 procedure NewProject;
 
@@ -341,7 +342,8 @@ begin
     TrackIsSampler[TrackCount - 1] := True;
 end;
 
-procedure AssignSamplerSlot(ATrackIndex, AKeyIndex, ASampleID: Integer; AStartFrame: Int64);
+procedure AssignSamplerSlot(ATrackIndex, AKeyIndex, ASampleID: Integer;
+  AStartFrame, AEndFrame: Int64);
 begin
   if (ATrackIndex < 0) or (ATrackIndex >= MaxTracks) then
     Exit;
@@ -349,10 +351,19 @@ begin
     Exit;
   if (ASampleID < 0) or (ASampleID > High(SamplePool)) then
     Exit;
+  if AStartFrame < 0 then
+    AStartFrame := 0;
+  { AEndFrame is normally the source clip's own Offset+Length (its trim
+    window), so the key's end marker auto-populates at wherever that clip
+    was cut, not always the whole underlying sample - only fall back to the
+    full sample when the caller didn't have a sensible window (e.g. a fresh
+    import with no clip behind it) or passed something bogus. }
+  if (AEndFrame <= AStartFrame) or (AEndFrame > SamplePool[ASampleID].FrameCount) then
+    AEndFrame := SamplePool[ASampleID].FrameCount;
   { drop onto an occupied key replaces it outright - no stacking/round-robin }
   TrackSamplerSlots[ATrackIndex][AKeyIndex].SampleID := ASampleID;
   TrackSamplerSlots[ATrackIndex][AKeyIndex].StartFrame := AStartFrame;
-  TrackSamplerSlots[ATrackIndex][AKeyIndex].EndFrame := SamplePool[ASampleID].FrameCount;
+  TrackSamplerSlots[ATrackIndex][AKeyIndex].EndFrame := AEndFrame;
 end;
 
 function DeleteTrack(ATrackIndex: Integer): Boolean;

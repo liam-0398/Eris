@@ -139,7 +139,8 @@ type
     procedure GridTrackBarChange(Sender: TObject);
     procedure ArrangementViewFileDrop(Sender: TObject; ATrackIndex: Integer;
       AFramePosition: Int64; const AFilePath: string);
-    procedure ArrangementViewClipActivate(Sender: TObject; ASampleID: Integer; AOffset: Int64);
+    procedure ArrangementViewClipActivate(Sender: TObject; ASampleID: Integer;
+      AOffset, ALength: Int64);
     procedure ArrangementViewSeek(Sender: TObject; AFrameOffset: Int64);
     procedure ArrangementViewKeyboardTrackChanged(Sender: TObject);
     procedure ArrangementViewClipSelectionChanged(Sender: TObject);
@@ -191,8 +192,9 @@ type
     procedure DevicePanelDragDrop(Sender, Source: TObject; X, Y: Integer);
     procedure FileBrowserFileActivate(Sender: TObject; const AFilePath: string);
     procedure LoadInstrumentForKeyboardTrack(const APath: string);
-    procedure AssignSampleAsKeyboardInstrumentFor(ATrack, ASampleID: Integer);
-    procedure AssignSampleAsKeyboardInstrument(ASampleID: Integer);
+    procedure AssignSampleAsKeyboardInstrumentFor(ATrack, ASampleID: Integer;
+      AStartFrame, AEndFrame: Int64);
+    procedure AssignSampleAsKeyboardInstrument(ASampleID: Integer; AStartFrame, AEndFrame: Int64);
     procedure UpdateDevicePanel;
     procedure InstrumentDeleteClick(Sender: TObject);
     procedure OctaveMinusClick(Sender: TObject);
@@ -2136,31 +2138,45 @@ begin
   end;
 
   { FPendingImportTrack, not FArrangementView.KeyboardTrack - the keyboard
-    track could have changed while the import thread was running }
-  AssignSampleAsKeyboardInstrumentFor(FPendingImportTrack, ImportThread.SampleID);
+    track could have changed while the import thread was running. A fresh
+    import has no clip behind it, so the whole sample is the start/end
+    window. }
+  AssignSampleAsKeyboardInstrumentFor(FPendingImportTrack, ImportThread.SampleID,
+    0, Project.SamplePool[ImportThread.SampleID].FrameCount);
 end;
 
 { Shared by the import-thread completion above and by activating an
   already-resident sample (a timeline clip double-clicked or dragged onto
   the device panel - see ArrangementViewClipActivate) - the latter has
-  nothing to decode/import, the sample's already in Project.SamplePool. }
-procedure TForm1.AssignSampleAsKeyboardInstrumentFor(ATrack, ASampleID: Integer);
+  nothing to decode/import, the sample's already in Project.SamplePool.
+  AStartFrame/AEndFrame seed the start/end markers - normally the
+  activating clip's own Offset/Offset+Length, so the end marker auto-
+  populates at wherever that clip was trimmed to rather than always the
+  whole underlying sample; falls back to the full sample if the window
+  doesn't make sense (e.g. AEndFrame <= AStartFrame). }
+procedure TForm1.AssignSampleAsKeyboardInstrumentFor(ATrack, ASampleID: Integer;
+  AStartFrame, AEndFrame: Int64);
 begin
   if (ATrack < 0) or (ASampleID < 0) or (ASampleID > High(Project.SamplePool)) then
     Exit;
   Project.TrackInstrument[ATrack] := ASampleID;
-  Project.TrackInstrumentStart[ATrack] := 0;
-  Project.TrackInstrumentEnd[ATrack] := Project.SamplePool[ASampleID].FrameCount;
+  if AStartFrame < 0 then
+    AStartFrame := 0;
+  if (AEndFrame <= AStartFrame) or (AEndFrame > Project.SamplePool[ASampleID].FrameCount) then
+    AEndFrame := Project.SamplePool[ASampleID].FrameCount;
+  Project.TrackInstrumentStart[ATrack] := AStartFrame;
+  Project.TrackInstrumentEnd[ATrack] := AEndFrame;
   UpdateDevicePanel;
 end;
 
-procedure TForm1.AssignSampleAsKeyboardInstrument(ASampleID: Integer);
+procedure TForm1.AssignSampleAsKeyboardInstrument(ASampleID: Integer; AStartFrame, AEndFrame: Int64);
 begin
-  AssignSampleAsKeyboardInstrumentFor(FArrangementView.KeyboardTrack, ASampleID);
+  AssignSampleAsKeyboardInstrumentFor(FArrangementView.KeyboardTrack, ASampleID,
+    AStartFrame, AEndFrame);
 end;
 
 procedure TForm1.ArrangementViewClipActivate(Sender: TObject; ASampleID: Integer;
-  AOffset: Int64);
+  AOffset, ALength: Int64);
 var
   Track, KeyIdx: Integer;
   P: TPoint;
@@ -2182,13 +2198,13 @@ begin
     KeyIdx := FSamplerKeys.XToKeyIndex(P.X);
     if KeyIdx < 0 then
       Exit;
-    Project.AssignSamplerSlot(Track, KeyIdx, ASampleID, AOffset);
+    Project.AssignSamplerSlot(Track, KeyIdx, ASampleID, AOffset, AOffset + ALength);
     FSamplerKeys.SelectKey(KeyIdx);
     UpdateDevicePanel;
     Exit;
   end;
 
-  AssignSampleAsKeyboardInstrument(ASampleID);
+  AssignSampleAsKeyboardInstrument(ASampleID, AOffset, AOffset + ALength);
 end;
 
 procedure TForm1.UpdateDevicePanel;
