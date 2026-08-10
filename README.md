@@ -5,32 +5,50 @@ the early versions of Ableton Live, Player Pro, and OctaMED. Written in
 Object Pascal (Lazarus/FPC).
 
 Native, dependency-light audio path (ALSA on Linux, DirectSound on Windows),
-non-destructive clip editing with two independent time-warp modes, a
-per-track/master effects chain, and an SP-1200 lo-fi emulation mode baked
-identically into live monitoring and offline export.
+non-destructive clip editing with three independent time-warp modes, a
+per-track/master effects chain, SP-1200-style per-track swing, and an SP-1200
+emulation mode baked identically into live monitoring and offline
+export.
 
 DISCLAIMER: HEAVY LLM usage. I know decent Pascal but do not know about audio engineering and decided to just go forth with having an LLM implement what I wanted instead of putting in the years to do it myself. I do plan to rewrite it bit by bit but the focus currently is having a usable DAW that does exactly what I want, written in the language I want and adhering to the constraints I want. Every idea and technical decision is my own but the implementation is brought to you by Claude.  
 
 ## Features
 
 - **Arrangement view**: multi-track linear timeline (up to 32 tracks),
-  Ableton-style track headers with per-track mute and volume, zoomable/
-  scrollable, adjustable grid snap resolution (1/16 note to 1 bar).
+  Ableton-style track headers with per-track mute and volume, horizontal and
+  vertical scrollbars, zoomable, adjustable grid snap resolution (1/16 note
+  to 1 bar). Changing the tempo rescales the whole arrangement Ableton-style
+  (clips stay locked to the same bars/beats) rather than just relabelling the
+  ruler.
 - **Non-destructive clip editing**: split, move, resize/trim, drag-and-drop,
-  overwrite-on-drop, time-range select with copy/paste/duplicate, multi-level
-  undo (no redo).
-- **Clip warping**: two independent per-clip modes —
-  - **Beats** (default): grain-based, pitch-preserving time-stretch with
-    ping-pong loop fill on stretched segments, in the spirit of Ableton's
-    "Preserve: Transients" / "Loop Back-and-Forth".
-  - **Re-Pitch**: classic continuous vari-speed resample — changes pitch with
-    length, like a sampler or tracker.
+  overwrite-on-drop, time-range select with copy/paste/duplicate,
+  consolidate-to-one-clip, multi-level undo (no redo).
+- **Per-clip gain and detune**: a gain trim (±24 dB) and a pitch detune
+  (±12 semitones, length unchanged) on every clip, in the warp widget.
+- **Clip warping**: three independent per-clip modes —
+  - **Beats** (default, `BT`): transient-sliced and overlap-capable. The
+    source is cut at every detected transient and each slice is triggered as
+    its own voice at the timeline frame the warp maps it to, playing forward
+    at 1:1 and allowed to keep sounding under the next hit — the same trick
+    Ableton's Beats mode uses, which is why compressing a clip (five bars
+    dragged onto four) stays dense instead of going choppy. Pitch-preserving.
+  - **Re-Pitch** (`RP`): classic continuous vari-speed resample — changes
+    pitch with length, like a sampler or tracker.
+  - **Tones / LF** (`LF`): note-triggered 1:1 playback for sustained
+    low-frequency material — 808s, sub bass, anything monophonic where Beats
+    has no transients worth slicing at. Nothing is resynthesised or
+    granulated, so there is no phase-jump or comb artefact; the trade-off is
+    that it cannot fill time, making it a timing-correction mode rather than
+    a large-stretch mode.
   - A visual warp marker editor per clip (add/move/delete markers, local
-    stretch or shift-everything-after).
-- **Keyboard-play instruments**: drag a WAV (or an existing timeline clip)
-  onto a track's device slot, QWERTY tracker-style key-to-note mapping,
-  monophonic one-shot playback with hard retrigger, per-track octave shift
-  and sample trim, resample-based vari-speed pitch shift (linear
+    stretch or shift-everything-after, beat-snapped right-edge resize).
+- **SP-1200 swing**: per-track, snapped to the SP-1200's own detents
+  (50/54/58/63/67/71%), against either a 1/16 or 1/8 grid. Applied
+  identically in live playback, consolidate, and export.
+- **Keyboard-play instruments**: drag an audio file (or an existing timeline
+  clip) onto a track's device slot, QWERTY tracker-style key-to-note mapping,
+  monophonic one-shot playback with hard retrigger, per-track octave shift,
+  sample trim and gain trim, resample-based vari-speed pitch shift (linear
   interpolation, deliberately lo-fi/OctaMED character, not a clean stretch
   algorithm).
 - **Sampler Track**: a dedicated, sample-only track type — a one-octave bank
@@ -42,14 +60,22 @@ DISCLAIMER: HEAVY LLM usage. I know decent Pascal but do not know about audio en
   the octave shift transposes the whole bank by whole octaves rather than
   pitching each key individually. Created via Track > Add Sampler Track
   (`Ctrl+Alt+N`).
-- **Recording**: 4-beat count-in, records straight to a new clip on the
-  source track.
+- **Input tracks**: a dedicated track type that records the live capture
+  device (ALSA line-in) instead of its own keyboard/timeline audio, with a
+  per-track `M` input-monitor toggle that routes the live signal into the mix
+  with no recording and no playhead movement (so it doubles as headphone
+  monitoring while tracking). Input buffer size and input gain are set in
+  Preferences.
+- **Recording**: 4-beat count-in on normal and Sampler tracks; Input tracks
+  arm and record immediately with no count-in. Records straight to a new clip
+  at the cursor on the selected track.
 - **Tempo-aware metronome**, independent of count-in, toggled on/off live.
-- **Effects**: per-track and master-bus insert chains — Lowpass filter,
-  4-band EQ, Limiter, Chorus, Flanger, Phaser, Sidechain (ducking keyed off
-  another track's level), Basic Reverb, and an experimental Drowning
-  (vocal-wash) effect (see `documentation/usage.md` for every parameter),
-  plus a dedicated **Master** track/bus row for global effects.
+- **Effects**: per-track and master-bus insert chains — Lowpass, Highpass and
+  Bandpass filters, 4-band EQ, Limiter, Chorus, Flanger, Phaser, Sidechain
+  (ducking keyed off another track's level), Basic Reverb, and an
+  experimental Drowning (vocal-wash) effect (see
+  `documentation/usage.md` for every parameter), plus a dedicated **Master**
+  track/bus row for global effects.
 - **SP-1200 emulation**: a separate, always-available master-bus lo-fi
   decimation mode (sample-and-hold to ~26kHz/12-bit, no anti-aliasing), baked
   identically into live playback and rendered/exported audio so they can
@@ -58,12 +84,19 @@ DISCLAIMER: HEAVY LLM usage. I know decent Pascal but do not know about audio en
   reader/writer, no external `tar` dependency on any platform), backward
   compatible with older loose-directory `.er` bundles. Recorded audio with no
   source file is embedded into the bundle as a real WAV so it survives
-  save/load.
-- **Export**: render the full arrangement (including all effects and SP-1200)
-  to a WAV file.
-- **File browser**: WAV-only browser with quick-nav to home/root and a
+  save/load. Open/Save/Export and sample import all run off the UI thread.
+- **Export**: render the full arrangement (including all effects, swing and
+  SP-1200) to a WAV file.
+- **Sample import**: WAV (8/16/24/32-bit integer PCM and 32-bit float) and
+  AIFF/AIF (8/16/24/32-bit integer PCM), via hand-written decoders — no
+  third-party codec library. An MP3 decoder is in the tree but unfinished
+  and deliberately not wired in yet.
+- **File browser**: quick-nav to home/root (a drive list on Windows) and a
   resizable width, drag-and-drop straight onto a track or the instrument
   slot.
+- **Cross-platform UI**: hand-built widgets with DPI-aware scaling
+  (Wayland HiDPI and Xorg both handled), and a Windows build using
+  DirectSound.
 
 ## Getting the toolchain (fpcupdeluxe)
 
