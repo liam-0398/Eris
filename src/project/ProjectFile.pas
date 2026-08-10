@@ -578,6 +578,9 @@ begin
     Project.SampleTransients[Idx] := DetectTransients(Project.SamplePool[Idx].Data,
       Project.SamplePool[Idx].FrameCount, Project.SamplePool[Idx].Channels,
       Project.SamplePool[Idx].SampleRate);
+    Project.SamplePeriods[Idx] := DetectFundamentalPeriod(Project.SamplePool[Idx].Data,
+      Project.SamplePool[Idx].FrameCount, Project.SamplePool[Idx].Channels,
+      Project.SamplePool[Idx].SampleRate);
   end;
 end;
 
@@ -687,6 +690,7 @@ begin
     SetLength(Project.SamplePaths, SampleCount);
     SetLength(Project.SamplePeaks, SampleCount);
     SetLength(Project.SampleTransients, SampleCount);
+    SetLength(Project.SamplePeriods, SampleCount);
 
     SetLength(SampleJobs, SampleCount);
     for i := 0 to SampleCount - 1 do
@@ -904,12 +908,14 @@ begin
               DetunedSample(Clip.WarpMarkers, Frame, Clip.PitchSemitones, Clip.Offset,
                 Sample.Data, Sample.FrameCount, Sample.Channels,
                 AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length,
-                Project.SampleTransients[Clip.SampleID]) * Clip.Gain;
+                Project.SampleTransients[Clip.SampleID],
+                  Project.SamplePeriods[Clip.SampleID]) * Clip.Gain;
             TrackBuffers[t][OutIdx + 1] := TrackBuffers[t][OutIdx + 1] +
               DetunedSample(Clip.WarpMarkers, Frame, Clip.PitchSemitones, Clip.Offset,
                 Sample.Data, Sample.FrameCount, Sample.Channels,
                 AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length,
-                Project.SampleTransients[Clip.SampleID]) * Clip.Gain;
+                Project.SampleTransients[Clip.SampleID],
+                  Project.SamplePeriods[Clip.SampleID]) * Clip.Gain;
           end
           else
           begin
@@ -917,12 +923,14 @@ begin
               DetunedSample(Clip.WarpMarkers, Frame, Clip.PitchSemitones, Clip.Offset,
                 Sample.Data, Sample.FrameCount, Sample.Channels,
                 AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length,
-                Project.SampleTransients[Clip.SampleID]) * Clip.Gain;
+                Project.SampleTransients[Clip.SampleID],
+                  Project.SamplePeriods[Clip.SampleID]) * Clip.Gain;
             TrackBuffers[t][OutIdx + 1] := TrackBuffers[t][OutIdx + 1] +
               DetunedSample(Clip.WarpMarkers, Frame, Clip.PitchSemitones, Clip.Offset,
                 Sample.Data, Sample.FrameCount, Sample.Channels,
                 AudioEngine.ProjectSampleRate, Clip.WarpMode, 1, Clip.Length,
-                Project.SampleTransients[Clip.SampleID]) * Clip.Gain;
+                Project.SampleTransients[Clip.SampleID],
+                  Project.SamplePeriods[Clip.SampleID]) * Clip.Gain;
           end;
         end;
       end;

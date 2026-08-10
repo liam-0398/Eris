@@ -24,6 +24,13 @@ function ComputeWaveformPeaks(const ASample: TSample): TWaveformPeaks;
 function DetectTransients(AData: PSingle; AFrameCount, AChannels,
   ASampleRate: Integer): TFrameArray;
 
+{ Dominant fundamental period of a sample, in frames, or 0 if none could be
+  found. Cached per-sample at load time in Project.SamplePeriods, exactly like
+  DetectTransients/SamplePeaks, and used only by the Tones ("LF") warp mode to
+  place its grains on whole waveform periods. }
+function DetectFundamentalPeriod(AData: PSingle; AFrameCount, AChannels,
+  ASampleRate: Integer): Integer;
+
 { Nominal timeline -> source map for a warped clip, as a frame position
   relative to the clip's Offset. An empty/short AMarkers means unwarped 1:1.
 
@@ -52,7 +59,7 @@ function WarpedSourceSample(const AMarkers: TWarpMarkerArray;
   ATimelineFrame: Int64; AClipLength: Int64; AOffset: Int64; AData: PSingle;
   AFrameCount: Integer; AChannels: Integer; ASampleRate: Integer;
   AWarpMode: Integer; AChannel: Integer;
-  const ATransients: TFrameArray = nil): Single;
+  const ATransients: TFrameArray = nil; APeriodFrames: Integer = 0): Single;
 
 { Cuts a warp marker array in two at ASplitFrame (clip-relative timeline
   frame), for use whenever a clip itself is split or trimmed (explicit split,
@@ -104,7 +111,8 @@ function SplitWarpMarkers(const AMarkers: TWarpMarkerArray; ASplitFrame: Int64;
 function DetunedSample(const AMarkers: TWarpMarkerArray; ATimelineFrame: Int64;
   ADetuneSemitones: Single; AOffset: Int64; AData: PSingle;
   AFrameCount, AChannels, ASampleRate: Integer; AWarpMode, AChannel: Integer;
-  AClipLength: Int64 = -1; const ATransients: TFrameArray = nil): Single;
+  AClipLength: Int64 = -1; const ATransients: TFrameArray = nil;
+  APeriodFrames: Integer = 0): Single;
 
 { Draws the waveform for [AStartFrame, AEndFrame) of a sample (out of
   ATotalFrameCount frames covered by APeaks) into ARect. When AMarkers has
@@ -225,6 +233,105 @@ begin
   SetLength(Result, ResultCount);
 end;
 
+{ Normalised autocorrelation over the highest-energy window in the sample.
+
+  Deliberately biased towards bass: the lag search runs from 1000 Hz down to
+  20 Hz, and an octave error UPWARDS is harmless here (an integer multiple of
+  the period is still a period, so grain placement stays phase-correct) while
+  one downwards would not be - which is why plain autocorrelation, whose
+  errors go upwards, is the right tool rather than something cleverer. }
+function DetectFundamentalPeriod(AData: PSingle; AFrameCount, AChannels,
+  ASampleRate: Integer): Integer;
+const
+  MinHz = 20;
+  MaxHz = 1000;
+  WindowFrames = 2048;
+var
+  MinLag, MaxLag, Lag, i, Need, Start, BestStart: Integer;
+  ch: Integer;
+  Mono: array of Single;
+  Sum, E0, ELag, Score, BestScore, Rms, BestRms, v: Double;
+begin
+  Result := 0;
+  if (AData = nil) or (AFrameCount <= 0) or (AChannels <= 0) then
+    Exit;
+
+  MinLag := ASampleRate div MaxHz;
+  MaxLag := ASampleRate div MinHz;
+  if MinLag < 2 then
+    MinLag := 2;
+  Need := WindowFrames + MaxLag;
+  if AFrameCount < Need then
+    Exit; { too short to judge a bass period from }
+
+  { pick the loudest window - an 808's decay tail correlates poorly, its body
+    correlates cleanly }
+  BestStart := 0;
+  BestRms := -1;
+  Start := 0;
+  while Start + Need <= AFrameCount do
+  begin
+    Rms := 0;
+    i := Start;
+    while i < Start + WindowFrames do
+    begin
+      v := AData[i * AChannels];
+      Rms := Rms + v * v;
+      Inc(i, 8); { every 8th frame is plenty to rank windows by energy }
+    end;
+    if Rms > BestRms then
+    begin
+      BestRms := Rms;
+      BestStart := Start;
+    end;
+    Inc(Start, WindowFrames);
+  end;
+  if BestRms <= 0 then
+    Exit;
+
+  SetLength(Mono, Need);
+  for i := 0 to Need - 1 do
+  begin
+    v := 0;
+    for ch := 0 to AChannels - 1 do
+      v := v + AData[(BestStart + i) * AChannels + ch];
+    Mono[i] := v / AChannels;
+  end;
+
+  E0 := 0;
+  for i := 0 to WindowFrames - 1 do
+    E0 := E0 + Mono[i] * Mono[i];
+  if E0 <= 0 then
+    Exit;
+
+  BestScore := 0;
+  for Lag := MinLag to MaxLag do
+  begin
+    Sum := 0;
+    ELag := 0;
+    for i := 0 to WindowFrames - 1 do
+    begin
+      Sum := Sum + Mono[i] * Mono[i + Lag];
+      ELag := ELag + Mono[i + Lag] * Mono[i + Lag];
+    end;
+    if ELag <= 0 then
+      Continue;
+    { normalised, so a long lag isn't penalised purely for covering quieter
+      audio - without this the search collapses onto MinLag every time }
+    Score := Sum / Sqrt(E0 * ELag);
+    if Score > BestScore then
+    begin
+      BestScore := Score;
+      Result := Lag;
+    end;
+  end;
+
+  { a weak best peak means this isn't periodic enough to treat as tonal -
+    report nothing and let the caller fall back }
+  if BestScore < 0.6 then
+    Result := 0;
+end;
+
 function ComputeWaveformPeaks(const ASample: TSample): TWaveformPeaks;
 var
   BinCount, i, f, ch: Integer;
@@ -287,6 +394,7 @@ const
   WarpReversalFadeMs = 3;
   WarpMaxOverlapSlices = 4;
   WarpRepitchFadeMs = 4;
+  TonesFallbackGrainMs = 25;
 
 function WarpedSourcePosition(const AMarkers: TWarpMarkerArray;
   ATimelineFrame: Int64; ASampleRate: Integer; AWarpMode: Integer): Double;
@@ -365,11 +473,81 @@ end;
   both gone). This copy exists because the realtime side can only ever have a
   raw PInt64/Count pair for its transients, the lock-free-safe shape, while
   every other caller has a TFrameArray; the two must stay in step. }
+{ Tones ("LF") renderer - the offline/shared copy of AudioEngine.
+  TonesClipSample. See that function's header for why sustained low-frequency
+  material needs grains placed on whole waveform periods rather than Beats'
+  transient slices. }
+function TonesSourceSample(const AMarkers: TWarpMarkerArray;
+  ATimelineFrame: Int64; AOffset: Int64; AData: PSingle;
+  AFrameCount: Integer; AChannels: Integer; ASampleRate: Integer;
+  AChannel: Integer; APeriodFrames: Integer): Single;
+var
+  k: Integer;
+  SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen: Int64;
+  P, OffsetIntoSeg, gCur: Int64;
+
+  function SafeInterp(APos: Double): Single;
+  var
+    AbsPos: Double;
+  begin
+    AbsPos := AOffset + APos;
+    if (AbsPos < 0) or (AbsPos >= AFrameCount) then
+      Result := 0
+    else
+      Result := Interpolate(AData, AFrameCount, AChannels, AChannel, AbsPos);
+  end;
+
+  function GrainAt(Ag: Int64): Double;
+  var
+    OutStart, NomSrc, SrcStart, u: Int64;
+    w: Double;
+  begin
+    Result := 0;
+    OutStart := Ag * P;
+    u := OffsetIntoSeg - OutStart;
+    if (u < 0) or (u >= 2 * P) then
+      Exit;
+
+    NomSrc := (OutStart * SegSourceLen) div SegTimelineLen;
+    SrcStart := SegStartSource + Round(NomSrc / P) * P;
+
+    w := 0.5 - 0.5 * Cos(2 * Pi * u / (2 * P));
+    Result := SafeInterp(SrcStart + u) * w;
+  end;
+
+begin
+  if Length(AMarkers) < 2 then
+    Exit(SafeInterp(ATimelineFrame));
+
+  k := 0;
+  while (k < Length(AMarkers) - 2) and
+    (ATimelineFrame >= AMarkers[k + 1].TimelineFrame) do
+    Inc(k);
+
+  SegStartTimeline := AMarkers[k].TimelineFrame;
+  SegStartSource := AMarkers[k].SourceFrame;
+  SegTimelineLen := AMarkers[k + 1].TimelineFrame - SegStartTimeline;
+  SegSourceLen := AMarkers[k + 1].SourceFrame - SegStartSource;
+  if (SegTimelineLen <= 0) or (SegSourceLen <= 0) then
+    Exit(SafeInterp(SegStartSource));
+
+  P := APeriodFrames;
+  if P < 2 then
+    P := (TonesFallbackGrainMs * ASampleRate) div 1000;
+  if P < 2 then
+    P := 2;
+
+  OffsetIntoSeg := ATimelineFrame - SegStartTimeline;
+  gCur := OffsetIntoSeg div P;
+
+  Result := GrainAt(gCur) + GrainAt(gCur - 1);
+end;
+
 function WarpedSourceSample(const AMarkers: TWarpMarkerArray;
   ATimelineFrame: Int64; AClipLength: Int64; AOffset: Int64; AData: PSingle;
   AFrameCount: Integer; AChannels: Integer; ASampleRate: Integer;
   AWarpMode: Integer; AChannel: Integer;
-  const ATransients: TFrameArray): Single;
+  const ATransients: TFrameArray; APeriodFrames: Integer): Single;
 var
   k: Integer;
   SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen: Int64;
@@ -605,6 +783,10 @@ begin
   if Length(AMarkers) < 2 then
     Exit(SafeInterp(ATimelineFrame));
 
+  if AWarpMode = WarpModeTones then
+    Exit(TonesSourceSample(AMarkers, ATimelineFrame, AOffset, AData, AFrameCount,
+      AChannels, ASampleRate, AChannel, APeriodFrames));
+
   if AWarpMode = WarpModeRePitch then
     Exit(SafeInterp(WarpedSourcePosition(AMarkers, ATimelineFrame, ASampleRate,
       AWarpMode)));
@@ -663,7 +845,8 @@ end;
 function DetunedSample(const AMarkers: TWarpMarkerArray; ATimelineFrame: Int64;
   ADetuneSemitones: Single; AOffset: Int64; AData: PSingle;
   AFrameCount, AChannels, ASampleRate: Integer; AWarpMode, AChannel: Integer;
-  AClipLength: Int64; const ATransients: TFrameArray): Single;
+  AClipLength: Int64; const ATransients: TFrameArray;
+  APeriodFrames: Integer): Single;
 const
   DetuneGrainMs = 25;
 var
@@ -686,7 +869,7 @@ begin
   if ADetuneSemitones = 0 then
     Exit(WarpedSourceSample(AMarkers, ATimelineFrame, AClipLength, AOffset,
       AData, AFrameCount, AChannels, ASampleRate, AWarpMode, AChannel,
-      ATransients));
+      ATransients, APeriodFrames));
 
   Rate := Exp((ADetuneSemitones / 12) * Ln(2));
   GrainFrames := (DetuneGrainMs * ASampleRate) div 1000;

@@ -26,7 +26,10 @@ type
     MarkerCount: Integer; { 0 = unwarped 1:1 playback }
     MarkerSource: array[0..MaxClipWarpMarkers - 1] of Int64;
     MarkerTimeline: array[0..MaxClipWarpMarkers - 1] of Int64;
-    WarpMode: Integer; { 0 = Beats (loop/truncate, preserves pitch), 1 = RePitch (vari-speed) }
+    WarpMode: Integer; { 0 = Beats (transient slices), 1 = RePitch (vari-speed),
+      2 = Tones (pitch-synchronous, for sustained low-frequency material) }
+    PeriodFrames: Integer; { detected fundamental period of the source sample,
+      0 if none - Tones mode only, see TonesClipSample }
     DetuneSemitones: Single; { independent pitch trim that never changes the
       clip's own Length/Position - see DetunedClipSample }
     Transients: PInt64; { raw pointer into Project.SampleTransients[SampleID]'s
@@ -1049,16 +1052,120 @@ begin
   Result := Acc;
 end;
 
+const
+  { Tones grain length is two fundamental periods, hopping one - 50% overlap,
+    which is what makes the Hann windows sum to unity. When no period was
+    detected (percussive or noisy material) fall back to a fixed grain of
+    this length so the mode still behaves, just without phase locking. }
+  TonesFallbackGrainMs = 25;
+
+{ ---------------------------------------------------------------------------
+  Tones warp ("LF"): pitch-synchronous overlap-add, for sustained
+  low-frequency material - 808s, sub bass, anything monophonic.
+
+  Beats is the wrong algorithm for this and no amount of tuning fixes it. It
+  splices in the time domain, and a 40 Hz fundamental has a 25 ms period -
+  longer than the crossfade - so every splice lands at an arbitrary point in
+  the cycle and combs. Worse, on a sustained note the outgoing slice is still
+  at full level when the next one starts, so the overlap sums two near-0 dBFS
+  copies and clips against FillBlock's limiter.
+
+  Both problems have the same root: the splice ignores the waveform's phase.
+  So this places grains on WHOLE PERIODS instead. A grain's source start is
+  the nominal warp position snapped to an integer multiple of the detected
+  period from the segment's own start, which means every grain begins at the
+  same point in the cycle no matter where the warp put it. Consecutive grains
+  are therefore phase-continuous by construction: they reinforce instead of
+  combing, and because a Hann window at 50% overlap sums to exactly 1, the
+  result stays at unity gain instead of stacking towards the clipper.
+
+  The cost is timing precision - snapping moves a grain by up to half a period
+  (12 ms at 40 Hz). Inaudible on sustained bass, which is the entire point of
+  restricting this mode to it; it would smear a drum loop badly, which is what
+  Beats is for.
+  --------------------------------------------------------------------------- }
+function TonesClipSample(Clip: PPlaybackClip; AClipRelativeFrame: Int64;
+  AChannel: Integer): Single;
+var
+  k: Integer;
+  SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen: Int64;
+  P, OffsetIntoSeg, gCur: Int64;
+
+  function SafeInterp(APos: Double): Single;
+  var
+    AbsPos: Double;
+  begin
+    AbsPos := Clip^.Offset + APos;
+    if (AbsPos < 0) or (AbsPos >= Clip^.FrameCount) then
+      Result := 0
+    else
+      Result := Interpolate(Clip^.Data, Clip^.FrameCount, Clip^.Channels,
+        AChannel, AbsPos);
+  end;
+
+  { windowed contribution of grain Ag, which occupies output frames
+    [Ag * P, Ag * P + 2P) within this segment }
+  function GrainAt(Ag: Int64): Double;
+  var
+    OutStart, NomSrc, SrcStart, u: Int64;
+    w: Double;
+  begin
+    Result := 0;
+    OutStart := Ag * P;
+    u := OffsetIntoSeg - OutStart;
+    if (u < 0) or (u >= 2 * P) then
+      Exit;
+
+    { nominal source position for this grain's start, then snapped to a whole
+      period from the segment start - the phase lock }
+    NomSrc := (OutStart * SegSourceLen) div SegTimelineLen;
+    SrcStart := SegStartSource + Round(NomSrc / P) * P;
+
+    w := 0.5 - 0.5 * Cos(2 * Pi * u / (2 * P));
+    Result := SafeInterp(SrcStart + u) * w;
+  end;
+
+begin
+  if Clip^.MarkerCount < 2 then
+    Exit(SafeInterp(AClipRelativeFrame));
+
+  k := 0;
+  while (k < Clip^.MarkerCount - 2) and
+    (AClipRelativeFrame >= Clip^.MarkerTimeline[k + 1]) do
+    Inc(k);
+
+  SegStartTimeline := Clip^.MarkerTimeline[k];
+  SegStartSource := Clip^.MarkerSource[k];
+  SegTimelineLen := Clip^.MarkerTimeline[k + 1] - SegStartTimeline;
+  SegSourceLen := Clip^.MarkerSource[k + 1] - SegStartSource;
+  if (SegTimelineLen <= 0) or (SegSourceLen <= 0) then
+    Exit(SafeInterp(SegStartSource));
+
+  P := Clip^.PeriodFrames;
+  if P < 2 then
+    P := (TonesFallbackGrainMs * ProjectSampleRate) div 1000;
+  if P < 2 then
+    P := 2;
+
+  OffsetIntoSeg := AClipRelativeFrame - SegStartTimeline;
+  gCur := OffsetIntoSeg div P;
+
+  { exactly two grains overlap at any output frame, by construction }
+  Result := GrainAt(gCur) + GrainAt(gCur - 1);
+end;
+
 { The audio-producing entry point for a warped clip: Beats goes through the
-  slice renderer above, RePitch stays a plain continuous resample read
-  straight through its position map. Plain ClipSourcePosition remains
-  available for callers that want a single nominal position (detune anchors,
-  split points, marker placement) rather than audio. }
+  slice renderer above, Tones through the pitch-synchronous one, RePitch stays
+  a plain continuous resample read straight through its position map. Plain
+  ClipSourcePosition remains available for callers that want a single nominal
+  position (detune anchors, split points, marker placement) rather than audio. }
 function ClipSourceSample(Clip: PPlaybackClip; AClipRelativeFrame: Int64;
   AChannel: Integer): Single;
 var
   AbsPos: Double;
 begin
+  if (Clip^.MarkerCount >= 2) and (Clip^.WarpMode = 2) then
+    Exit(TonesClipSample(Clip, AClipRelativeFrame, AChannel));
   if (Clip^.MarkerCount >= 2) and (Clip^.WarpMode <> 1) then
     Exit(BeatsClipSample(Clip, AClipRelativeFrame, AChannel));
 

@@ -42,6 +42,11 @@ var
     place Beats-mode grain boundaries on real attacks instead of an
     arbitrary fixed grid. Computed once at load time, like SamplePeaks. }
   SampleTransients: array of TFrameArray;
+
+  { dominant fundamental period per sample in frames (0 = none found) -
+    computed once at load like SampleTransients, used only by the Tones
+    ("LF") warp mode to place grains on whole waveform periods }
+  SamplePeriods: array of Integer;
   TempoBPM: Single = DefaultTempoBPM;
 
   { tracks that have been deleted are marked as inactive; used to maintain
@@ -245,6 +250,7 @@ begin
   SetLength(SamplePaths, Length(SamplePaths) + 1);
   SetLength(SamplePeaks, Length(SamplePeaks) + 1);
   SetLength(SampleTransients, Length(SampleTransients) + 1);
+  SetLength(SamplePeriods, Length(SamplePeriods) + 1);
   Result := High(SamplePool);
   SamplePool[Result] := ASample;
   SampleNames[Result] := AName;
@@ -252,6 +258,8 @@ begin
   SamplePeaks[Result] := ComputeWaveformPeaks(ASample);
   SampleTransients[Result] := DetectTransients(ASample.Data, ASample.FrameCount,
     ASample.Channels, ASample.SampleRate);
+  SamplePeriods[Result] := DetectFundamentalPeriod(ASample.Data,
+    ASample.FrameCount, ASample.Channels, ASample.SampleRate);
 end;
 
 procedure CommitClipToTrack(ATrackIndex: Integer; const ANewClip: TClip);
@@ -419,6 +427,7 @@ begin
   SetLength(SamplePaths, 0);
   SetLength(SamplePeaks, 0);
   SetLength(SampleTransients, 0);
+  SetLength(SamplePeriods, 0);
   SetLength(UndoStack, 0);
 
   for i := 0 to MaxTracks - 1 do

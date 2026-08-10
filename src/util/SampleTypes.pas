@@ -36,8 +36,14 @@ const
     linearly across its whole span using the same resample engine as
     keyboard pitch-shifting, so moving a marker changes playback speed (and
     therefore pitch) smoothly across both the segment before and after it. }
+  { Tones ("LF"): pitch-synchronous overlap-add for sustained low-frequency
+    material - 808s, sub bass, anything monophonic where Beats' transient
+    slicing has nothing useful to slice at and its splices land mid-cycle of
+    a waveform whose period is longer than the crossfade. See
+    AudioEngine.TonesClipSample. }
   WarpModeBeats = 0;
   WarpModeRePitch = 1;
+  WarpModeTones = 2;
 
 type
   TClip = record
