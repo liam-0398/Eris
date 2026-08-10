@@ -5,7 +5,8 @@ unit FileBrowser;
 interface
 
 uses
-  Classes, SysUtils, Controls, ExtCtrls, StdCtrls, Graphics, UIScale;
+  Classes, SysUtils, Controls, ExtCtrls, StdCtrls, Graphics, UIScale
+  {$IFDEF WINDOWS}, Windows{$ENDIF};
 
 type
   TFileActivateEvent = procedure(Sender: TObject; const AFilePath: string) of object;
@@ -21,7 +22,12 @@ type
     FCurrentDir: string;
     FOnFileActivate: TFileActivateEvent;
     function HasSampleExtension(const AName: string): Boolean;
+    function UserHomeDir: string;
     procedure Populate;
+    {$IFDEF WINDOWS}
+    procedure PopulateDrives;
+    function AtDriveRoot: Boolean;
+    {$ENDIF}
     procedure ListBoxDblClick(Sender: TObject);
     procedure HomeButtonClick(Sender: TObject);
     procedure RootButtonClick(Sender: TObject);
@@ -41,6 +47,14 @@ const
     files, it doesn't decode them }
   SampleExtensions: array[0..3] of string = ('.wav', '.aiff', '.aif', '.mp3');
   DefaultBrowseDir = '/NFS/Music/Production/';
+  {$IFDEF WINDOWS}
+  { Sentinel FCurrentDir for the drive-list view. Windows has no single
+    filesystem root to point "/" at, so it gets a pseudo-folder listing the
+    drives instead - the equivalent of "This PC". It is deliberately not a
+    valid path, so anything that would otherwise hit the filesystem has to
+    test for it first. }
+  DrivesDir = '::drives';
+  {$ENDIF}
 
 constructor TFileBrowser.Create(AOwner: TComponent);
 begin
@@ -69,7 +83,11 @@ begin
   FHomeButton.Align := alLeft;
   FHomeButton.Width := Px(32);
   FHomeButton.ShowHint := True;
+  {$IFDEF WINDOWS}
+  FHomeButton.Hint := 'Go to your user folder';
+  {$ELSE}
   FHomeButton.Hint := 'Go to home folder';
+  {$ENDIF}
   FHomeButton.OnClick := @HomeButtonClick;
 
   FRootButton := TButton.Create(Self);
@@ -78,7 +96,11 @@ begin
   FRootButton.Align := alLeft;
   FRootButton.Width := Px(32);
   FRootButton.ShowHint := True;
+  {$IFDEF WINDOWS}
+  FRootButton.Hint := 'Show all drives';
+  {$ELSE}
   FRootButton.Hint := 'Go to filesystem root';
+  {$ENDIF}
   FRootButton.OnClick := @RootButtonClick;
 
   FDividerPanel := TPanel.Create(Self);
@@ -97,8 +119,46 @@ begin
   if DirectoryExists(DefaultBrowseDir) then
     SetDirectory(DefaultBrowseDir)
   else
-    SetDirectory(GetUserDir);
+    SetDirectory(UserHomeDir);
 end;
+
+{ What the "H" button means: the user's own top-level folder. }
+function TFileBrowser.UserHomeDir: string;
+begin
+  {$IFDEF WINDOWS}
+  { %USERPROFILE% (C:\Users\Name) is the real counterpart of $HOME. FPC's
+    GetUserDir can hand back the Documents folder on Windows instead, which
+    is a level too deep and not what this button is for - so only fall back
+    to it if the environment gives us nothing usable. }
+  Result := GetEnvironmentVariable('USERPROFILE');
+  if (Result = '') or not DirectoryExists(Result) then
+    Result := GetEnvironmentVariable('HOMEDRIVE') + GetEnvironmentVariable('HOMEPATH');
+  if (Result = '') or not DirectoryExists(Result) then
+    Result := GetUserDir;
+  {$ELSE}
+  Result := GetUserDir;
+  {$ENDIF}
+end;
+
+{$IFDEF WINDOWS}
+{ True at the top of a drive, e.g. 'C:' - SetDirectory strips the trailing
+  delimiter, so a drive root is exactly two characters. }
+function TFileBrowser.AtDriveRoot: Boolean;
+begin
+  Result := (Length(FCurrentDir) = 2) and (FCurrentDir[2] = ':');
+end;
+
+procedure TFileBrowser.PopulateDrives;
+var
+  Mask: DWORD;
+  i: Integer;
+begin
+  Mask := GetLogicalDrives;
+  for i := 0 to 25 do
+    if (Mask and (DWORD(1) shl i)) <> 0 then
+      FListBox.Items.Add(Chr(Ord('A') + i) + ':' + PathDelim);
+end;
+{$ENDIF}
 
 function TFileBrowser.HasSampleExtension(const AName: string): Boolean;
 var
@@ -119,6 +179,16 @@ var
   i: Integer;
 begin
   FListBox.Clear;
+
+  {$IFDEF WINDOWS}
+  if FCurrentDir = DrivesDir then
+  begin
+    FPathLabel.Caption := 'This PC';
+    PopulateDrives;
+    Exit;
+  end;
+  {$ENDIF}
+
   FPathLabel.Caption := FCurrentDir;
 
   Dirs := TStringList.Create;
@@ -159,8 +229,26 @@ begin
     Exit;
   Item := FListBox.Items[FListBox.ItemIndex];
 
+  {$IFDEF WINDOWS}
+  { in the drive list every entry is already an absolute root, so it replaces
+    the current directory instead of being appended to it }
+  if FCurrentDir = DrivesDir then
+  begin
+    SetDirectory(Item);
+    Exit;
+  end;
+  {$ENDIF}
+
   if Item = '..' then
   begin
+    {$IFDEF WINDOWS}
+    { above a drive root there is only the drive list }
+    if AtDriveRoot then
+    begin
+      SetDirectory(DrivesDir);
+      Exit;
+    end;
+    {$ENDIF}
     NewDir := ExtractFileDir(FCurrentDir);
     if NewDir = '' then
       NewDir := PathDelim;
@@ -174,19 +262,32 @@ end;
 
 procedure TFileBrowser.HomeButtonClick(Sender: TObject);
 begin
-  SetDirectory(GetUserDir);
+  SetDirectory(UserHomeDir);
 end;
 
 procedure TFileBrowser.RootButtonClick(Sender: TObject);
 begin
-  { ExtractFileDrive returns '' on platforms with no drive-letter concept, so
-    this is just PathDelim there (e.g. Unix '/'); on Windows it's the current
-    drive's root (e.g. 'C:\') }
-  SetDirectory(ExtractFileDrive(FCurrentDir) + PathDelim);
+  {$IFDEF WINDOWS}
+  { Windows has no single filesystem root, and jumping to the CURRENT drive's
+    root can't reach any other drive - so this opens the drive list instead }
+  SetDirectory(DrivesDir);
+  {$ELSE}
+  SetDirectory(PathDelim);
+  {$ENDIF}
 end;
 
 procedure TFileBrowser.SetDirectory(const ADir: string);
 begin
+  {$IFDEF WINDOWS}
+  { the pseudo-folder is not a path - keep it verbatim }
+  if ADir = DrivesDir then
+  begin
+    FCurrentDir := DrivesDir;
+    Populate;
+    Exit;
+  end;
+  {$ENDIF}
+
   FCurrentDir := ExcludeTrailingPathDelimiter(ADir);
   if FCurrentDir = '' then
     FCurrentDir := PathDelim;
