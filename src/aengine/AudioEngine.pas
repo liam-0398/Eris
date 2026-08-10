@@ -118,6 +118,26 @@ function AudioEngineTunerPitchHz(ATarget, AEffectIndex: Integer): Single;
 function AudioEngineGetBufferSize: Integer;
 procedure AudioEngineSetBufferSize(ANewBufferSize: Integer);
 
+const
+  { Which TAudioBackend implementation is live. "Native" is whatever the
+    platform's own always-present API is - ALSA on Linux, DirectSound on
+    Windows - and is the default and the fallback. }
+  AudioBackendNative = 0;
+  AudioBackendJACK = 1;
+
+{ Selecting JACK deliberately does NOT check whether JACK is installed or
+  running first. If it isn't, the backend simply never opens and the engine
+  runs with nowhere to send audio - silent, but stable and paced, and undone
+  by switching back to Native. That's the same failure the backend already
+  has to survive when jackd is stopped mid-session, so it's one path rather
+  than two plus a probe. On Windows this is always Native.
+
+  Same stop/close/reopen/restart shape (and the same main-thread-only rule)
+  as AudioEngineSetBufferSize above - it restarts the capture side too,
+  since a backend owns both directions. }
+function AudioEngineGetBackend: Integer;
+procedure AudioEngineSetBackend(ABackendKind: Integer);
+
 { Frees whatever old per-track TPlaybackClip arrays the audio thread has
   retired since the last call - see PendingFrees' declaration. Must be
   called periodically from the MAIN thread only (MainForm's playback poll
@@ -171,7 +191,7 @@ uses
   {$IFDEF WINDOWS}
   DirectSoundBackend,
   {$ELSE}
-  ALSABackend,
+  ALSABackend, JACKBackend,
   {$ENDIF}
   Resample, Project, SP1200, Effects;
 
@@ -268,6 +288,7 @@ type
 
 var
   Backend: TAudioBackend;
+  CurrentBackendKind: Integer = AudioBackendNative;
   BlockFrames: Integer;
   PlaybackThread: TPlaybackThread;
   MixBuffer: PSingle;
@@ -1947,6 +1968,23 @@ begin
   end;
 end;
 
+{ Points Backend at the implementation CurrentBackendKind names. Every field
+  of the record is assigned by each Create*Backend function, so there is no
+  path where a stale pointer from the previous backend survives a switch.
+  Windows has one backend today, so the kind is ignored there rather than
+  offering a JACK option that can't be built. }
+procedure SelectBackendRecord;
+begin
+  {$IFDEF WINDOWS}
+  Backend := CreateDirectSoundBackend;
+  {$ELSE}
+  if CurrentBackendKind = AudioBackendJACK then
+    Backend := CreateJACKBackend
+  else
+    Backend := CreateALSABackend;
+  {$ENDIF}
+end;
+
 { Opens the capture backend + ring buffer and starts CaptureThread - shared
   by AudioEngineInit and AudioEngineSetInputBufferSize (the latter via a
   prior CloseCaptureAndStopThread), same stop/reopen/restart shape
@@ -2027,11 +2065,7 @@ begin
 
   PrecomputeClick;
 
-  {$IFDEF WINDOWS}
-  Backend := CreateDirectSoundBackend;
-  {$ELSE}
-  Backend := CreateALSABackend;
-  {$ENDIF}
+  SelectBackendRecord;
   Backend.Open(ProjectSampleRate, OutputChannels, BlockFrames);
 
   PlaybackThread := TPlaybackThread.Create(False);
@@ -2307,6 +2341,47 @@ begin
 
   PlaybackThread := TPlaybackThread.Create(False);
   PlaybackThread.FreeOnTerminate := False;
+end;
+
+function AudioEngineGetBackend: Integer;
+begin
+  Result := CurrentBackendKind;
+end;
+
+procedure AudioEngineSetBackend(ABackendKind: Integer);
+begin
+  if ABackendKind = CurrentBackendKind then
+    Exit;
+
+  { teardown order copies AudioEngineShutdown (capture first, then the
+    playback thread, then the device), and the bring-up order copies
+    AudioEngineInit (device, playback thread, then capture) - the backend
+    record itself is only swapped in between, while nothing is running
+    against it }
+  CloseCaptureAndStopThread;
+
+  if PlaybackThread <> nil then
+  begin
+    PlaybackThread.Terminate;
+    PlaybackThread.WaitFor;
+    FreeAndNil(PlaybackThread);
+  end;
+
+  Backend.Close;
+
+  CurrentBackendKind := ABackendKind;
+  SelectBackendRecord;
+
+  { Open's result is deliberately ignored, exactly as in AudioEngineInit: a
+    backend that can't open (JACK not installed, or its server not running)
+    leaves the engine alive but silent rather than failing the switch - see
+    AudioEngineSetBackend's interface comment. }
+  Backend.Open(ProjectSampleRate, OutputChannels, BlockFrames);
+
+  PlaybackThread := TPlaybackThread.Create(False);
+  PlaybackThread.FreeOnTerminate := False;
+
+  OpenCaptureAndStartThread;
 end;
 
 function AudioEngineGetInputBufferSize: Integer;

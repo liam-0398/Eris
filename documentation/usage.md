@@ -461,15 +461,45 @@ plugged into the line-in.
 
 Edit > Preferences. What actually does something today:
 
-- **SP-1200 emulation** (On/Off) — applied immediately.
+- **Backend** — ALSA or JACK on Linux, DirectSound on Windows. Applied on
+  **OK**, since it stops and reopens the audio device. See
+  [Using JACK](#using-jack) below.
+- **SP-1200** (On/Off) — applied immediately.
 - **Buffer size** (128–4096) — applied on **OK**, since it stops and reopens
   the audio device.
 - **Input buffer** (128–4096) — same, for the capture device. Defaults to
   1024, a sensible size for line-in.
 - **Input gain** (−24…+24 dB) — applied immediately as you drag.
 
-**Backend**, **Device** and **Sample rate** are placeholders for future
-options and don't do anything yet.
+**Output**, **Input** and **Sample rate** are placeholders for future options
+and don't do anything yet — Eris always opens the system default device.
+
+### Using JACK
+
+Pick **JACK** as the backend and hit OK. Eris registers as a JACK client
+called `Eris` with `out_L`/`out_R` (and `in_L`/`in_R` for capture), and
+connects itself to the first pair of hardware ports it finds so you get sound
+without a trip to the patchbay. Rewire it however you like afterwards in
+qjackctl or qpwgraph — Eris never reconnects behind you.
+
+This works with real JACK (jackd) and with PipeWire's JACK layer; they
+provide the same library and Eris doesn't care which is running.
+
+Selecting JACK **greys out Output, Input, Sample rate, Buffer size and Input
+buffer**, because under JACK those aren't Eris's to set: the sample rate and
+the period size belong to the server and are set in qjackctl before it
+starts, and routing belongs to the patchbay. Everything else in this dialog
+still applies.
+
+Two things worth knowing:
+
+- **If JACK isn't installed or the server isn't running**, selecting it is
+  still allowed. Eris just runs with nowhere to send audio — silent, no
+  error, no crash. Switch the backend back to ALSA to get sound again. Same
+  applies if the server dies while Eris is connected.
+- **If the JACK server isn't at 44100**, Eris resamples to match it, which
+  costs a little quality. Setting the server to 44100 in qjackctl avoids the
+  conversion entirely.
 
 ## SP-1200 emulation
 
