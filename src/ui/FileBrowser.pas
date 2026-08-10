@@ -129,10 +129,15 @@ begin
   { %USERPROFILE% (C:\Users\Name) is the real counterpart of $HOME. FPC's
     GetUserDir can hand back the Documents folder on Windows instead, which
     is a level too deep and not what this button is for - so only fall back
-    to it if the environment gives us nothing usable. }
-  Result := GetEnvironmentVariable('USERPROFILE');
+    to it if the environment gives us nothing usable.
+
+    Qualified with SysUtils because the Windows unit in this unit's uses
+    clause exports its own GetEnvironmentVariable - the raw Win32
+    (PChar; PChar; LongWord): DWord one, which is not what's wanted here. }
+  Result := SysUtils.GetEnvironmentVariable('USERPROFILE');
   if (Result = '') or not DirectoryExists(Result) then
-    Result := GetEnvironmentVariable('HOMEDRIVE') + GetEnvironmentVariable('HOMEPATH');
+    Result := SysUtils.GetEnvironmentVariable('HOMEDRIVE') +
+      SysUtils.GetEnvironmentVariable('HOMEPATH');
   if (Result = '') or not DirectoryExists(Result) then
     Result := GetUserDir;
   {$ELSE}
@@ -204,7 +209,10 @@ begin
         else if HasSampleExtension(SearchRec.Name) then
           Files.Add(SearchRec.Name);
       until FindNext(SearchRec) <> 0;
-      FindClose(SearchRec);
+      { qualified for the same reason as GetEnvironmentVariable above: on
+        Windows the Windows unit's FindClose(QWord) shadows this one. Same
+        symbol as the bare call on every other platform. }
+      SysUtils.FindClose(SearchRec);
     end;
     Dirs.Sort;
     Files.Sort;

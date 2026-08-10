@@ -6,3 +6,5 @@ lib/
 backup/
 *.lps
 eris.res
+eris.exe
+windbg.txt
