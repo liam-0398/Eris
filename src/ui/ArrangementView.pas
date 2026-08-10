@@ -6,7 +6,8 @@ interface
 
 uses
   Classes, SysUtils, Math, Types, Forms, Controls, Graphics, LCLType, StdCtrls,
-  FileBrowser, SampleTypes, Project, AudioEngine, Waveform, ClipOverwrite;
+  Buttons, FileBrowser, SampleTypes, Project, AudioEngine, Waveform,
+  ClipOverwrite;
 
 type
   TFileDropEvent = procedure(Sender: TObject; ATrackIndex: Integer;
@@ -71,9 +72,9 @@ type
       { per-track send strip, on its own line under the volume fader: an
         S1/S2 enable button and a level slider for each }
       SendRowY = 60;
-      SendButtonWidth = 20;
-      SendButtonHeight = 14;
-      SendSliderWidth = 44;
+      SendButtonWidth = 22;
+      SendButtonHeight = 16;
+      SendSliderWidth = 40;
       SendSliderRadius = 4;
       SendSliderGrabPixels = 8;
       SendGroupWidth = 76; { button + gap + slider, per send }
@@ -117,6 +118,13 @@ type
       FDraggingSendIndex: Integer;
       { which pinned send-bus row's return level is being dragged, -1 none }
       FDraggingReturnSend: Integer;
+      { The per-track S1/S2 enable toggles are REAL TSpeedButtons, not
+        canvas rectangles hit-tested in MouseDown like the mute button and
+        the sliders around them - same as the BT/LF/RP warp buttons. A
+        TSpeedButton is a TGraphicControl, so this costs no window handles;
+        it just means the widgetset routes the click instead of this unit
+        doing its own arithmetic to decide whether one landed. }
+      FSendButtons: array[0..Project.MaxTracks - 1, 0..Project.SendCount - 1] of TSpeedButton;
       FGridDivision: Integer; { divisions per bar, e.g. 16 = 1/16th notes }
       FRangeSelectActive: Boolean;
       FRangeDragStartFrame: Int64;
@@ -150,7 +158,9 @@ type
     function HitTestVolumeSlider(ATrackIndex, Y: Integer): Boolean;
     function MuteButtonRect(ATrackIndex: Integer): TRect;
     function MonitorButtonRect(ATrackIndex: Integer): TRect;
-    function SendButtonRect(ATrackIndex, ASendIndex: Integer): TRect;
+    function SendButtonLeft(ASendIndex: Integer): Integer;
+    procedure LayoutSendButtons;
+    procedure SendButtonClick(Sender: TObject);
     function SendSliderLeft(ASendIndex: Integer): Integer;
     function SendKnobX(ATrackIndex, ASendIndex: Integer): Integer;
     function XToSendLevel(ASendIndex, X: Integer): Single;
@@ -238,7 +248,7 @@ var
 
 constructor TArrangementView.Create(AOwner: TComponent);
 var
-  i: Integer;
+  i, j: Integer;
 begin
   inherited Create(AOwner);
   DoubleBuffered := True;
@@ -263,6 +273,29 @@ begin
   for i := 0 to Project.MaxTracks - 1 do
     FTrackColors[i] := RGBToColor(100 + Random(120), 100 + Random(120),
       100 + Random(120));
+
+  { one S1/S2 toggle per track slot, created once up front for every possible
+    track (not just the visible ones) so LayoutSendButtons below only ever has
+    to move and show/hide them, never create or free anything mid-paint }
+  for i := 0 to Project.MaxTracks - 1 do
+    for j := 0 to Project.SendCount - 1 do
+    begin
+      FSendButtons[i][j] := TSpeedButton.Create(Self);
+      FSendButtons[i][j].Parent := Self;
+      FSendButtons[i][j].Caption := 'S' + IntToStr(j + 1);
+      FSendButtons[i][j].Font.Style := [fsBold];
+      { a unique GroupIndex plus AllowAllUp is what turns a TSpeedButton into
+        a plain independent on/off toggle - shared group indices would make
+        them mutually exclusive, which is how BT/LF/RP work but the exact
+        opposite of what a pair of sends wants }
+      FSendButtons[i][j].GroupIndex := 100 + i * Project.SendCount + j;
+      FSendButtons[i][j].AllowAllUp := True;
+      FSendButtons[i][j].Tag := i * Project.SendCount + j;
+      FSendButtons[i][j].Visible := False;
+      FSendButtons[i][j].ShowHint := True;
+      FSendButtons[i][j].Hint := Format('Send this track to S%d', [j + 1]);
+      FSendButtons[i][j].OnClick := @SendButtonClick;
+    end;
 
   FHScrollBar := TScrollBar.Create(Self);
   FHScrollBar.Parent := Self;
@@ -534,14 +567,76 @@ end;
   out left to right on one line under the volume fader. The button is the
   "is this track in the room" switch; the slider is how much of it. }
 
-function TArrangementView.SendButtonRect(ATrackIndex, ASendIndex: Integer): TRect;
-var
-  y, x: Integer;
+function TArrangementView.SendButtonLeft(ASendIndex: Integer): Integer;
 begin
-  y := RowTop(ATrackIndex) + SendRowY;
-  x := HeaderLeft + SendLeftMargin + ASendIndex * SendGroupWidth;
-  Result := Rect(x, y - SendButtonHeight div 2, x + SendButtonWidth,
-    y - SendButtonHeight div 2 + SendButtonHeight);
+  Result := HeaderLeft + SendLeftMargin + ASendIndex * SendGroupWidth;
+end;
+
+{ Moves every send button to its track's current row and syncs its lit
+  state, then hides the ones whose row is scrolled out of the visible band
+  or would land under the pinned S1/S2 rows (graphic controls paint after
+  their parent, so an unhidden one would float over those rows).
+
+  Called from Paint, so it tracks scrolling and track add/remove with no
+  extra plumbing. Every write is guarded on the value actually changing -
+  SetBounds/Visible on a TGraphicControl invalidates the parent, and doing
+  that unconditionally from inside Paint would repaint forever. }
+procedure TArrangementView.LayoutSendButtons;
+var
+  i, s, bx, by: Integer;
+  Shown, Lit: Boolean;
+begin
+  for i := 0 to Project.MaxTracks - 1 do
+    for s := 0 to Project.SendCount - 1 do
+    begin
+      by := RowTop(i) + SendRowY - SendButtonHeight div 2;
+      Shown := (i < Project.TrackCount) and (RowTop(i) >= RulerHeight) and
+        (RowTop(i) + TrackHeight <= ContentHeight) and
+        (by + SendButtonHeight <= SendRowTop(0));
+      if FSendButtons[i][s].Visible <> Shown then
+        FSendButtons[i][s].Visible := Shown;
+      if not Shown then
+        Continue;
+
+      bx := SendButtonLeft(s);
+      if (FSendButtons[i][s].Left <> bx) or (FSendButtons[i][s].Top <> by) then
+        FSendButtons[i][s].SetBounds(bx, by, SendButtonWidth, SendButtonHeight);
+
+      Lit := Project.TrackSendEnabled[i][s];
+      if FSendButtons[i][s].Down <> Lit then
+        FSendButtons[i][s].Down := Lit;
+      { same lit/unlit language as the BT/LF/RP warp buttons }
+      if Lit then
+      begin
+        if FSendButtons[i][s].Color <> clSkyBlue then
+        begin
+          FSendButtons[i][s].Color := clSkyBlue;
+          FSendButtons[i][s].Font.Color := clBlack;
+        end;
+      end
+      else if FSendButtons[i][s].Color <> clBtnFace then
+      begin
+        FSendButtons[i][s].Color := clBtnFace;
+        FSendButtons[i][s].Font.Color := clWindowText;
+      end;
+    end;
+end;
+
+procedure TArrangementView.SendButtonClick(Sender: TObject);
+var
+  Btn: TSpeedButton;
+  TrackIndex, SendIndex: Integer;
+begin
+  Btn := Sender as TSpeedButton;
+  TrackIndex := Btn.Tag div Project.SendCount;
+  SendIndex := Btn.Tag mod Project.SendCount;
+  if (TrackIndex < 0) or (TrackIndex >= Project.MaxTracks) then
+    Exit;
+  { the button is its own state (AllowAllUp + a unique GroupIndex makes it a
+    plain independent toggle), so read it back rather than flipping our own
+    copy and hoping the two agree }
+  Project.TrackSendEnabled[TrackIndex][SendIndex] := Btn.Down;
+  Invalidate;
 end;
 
 function TArrangementView.SendSliderLeft(ASendIndex: Integer): Integer;
@@ -941,7 +1036,7 @@ end;
 procedure TArrangementView.DrawTrackHeaders;
 var
   i, y, s, SliderY, kx: Integer;
-  MuteRect, MonitorRect, SendRect: TRect;
+  MuteRect, MonitorRect: TRect;
 begin
   for i := 0 to Project.TrackCount - 1 do
   begin
@@ -999,37 +1094,34 @@ begin
     Canvas.Ellipse(kx - VolumeSliderRadius, SliderY - VolumeSliderRadius,
       kx + VolumeSliderRadius, SliderY + VolumeSliderRadius);
 
-    { send strip: S1/S2 enable buttons, each with its own level slider.
-      The buttons darken when on rather than lighting up, matching the
-      clip warp-mode buttons elsewhere in the UI. }
+    { send strip: an S1/S2 enable button per bus, each with its own level
+      slider. The lit colour is deliberately clSkyBlue, the exact same
+      "this one is active" language as the BT/LF/RP warp-mode buttons - a
+      subtle darken was the first attempt and it was unreadable against
+      clBtnFace on a normal GTK theme. }
     for s := 0 to Project.SendCount - 1 do
     begin
-      SendRect := SendButtonRect(i, s);
-      if Project.TrackSendEnabled[i][s] then
-        Canvas.Brush.Color := clBtnShadow
-      else
-        Canvas.Brush.Color := clBtnFace;
-      Canvas.Pen.Color := clBlack;
-      Canvas.Rectangle(SendRect);
-      Canvas.Brush.Style := bsClear;
-      if Project.TrackSendEnabled[i][s] then
-        Canvas.Font.Color := clWhite;
-      Canvas.TextOut(SendRect.Left + 3, SendRect.Top - 1, 'S' + IntToStr(s + 1));
-      Canvas.Font.Color := clWindowText;
-      Canvas.Brush.Style := bsSolid;
+      { the S1/S2 button itself is a real TSpeedButton (see
+        LayoutSendButtons) and draws itself over this header - only its
+        level slider is painted here }
 
-      { the level slider stays visible but greys out while the send is off,
-        so the amount it's armed at is still readable at a glance }
+      { The track line is always drawn, so there is visibly a control here
+        whether or not the send is on; only the FILLED part and the knob
+        change with state, so how far the send is armed stays readable
+        while it's switched out. }
       SliderY := y + SendRowY;
-      if Project.TrackSendEnabled[i][s] then
-        Canvas.Pen.Color := clBtnShadow
-      else
-        Canvas.Pen.Color := clBtnFace;
+      Canvas.Pen.Color := clBtnShadow;
       Canvas.Line(SendSliderLeft(s), SliderY,
         SendSliderLeft(s) + SendSliderWidth, SliderY);
       kx := SendKnobX(i, s);
       if Project.TrackSendEnabled[i][s] then
-        Canvas.Brush.Color := clHighlight
+      begin
+        Canvas.Pen.Color := clHighlight;
+        Canvas.Pen.Width := 3;
+        Canvas.Line(SendSliderLeft(s), SliderY, kx, SliderY);
+        Canvas.Pen.Width := 1;
+        Canvas.Brush.Color := clHighlight;
+      end
       else
         Canvas.Brush.Color := clBtnFace;
       Canvas.Pen.Color := clWindowFrame;
@@ -1282,6 +1374,9 @@ begin
   { last, so the pinned send rows sit over whichever track headers have
     scrolled under them }
   DrawSendRows;
+  { the S1/S2 toggles are real controls and paint themselves after this
+    returns; all this does is put them where their row currently is }
+  LayoutSendButtons;
 end;
 
 procedure TArrangementView.Resize;
@@ -1505,13 +1600,8 @@ begin
   if (TrackIndex >= 0) and (X >= HeaderLeft) then
     for SendIndex := 0 to Project.SendCount - 1 do
     begin
-      if PtInRect(SendButtonRect(TrackIndex, SendIndex), Point(X, Y)) then
-      begin
-        Project.TrackSendEnabled[TrackIndex][SendIndex] :=
-          not Project.TrackSendEnabled[TrackIndex][SendIndex];
-        Invalidate;
-        Exit;
-      end;
+      { no button case here - the S1/S2 toggles are real controls and the
+        widgetset routes their clicks; this only has to find the sliders }
       if HitTestSendSlider(TrackIndex, SendIndex, X, Y) then
       begin
         FDraggingSendTrack := TrackIndex;
