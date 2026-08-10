@@ -40,6 +40,7 @@ type
       ZoomFactor = 1.25;
       EdgeGrabPixels = 6;
       ScrollBarHeight = 16;
+      VScrollBarWidth = 16;
       AutoScrollMarginPixels = 40;
       ContentEndPaddingSeconds = 10;
       VolumeSliderY = 44;
@@ -59,6 +60,8 @@ type
       FCursorFrame: Int64;
       FScrollFrame: Int64;
       FHScrollBar: TScrollBar;
+      FVScrollOffset: Integer;
+      FVScrollBar: TScrollBar;
       FSelectedTrack: Integer;
       FSelectedClip: Integer;
       FKeyboardTrack: Integer;
@@ -85,10 +88,12 @@ type
       FGroupDragFrameDelta: Int64;
       FGroupDragTrackDelta: Integer;
     function LaneWidth: Integer;
+    function HeaderLeft: Integer;
     function ContentHeight: Integer;
     function ContentEndFrame: Int64;
     function TrackIndexAtY(Y: Integer): Integer;
     function MasterRowTop: Integer;
+    function RowTop(AIndex: Integer): Integer;
     function FrameToAbsoluteX(AFrame: Int64): Integer;
     function FrameToX(AFrame: Int64): Integer;
     function XToFrame(AX: Integer): Int64;
@@ -109,6 +114,9 @@ type
     procedure SetScrollFrame(AFrame: Int64);
     procedure UpdateScrollBarRange;
     procedure HScrollBarChange(Sender: TObject);
+    procedure SetVScrollOffset(AOffset: Integer);
+    procedure UpdateVScrollBarRange;
+    procedure VScrollBarChange(Sender: TObject);
     procedure DrawLanes;
     procedure DrawRuler;
     procedure DrawLoopMarkers;
@@ -197,11 +205,26 @@ begin
   FHScrollBar.Parent := Self;
   FHScrollBar.Kind := sbHorizontal;
   FHScrollBar.OnChange := @HScrollBarChange;
+
+  FVScrollOffset := 0;
+  FVScrollBar := TScrollBar.Create(Self);
+  FVScrollBar.Parent := Self;
+  FVScrollBar.Kind := sbVertical;
+  FVScrollBar.OnChange := @VScrollBarChange;
 end;
 
 function TArrangementView.LaneWidth: Integer;
 begin
-  Result := Width - HeaderWidth;
+  Result := Width - HeaderWidth - VScrollBarWidth;
+end;
+
+{ X where the track-header column begins - the strip [LaneWidth, HeaderLeft)
+  in between is the vertical scrollbar itself (a real child control, so it
+  already intercepts its own clicks; this only matters for painting/hit-test
+  math that needs to know where header content starts). }
+function TArrangementView.HeaderLeft: Integer;
+begin
+  Result := LaneWidth + VScrollBarWidth;
 end;
 
 function TArrangementView.ContentHeight: Integer;
@@ -229,14 +252,23 @@ end;
 
 function TArrangementView.MasterRowTop: Integer;
 begin
-  Result := RulerHeight + Project.TrackCount * TrackHeight;
+  Result := RowTop(Project.TrackCount);
+end;
+
+{ Y where track row AIndex (or, with AIndex = Project.TrackCount, the Master
+  row) starts, net of the current vertical scroll offset - every row-Y
+  computation in this unit goes through here so FVScrollOffset only has to
+  be threaded through in one place. }
+function TArrangementView.RowTop(AIndex: Integer): Integer;
+begin
+  Result := RulerHeight + AIndex * TrackHeight - FVScrollOffset;
 end;
 
 function TArrangementView.TrackIndexAtY(Y: Integer): Integer;
 begin
   if (Y < RulerHeight) or (Y >= ContentHeight) then
     Exit(-1);
-  Result := (Y - RulerHeight) div TrackHeight;
+  Result := (Y - RulerHeight + FVScrollOffset) div TrackHeight;
   if Result >= Project.TrackCount then
     Result := -1;
 end;
@@ -307,7 +339,7 @@ function TArrangementView.ClipPixelRect(ATrackIndex: Integer;
 var
   y: Integer;
 begin
-  y := RulerHeight + ATrackIndex * TrackHeight;
+  y := RowTop(ATrackIndex);
   Result := Rect(FrameToX(AClip.Position), y + 4,
     FrameToX(AClip.Position + AClip.Length), y + TrackHeight - 4);
 end;
@@ -378,13 +410,13 @@ var
   Range: Integer;
   Value: Single;
 begin
-  Range := (Width - VolumeSliderMargin) - (LaneWidth + VolumeSliderMargin);
+  Range := (Width - VolumeSliderMargin) - (HeaderLeft + VolumeSliderMargin);
   Value := Project.TrackVolume[ATrackIndex] / TrackVolumeMax;
   if Value < 0 then
     Value := 0;
   if Value > 1 then
     Value := 1;
-  Result := (LaneWidth + VolumeSliderMargin) + Round(Value * Range);
+  Result := (HeaderLeft + VolumeSliderMargin) + Round(Value * Range);
 end;
 
 function TArrangementView.XToVolume(X: Integer): Single;
@@ -392,10 +424,10 @@ var
   Range: Integer;
   Frac: Single;
 begin
-  Range := (Width - VolumeSliderMargin) - (LaneWidth + VolumeSliderMargin);
+  Range := (Width - VolumeSliderMargin) - (HeaderLeft + VolumeSliderMargin);
   if Range <= 0 then
     Exit(1.0);
-  Frac := (X - (LaneWidth + VolumeSliderMargin)) / Range;
+  Frac := (X - (HeaderLeft + VolumeSliderMargin)) / Range;
   if Frac < 0 then
     Frac := 0;
   if Frac > 1 then
@@ -407,7 +439,7 @@ function TArrangementView.HitTestVolumeSlider(ATrackIndex, Y: Integer): Boolean;
 var
   SliderY: Integer;
 begin
-  SliderY := RulerHeight + ATrackIndex * TrackHeight + VolumeSliderY;
+  SliderY := RowTop(ATrackIndex) + VolumeSliderY;
   Result := Abs(Y - SliderY) <= VolumeSliderGrabPixels;
 end;
 
@@ -415,7 +447,7 @@ function TArrangementView.MuteButtonRect(ATrackIndex: Integer): TRect;
 var
   y: Integer;
 begin
-  y := RulerHeight + ATrackIndex * TrackHeight;
+  y := RowTop(ATrackIndex);
   Result := Rect(Width - MuteButtonSize - MuteButtonMargin, y + MuteButtonMargin,
     Width - MuteButtonMargin, y + MuteButtonMargin + MuteButtonSize);
 end;
@@ -532,6 +564,54 @@ begin
   SetScrollFrame(NewFrame);
 end;
 
+{ mirrors SetScrollFrame/UpdateScrollBarRange/HScrollBarChange above, one
+  dimension over - AOffset is in pixels (not frames; there's no zoom-level
+  concept vertically, TrackHeight is a fixed constant) and covers every
+  track row plus the Master row. }
+procedure TArrangementView.SetVScrollOffset(AOffset: Integer);
+var
+  MaxOffset: Integer;
+begin
+  MaxOffset := (Project.TrackCount + 1) * TrackHeight - (ContentHeight - RulerHeight);
+  if MaxOffset < 0 then
+    MaxOffset := 0;
+  if AOffset < 0 then
+    AOffset := 0;
+  if AOffset > MaxOffset then
+    AOffset := MaxOffset;
+  if AOffset = FVScrollOffset then
+    Exit;
+  FVScrollOffset := AOffset;
+  UpdateVScrollBarRange;
+  Invalidate;
+end;
+
+procedure TArrangementView.UpdateVScrollBarRange;
+var
+  TotalPixels, Page: Integer;
+begin
+  if not Assigned(FVScrollBar) then
+    Exit;
+  TotalPixels := (Project.TrackCount + 1) * TrackHeight; { +1 for the Master row }
+  Page := ContentHeight - RulerHeight;
+  if Page < 1 then
+    Page := 1;
+  if TotalPixels < Page then
+    TotalPixels := Page;
+
+  FVScrollBar.Min := 0;
+  FVScrollBar.Max := TotalPixels;
+  FVScrollBar.PageSize := Page;
+  FVScrollBar.SmallChange := TrackHeight;
+  FVScrollBar.LargeChange := Page;
+  FVScrollBar.Position := FVScrollOffset;
+end;
+
+procedure TArrangementView.VScrollBarChange(Sender: TObject);
+begin
+  SetVScrollOffset(FVScrollBar.Position);
+end;
+
 procedure TArrangementView.DrawLanes;
 var
   i, x: Integer;
@@ -544,7 +624,9 @@ begin
   Canvas.Pen.Color := clSilver;
   for i := 0 to Project.TrackCount + 1 do
   begin
-    y := RulerHeight + i * TrackHeight;
+    y := RowTop(i);
+    if (y < RulerHeight) or (y > ContentHeight) then
+      Continue;
     Canvas.Line(0, y, LaneWidth, y);
   end;
 
@@ -643,16 +725,21 @@ var
 begin
   for i := 0 to Project.TrackCount - 1 do
   begin
-    y := RulerHeight + i * TrackHeight;
+    y := RowTop(i);
+    { row scrolled fully or partially out of the visible band - full-row
+      cull rather than clip, so nothing bleeds into the ruler above or the
+      horizontal scrollbar's margin below }
+    if (y < RulerHeight) or (y + TrackHeight > ContentHeight) then
+      Continue;
     if i = FKeyboardTrack then
       Canvas.Brush.Color := clGray
     else
       Canvas.Brush.Color := clBtnFace;
-    Canvas.FillRect(Rect(LaneWidth, y, Width, y + TrackHeight));
+    Canvas.FillRect(Rect(HeaderLeft, y, Width, y + TrackHeight));
     Canvas.Pen.Color := clBtnShadow;
-    Canvas.Rectangle(LaneWidth, y, Width, y + TrackHeight);
+    Canvas.Rectangle(HeaderLeft, y, Width, y + TrackHeight);
     Canvas.Brush.Style := bsClear;
-    Canvas.TextOut(LaneWidth + 8, y + 8, 'Track ' + IntToStr(i + 1));
+    Canvas.TextOut(HeaderLeft + 8, y + 8, 'Track ' + IntToStr(i + 1));
     Canvas.Brush.Style := bsSolid;
 
     { simple on/off mute toggle }
@@ -667,7 +754,7 @@ begin
     { simple volume slider - a plain line with a draggable knob, no readout }
     SliderY := y + VolumeSliderY;
     Canvas.Pen.Color := clBtnShadow;
-    Canvas.Line(LaneWidth + VolumeSliderMargin, SliderY, Width - VolumeSliderMargin, SliderY);
+    Canvas.Line(HeaderLeft + VolumeSliderMargin, SliderY, Width - VolumeSliderMargin, SliderY);
     kx := VolumeKnobX(i);
     Canvas.Brush.Color := clHighlight;
     Canvas.Pen.Color := clWindowFrame;
@@ -678,18 +765,21 @@ begin
   { master bus row, always the last row, below every real track - no clips,
     mute, or volume slider, just a click target for the master effects chain }
   y := MasterRowTop;
-  if FKeyboardTrack = -2 then
-    Canvas.Brush.Color := clGray
-  else
-    Canvas.Brush.Color := clBtnFace;
-  Canvas.FillRect(Rect(LaneWidth, y, Width, y + TrackHeight));
-  Canvas.Pen.Color := clBtnShadow;
-  Canvas.Rectangle(LaneWidth, y, Width, y + TrackHeight);
-  Canvas.Brush.Style := bsClear;
-  Canvas.Font.Style := [fsBold];
-  Canvas.TextOut(LaneWidth + 8, y + 8, 'Master');
-  Canvas.Font.Style := [];
-  Canvas.Brush.Style := bsSolid;
+  if (y >= RulerHeight) and (y + TrackHeight <= ContentHeight) then
+  begin
+    if FKeyboardTrack = -2 then
+      Canvas.Brush.Color := clGray
+    else
+      Canvas.Brush.Color := clBtnFace;
+    Canvas.FillRect(Rect(HeaderLeft, y, Width, y + TrackHeight));
+    Canvas.Pen.Color := clBtnShadow;
+    Canvas.Rectangle(HeaderLeft, y, Width, y + TrackHeight);
+    Canvas.Brush.Style := bsClear;
+    Canvas.Font.Style := [fsBold];
+    Canvas.TextOut(HeaderLeft + 8, y + 8, 'Master');
+    Canvas.Font.Style := [];
+    Canvas.Brush.Style := bsSolid;
+  end;
 end;
 
 { Renders one clip - factored out of DrawClips so a group-move drag can call
@@ -704,6 +794,8 @@ var
 begin
   R := ClipPixelRect(ATrack, AClip);
   if (R.Right < 0) or (R.Left > LaneWidth) then
+    Exit;
+  if (R.Top < RulerHeight) or (R.Bottom > ContentHeight) then
     Exit;
 
   { neutral dark interior so the waveform (drawn in the track's color)
@@ -810,8 +902,10 @@ begin
   xs := Max(xs, 0);
   xe := Min(xe, LaneWidth);
 
-  yTop := RulerHeight + t1 * TrackHeight;
-  yBottom := RulerHeight + (t2 + 1) * TrackHeight;
+  yTop := Max(RowTop(t1), RulerHeight);
+  yBottom := Min(RowTop(t2 + 1), ContentHeight);
+  if yBottom <= yTop then
+    Exit;
 
   { drawn before DrawClips so clips still render normally on top - only the
     empty lane background under/around them gets the highlight tint }
@@ -843,6 +937,14 @@ begin
     FHScrollBar.SetBounds(0, ContentHeight, LaneWidth, ScrollBarHeight);
     UpdateScrollBarRange;
   end;
+  if Assigned(FVScrollBar) then
+  begin
+    { sits only against the timeline, from the ruler's bottom edge to the
+      horizontal scrollbar's top edge - never over the ruler or header row }
+    FVScrollBar.SetBounds(LaneWidth, RulerHeight, VScrollBarWidth,
+      ContentHeight - RulerHeight);
+    UpdateVScrollBarRange;
+  end;
   Invalidate;
 end;
 
@@ -850,6 +952,7 @@ procedure TArrangementView.RefreshTrack(ATrackIndex: Integer);
 begin
   PushTrackToEngine(ATrackIndex);
   UpdateScrollBarRange;
+  UpdateVScrollBarRange;
   Invalidate;
 end;
 
@@ -975,7 +1078,7 @@ begin
   if Button <> mbLeft then
     Exit;
 
-  if (X >= LaneWidth) and (Y >= MasterRowTop) and (Y < MasterRowTop + TrackHeight) then
+  if (X >= HeaderLeft) and (Y >= MasterRowTop) and (Y < MasterRowTop + TrackHeight) then
   begin
     SelectClip(-1, -1);
     if FKeyboardTrack <> -2 then
@@ -990,7 +1093,7 @@ begin
 
   TrackIndex := TrackIndexAtY(Y);
 
-  if (TrackIndex >= 0) and (X >= LaneWidth) and
+  if (TrackIndex >= 0) and (X >= HeaderLeft) and
     PtInRect(MuteButtonRect(TrackIndex), Point(X, Y)) then
   begin
     Project.TrackEnabled[TrackIndex] := not Project.TrackEnabled[TrackIndex];
@@ -998,7 +1101,7 @@ begin
     Exit;
   end;
 
-  if (TrackIndex >= 0) and (X >= LaneWidth) and HitTestVolumeSlider(TrackIndex, Y) then
+  if (TrackIndex >= 0) and (X >= HeaderLeft) and HitTestVolumeSlider(TrackIndex, Y) then
   begin
     FDraggingVolumeTrack := TrackIndex;
     Project.TrackVolume[TrackIndex] := XToVolume(X);
@@ -1028,13 +1131,13 @@ begin
       FOnKeyboardTrackChanged(Self);
   end;
 
-  { X >= LaneWidth means this click landed in the header column (and wasn't
+  { X >= HeaderLeft means this click landed in the header column (and wasn't
     the mute button/volume slider, both already handled above) - track
     selection is done, but there's no clip/lane content over there to hit-
     test or seek to. Without this guard, XToFrame(X) treated a header-
     column pixel as a timeline position and every header click silently
     seeked the playhead to whatever frame that pixel happened to map to. }
-  if X >= LaneWidth then
+  if X >= HeaderLeft then
   begin
     Invalidate;
     Exit;
@@ -1202,7 +1305,7 @@ begin
         if FRangeEndFrame < 0 then
           FRangeEndFrame := 0;
 
-        Row := (Y - RulerHeight) div TrackHeight;
+        Row := (Y - RulerHeight + FVScrollOffset) div TrackHeight;
         if Row < 0 then
           Row := 0;
         if Row > Project.TrackCount - 1 then

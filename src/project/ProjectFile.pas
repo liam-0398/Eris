@@ -373,7 +373,7 @@ end;
 
 function SaveProject(const APath: string): Boolean;
 var
-  Dir, IniPath, Section, EmbeddedName: string;
+  Dir, IniPath, Section, EmbeddedName, TmpPath: string;
   Ini: TIniFile;
   t, i, e: Integer;
 begin
@@ -473,9 +473,20 @@ begin
     Exit;
   end;
 
-  if FileExists(APath) then
-    DeleteFile(APath);
-  Result := CreateTarFromDirectory(Dir, APath);
+  { write to a sibling temp file and rename over APath only once the tar is
+    confirmed good - renaming on the same filesystem is atomic, so a crash/
+    power loss/disk-full mid-write leaves a harmless .tmp behind instead of
+    deleting the last good save before its replacement is known to exist }
+  TmpPath := APath + '.tmp';
+  if FileExists(TmpPath) then
+    DeleteFile(TmpPath);
+  if CreateTarFromDirectory(Dir, TmpPath) then
+    Result := RenameFile(TmpPath, APath)
+  else
+  begin
+    DeleteFile(TmpPath);
+    Result := False;
+  end;
   DeleteDirectory(Dir, False);
 end;
 

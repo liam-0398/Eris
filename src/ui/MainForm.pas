@@ -83,6 +83,8 @@ type
     FSaveMenuItem: TMenuItem;
     FSaveAsMenuItem: TMenuItem;
     FExportMenuItem: TMenuItem;
+    FEditMenu: TMenuItem;
+    FTrackMenu: TMenuItem;
     FBackgroundBusy: Boolean;
     FPendingImportTrack: Integer;
     FPendingImportFrame: Int64;
@@ -267,6 +269,7 @@ begin
   AddItem(FileMenu, 'E&xit', @FileExitClick);
 
   EditMenu := AddMenu('&Edit');
+  FEditMenu := EditMenu;
   UndoItem := AddItem(EditMenu, '&Undo', @EditUndoClick);
   UndoItem.ShortCut := Menus.ShortCut(Ord('Z'), [ssCtrl]);
   AddSeparator(EditMenu);
@@ -292,6 +295,7 @@ begin
   ZoomOutItem.ShortCut := Menus.ShortCut(VK_OEM_MINUS, [ssCtrl]);
 
   TrackMenu := AddMenu('&Track');
+  FTrackMenu := TrackMenu;
   AddTrackItem := AddItem(TrackMenu, '&Add Track', @TrackAddClick);
   AddTrackItem.ShortCut := Menus.ShortCut(Ord('N'), [ssCtrl]);
   DeleteTrackItem := AddItem(TrackMenu, '&Delete Track', @TrackDeleteClick);
@@ -764,8 +768,14 @@ end;
   arrangement view/device panel outright, but toggling Visible mid-import
   turned out to disturb their scroll/zoom state - a resize-on-hide glitch
   that pinned the playhead - and caused a visible flash, worse than the
-  read-only repaint race it was guarding against). Save and Export only
-  ever read Project state, so they need neither guard. }
+  read-only repaint race it was guarding against). Save and Export don't
+  need the transport guard (they don't touch playback), but they DO need
+  editing locked out below - SaveProject reads Project.Tracks/SamplePool
+  on a background thread with no lock, so an Undo/Split/Delete/Add Track
+  mutating those same arrays mid-save (via a menu shortcut, which bypasses
+  FArrangementView.Enabled since it's routed through the form's own
+  KeyPreview handler) is a real torn-read race that can write corrupt clip
+  data to disk. FEditMenu/FTrackMenu below close that gap. }
 procedure TForm1.SetBackgroundBusy(ABusy: Boolean; const AStatusText: string;
   AGuardPlayback: Boolean);
 begin
@@ -778,6 +788,8 @@ begin
   FArrangementView.Enabled := not ABusy;
   FFileBrowser.Enabled := not ABusy;
   FDevicePanel.Enabled := not ABusy;
+  FEditMenu.Enabled := not ABusy;
+  FTrackMenu.Enabled := not ABusy;
 
   { transport is only ever disabled going into a guarded busy state, but
     always re-enabled coming out of one, regardless of what AGuardPlayback
@@ -810,8 +822,9 @@ begin
     read/crash on freed memory (and never touch playback again after that,
     which is exactly "can't play, no sound at all" - not just this project). }
   AudioEngineStop;
-  while AudioEngineIsPlaying do
+  while AudioEngineIsBusy do
     Sleep(1);
+  AudioEngineInvalidateGrainCache;
   Project.NewProject;
   FCurrentProjectPath := '';
   RefreshAllTracksUI;
@@ -835,8 +848,9 @@ begin
       frees the old project's sample memory out from under a still-running
       audio thread }
     AudioEngineStop;
-    while AudioEngineIsPlaying do
+    while AudioEngineIsBusy do
       Sleep(1);
+    AudioEngineInvalidateGrainCache;
 
     SetBackgroundBusy(True, 'Opening...', True);
     TProjectLoadThread.Create(Dlg.FileName, @ProjectLoadThreadTerminate);

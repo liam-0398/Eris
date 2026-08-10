@@ -41,7 +41,23 @@ procedure AudioEngineClearLoop;
 procedure AudioEngineTriggerNote(ATrackIndex: Integer; AData: PSingle;
   AFrameCount, AChannels: Integer; ASemitoneOffset: Single; AGain: Single);
 function AudioEngineIsPlaying: Boolean;
+{ True while the realtime thread could still touch sample memory - Playing,
+  a live note, or a note's release tail (AnyLiveNoteActive covers both) -
+  i.e. the condition TPlaybackThread.Execute itself gates FillBlock on.
+  AudioEngineIsPlaying alone misses fading-note tails still decaying after
+  Stop, which is exactly the window a caller about to free sample memory
+  (Project.NewProject via File>New/Open) needs to wait out - freeing out
+  from under a still-reading fading note is a use-after-free that corrupts
+  the heap for the rest of the process, not just that one note. }
+function AudioEngineIsBusy: Boolean;
 function AudioEngineHasClip: Boolean;
+{ Must be called after AudioEngineIsBusy waits false and before Project.NewProject
+  frees SamplePool - see GrainCache's declaration comment: it's keyed by each
+  clip's raw sample Data pointer, and FreeMem'ing the old pool then GetMem'ing
+  the new one very plausibly hands back the same address for a similarly
+  sized block, which would silently serve a stale grain answer computed
+  against a completely different, now-freed sample. }
+procedure AudioEngineInvalidateGrainCache;
 function AudioEngineGetPosition: Int64;
 function AudioEngineLiveNoteActive(ATrackIndex: Integer): Boolean;
 function AudioEngineLiveNotePosition(ATrackIndex: Integer): Int64;
@@ -1227,6 +1243,7 @@ begin
   RecordState := RecordStateIdle;
   RecordWritePos := 0;
   ClickPlayPos := -1;
+  AudioEngineInvalidateGrainCache;
   for i := 0 to MaxTracks - 1 do
   begin
     TrackClips[i].Items := nil;
@@ -1369,6 +1386,19 @@ end;
 function AudioEngineIsPlaying: Boolean;
 begin
   Result := Playing;
+end;
+
+function AudioEngineIsBusy: Boolean;
+begin
+  Result := Playing or AnyLiveNoteActive or (RecordState <> RecordStateIdle);
+end;
+
+procedure AudioEngineInvalidateGrainCache;
+var
+  i: Integer;
+begin
+  for i := 0 to GrainCacheSlots - 1 do
+    GrainCache[i].Data := nil;
 end;
 
 function AudioEngineHasClip: Boolean;
