@@ -5,7 +5,19 @@ unit PrefsForm;
 interface
 
 uses
-  Classes, SysUtils, Forms, Controls, StdCtrls, ComCtrls, AudioEngine;
+  Classes, SysUtils, Forms, Controls, StdCtrls, ComCtrls, AudioEngine
+  {$IFNDEF WINDOWS}, PipeWireBackend{$ENDIF};
+
+{$IFDEF WINDOWS}
+{ no PipeWire on the Windows build - the device rows there stay placeholders,
+  so the form only needs the type to compile against }
+type
+  TPWDevice = record
+    Name: string;
+    Description: string;
+  end;
+  TPWDeviceArray = array of TPWDevice;
+{$ENDIF}
 
 type
   TPrefsForm = class(TForm)
@@ -27,8 +39,14 @@ type
     FSampleRateLabel: TLabel;
     FBufferSizeLabel: TLabel;
     FInputBufferSizeLabel: TLabel;
+    { parallel to the Output/Input combo items from index 1 up (index 0 is
+      "Default (system)"), because the combo shows each device's description
+      while the engine needs its node name }
+    FOutputDevices: TPWDeviceArray;
+    FInputDevices: TPWDeviceArray;
     procedure BuildLayout;
     procedure UpdateRowsForBackend;
+    procedure RefreshDeviceLists;
     procedure BackendComboChange(Sender: TObject);
     procedure SP1200ComboChange(Sender: TObject);
     procedure InputGainSliderChange(Sender: TObject);
@@ -104,6 +122,7 @@ begin
   {$ELSE}
   FBackendCombo.Items.Add('ALSA');
   FBackendCombo.Items.Add('JACK');
+  FBackendCombo.Items.Add('PipeWire');
   {$ENDIF}
   if AudioEngineGetBackend < FBackendCombo.Items.Count then
     FBackendCombo.ItemIndex := AudioEngineGetBackend
@@ -111,20 +130,13 @@ begin
     FBackendCombo.ItemIndex := 0;
   FBackendCombo.OnChange := @BackendComboChange;
 
-  { PLACEHOLDERS - neither of these is wired to anything yet. They exist so
-    the device-selection rows are already in place (and already in the right
-    order) for picking a specific interface later: an ALSA hw:X,Y card such
-    as a Scarlett 2i2, or a PulseAudio/PipeWire source/sink. Until then the
-    engine always opens 'default' (see ALSABackend) and the only entry is
-    'Default'. Under JACK they stay greyed for good: routing there belongs to
-    the patchbay, not to this dialog. }
+  { Live under PipeWire, which can point each direction at a specific node -
+    RefreshDeviceLists fills them. Still placeholders under ALSA, where
+    picking a particular hw:X,Y card (a Scarlett 2i2, say) isn't wired up
+    yet, and greyed for good under JACK, where routing belongs to the
+    patchbay rather than to this dialog. }
   FOutputCombo := AddRow('Output:', 52, FOutputLabel);
-  FOutputCombo.Items.Add('Default');
-  FOutputCombo.ItemIndex := 0;
-
   FInputCombo := AddRow('Input:', 88, FInputLabel);
-  FInputCombo.Items.Add('Default');
-  FInputCombo.ItemIndex := 0;
 
   FSampleRateCombo := AddRow('Sample rate:', 124, FSampleRateLabel);
   FSampleRateCombo.Items.Add('44100');
@@ -202,7 +214,59 @@ begin
   FCancelButton.Width := 75;
   FCancelButton.Cancel := True;
 
+  RefreshDeviceLists;
   UpdateRowsForBackend;
+end;
+
+{ Re-enumerates the PipeWire sinks and sources and reselects whatever the
+  engine is currently pointed at. Called from BuildLayout - and Preferences
+  builds a fresh form every time it's opened (see MainForm) - so plugging an
+  interface in and reopening this dialog is all it takes to see it. Also
+  called when the backend dropdown is switched to PipeWire.
+
+  Entry 0 is always "Default (system)", which maps to the empty target name
+  and means "follow whatever the desktop's default device is", including
+  when that changes later. Anything else pins Eris to that node. }
+procedure TPrefsForm.RefreshDeviceLists;
+
+  procedure Fill(ACombo: TComboBox; const ADevices: TPWDeviceArray;
+    const ACurrent: string);
+  var
+    i, Sel: Integer;
+  begin
+    ACombo.Items.BeginUpdate;
+    try
+      ACombo.Items.Clear;
+      ACombo.Items.AddObject('Default (system)', nil);
+      Sel := 0;
+      for i := 0 to High(ADevices) do
+      begin
+        { the node name is what the engine needs, the description is what a
+          human recognises - show the second, carry the first }
+        ACombo.Items.Add(ADevices[i].Description);
+        if ADevices[i].Name = ACurrent then
+          Sel := i + 1;
+      end;
+      ACombo.ItemIndex := Sel;
+    finally
+      ACombo.Items.EndUpdate;
+    end;
+  end;
+
+begin
+  {$IFDEF WINDOWS}
+  FOutputCombo.Items.Clear;
+  FOutputCombo.Items.Add('Default (system)');
+  FOutputCombo.ItemIndex := 0;
+  FInputCombo.Items.Clear;
+  FInputCombo.Items.Add('Default (system)');
+  FInputCombo.ItemIndex := 0;
+  {$ELSE}
+  FOutputDevices := PipeWireListDevices(True);
+  FInputDevices := PipeWireListDevices(False);
+  Fill(FOutputCombo, FOutputDevices, AudioEngineGetPipeWireOutputDevice);
+  Fill(FInputCombo, FInputDevices, AudioEngineGetPipeWireInputDevice);
+  {$ENDIF}
 end;
 
 { Greys every row JACK takes ownership of. Under JACK the sample rate and
@@ -217,14 +281,18 @@ end;
   scenes, it just isn't what determines output latency any more. }
 procedure TPrefsForm.UpdateRowsForBackend;
 var
-  Native: Boolean;
+  Native, PipeWire: Boolean;
 begin
   Native := FBackendCombo.ItemIndex <> AudioBackendJACK;
+  { device selection is implemented for PipeWire only - under ALSA these are
+    placeholders and under JACK they're the patchbay's job, so in both cases
+    an editable dropdown would be claiming something untrue }
+  PipeWire := FBackendCombo.ItemIndex = AudioBackendPipeWire;
 
-  FOutputCombo.Enabled := Native;
-  FOutputLabel.Enabled := Native;
-  FInputCombo.Enabled := Native;
-  FInputLabel.Enabled := Native;
+  FOutputCombo.Enabled := PipeWire;
+  FOutputLabel.Enabled := PipeWire;
+  FInputCombo.Enabled := PipeWire;
+  FInputLabel.Enabled := PipeWire;
   FSampleRateCombo.Enabled := Native;
   FSampleRateLabel.Enabled := Native;
   FBufferSizeCombo.Enabled := Native;
@@ -239,6 +307,8 @@ begin
     itself waits for OK - it stops and reopens the audio device (see
     AudioEngineSetBackend), which has no business happening while someone
     scrolls through a dropdown }
+  if FBackendCombo.ItemIndex = AudioBackendPipeWire then
+    RefreshDeviceLists;
   UpdateRowsForBackend;
 end;
 
@@ -251,6 +321,16 @@ procedure TPrefsForm.InputGainSliderChange(Sender: TObject);
 begin
   FInputGainSlider.Hint := IntToStr(FInputGainSlider.Position) + ' dB';
   AudioEngineSetInputGainDb(FInputGainSlider.Position);
+end;
+
+{ Index 0 is "Default (system)" and maps to the empty name the backend reads
+  as "let PipeWire pick"; everything after it indexes ADevices directly. }
+function SelectedDeviceName(ACombo: TComboBox;
+  const ADevices: TPWDeviceArray): string;
+begin
+  Result := '';
+  if (ACombo.ItemIndex >= 1) and (ACombo.ItemIndex <= Length(ADevices)) then
+    Result := ADevices[ACombo.ItemIndex - 1].Name;
 end;
 
 procedure TPrefsForm.OKButtonClick(Sender: TObject);
@@ -268,6 +348,12 @@ begin
     are the server's and pushing this dialog's numbers at the engine would
     be a lie. }
   AudioEngineSetBackend(FBackendCombo.ItemIndex);
+
+  { device choice next, and only when the rows are live (PipeWire) - it
+    reopens the streams itself, and no-ops if nothing actually changed }
+  if FOutputCombo.Enabled then
+    AudioEngineSetPipeWireDevices(SelectedDeviceName(FOutputCombo, FOutputDevices),
+      SelectedDeviceName(FInputCombo, FInputDevices));
 
   if FBufferSizeCombo.Enabled and
     TryStrToInt(FBufferSizeCombo.Text, NewBufferSize) then

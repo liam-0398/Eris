@@ -121,9 +121,11 @@ procedure AudioEngineSetBufferSize(ANewBufferSize: Integer);
 const
   { Which TAudioBackend implementation is live. "Native" is whatever the
     platform's own always-present API is - ALSA on Linux, DirectSound on
-    Windows - and is the default and the fallback. }
+    Windows - and is always the fallback. PipeWire is preferred over it at
+    startup when PipeWire is actually present; see AudioEngineInit. }
   AudioBackendNative = 0;
   AudioBackendJACK = 1;
+  AudioBackendPipeWire = 2;
 
 { Selecting JACK deliberately does NOT check whether JACK is installed or
   running first. If it isn't, the backend simply never opens and the engine
@@ -137,6 +139,15 @@ const
   since a backend owns both directions. }
 function AudioEngineGetBackend: Integer;
 procedure AudioEngineSetBackend(ABackendKind: Integer);
+
+{ PipeWire-only device selection, by node name ('' = let PipeWire use the
+  system default). Every other backend opens its own default device and
+  ignores these. Applying them reopens the backend (both directions), same
+  main-thread-only rule as everything else here; it's a no-op when the
+  values are unchanged or PipeWire isn't the live backend. }
+procedure AudioEngineSetPipeWireDevices(const AOutputName, AInputName: string);
+function AudioEngineGetPipeWireOutputDevice: string;
+function AudioEngineGetPipeWireInputDevice: string;
 
 { Frees whatever old per-track TPlaybackClip arrays the audio thread has
   retired since the last call - see PendingFrees' declaration. Must be
@@ -191,7 +202,7 @@ uses
   {$IFDEF WINDOWS}
   DirectSoundBackend,
   {$ELSE}
-  ALSABackend, JACKBackend,
+  ALSABackend, JACKBackend, PipeWireBackend,
   {$ENDIF}
   Resample, Project, SP1200, Effects;
 
@@ -1978,10 +1989,12 @@ begin
   {$IFDEF WINDOWS}
   Backend := CreateDirectSoundBackend;
   {$ELSE}
-  if CurrentBackendKind = AudioBackendJACK then
-    Backend := CreateJACKBackend
+  case CurrentBackendKind of
+    AudioBackendJACK: Backend := CreateJACKBackend;
+    AudioBackendPipeWire: Backend := CreatePipeWireBackend;
   else
     Backend := CreateALSABackend;
+  end;
   {$ENDIF}
 end;
 
@@ -2064,6 +2077,15 @@ begin
   GetMem(RecordBuffer, RecordCapacityFrames * OutputChannels * SizeOf(Single));
 
   PrecomputeClick;
+
+  { Startup default: PipeWire when it's genuinely there (library loads AND a
+    server socket exists - see PwServerPresent), otherwise the platform
+    native one. Nothing persists preferences yet, so this runs every start
+    rather than only the first. }
+  {$IFNDEF WINDOWS}
+  if PipeWireAvailable then
+    CurrentBackendKind := AudioBackendPipeWire;
+  {$ENDIF}
 
   SelectBackendRecord;
   Backend.Open(ProjectSampleRate, OutputChannels, BlockFrames);
@@ -2382,6 +2404,65 @@ begin
   PlaybackThread.FreeOnTerminate := False;
 
   OpenCaptureAndStartThread;
+end;
+
+function AudioEngineGetPipeWireOutputDevice: string;
+begin
+  {$IFDEF WINDOWS}
+  Result := '';
+  {$ELSE}
+  Result := PipeWireGetOutputDevice;
+  {$ENDIF}
+end;
+
+function AudioEngineGetPipeWireInputDevice: string;
+begin
+  {$IFDEF WINDOWS}
+  Result := '';
+  {$ELSE}
+  Result := PipeWireGetInputDevice;
+  {$ENDIF}
+end;
+
+procedure AudioEngineSetPipeWireDevices(const AOutputName, AInputName: string);
+{$IFNDEF WINDOWS}
+var
+  Changed: Boolean;
+{$ENDIF}
+begin
+  {$IFNDEF WINDOWS}
+  Changed := (AOutputName <> PipeWireGetOutputDevice) or
+    (AInputName <> PipeWireGetInputDevice);
+  if not Changed then
+    Exit;
+
+  { the backend reads these when it opens its streams, so they're set first
+    and the device is then cycled - only worth cycling if PipeWire is
+    actually the live backend, otherwise this just records the choice for
+    whenever it next becomes one }
+  PipeWireSetOutputDevice(AOutputName);
+  PipeWireSetInputDevice(AInputName);
+
+  if CurrentBackendKind <> AudioBackendPipeWire then
+    Exit;
+
+  CloseCaptureAndStopThread;
+
+  if PlaybackThread <> nil then
+  begin
+    PlaybackThread.Terminate;
+    PlaybackThread.WaitFor;
+    FreeAndNil(PlaybackThread);
+  end;
+
+  Backend.Close;
+  Backend.Open(ProjectSampleRate, OutputChannels, BlockFrames);
+
+  PlaybackThread := TPlaybackThread.Create(False);
+  PlaybackThread.FreeOnTerminate := False;
+
+  OpenCaptureAndStartThread;
+  {$ENDIF}
 end;
 
 function AudioEngineGetInputBufferSize: Integer;

@@ -281,6 +281,11 @@ An Input Track (Track > Add Input Track, or `Ctrl+Shift+N`) records the live
 capture device — line-in — instead of its own keyboard-played or timeline
 audio. Its header reads `Input 3` rather than `Track 3`.
 
+Recording and monitoring work the same on all three Linux backends
+(PipeWire, ALSA and JACK). Which source gets captured is the system default
+under ALSA, the **Input** dropdown in Preferences under PipeWire, and
+whatever you patch into Eris's `in_L`/`in_R` ports under JACK.
+
 - Input tracks get an extra **`M` button** on the header (yellow when on):
   the **input monitor**. It routes the live signal straight into that track's
   mix, with no recording and no playhead movement — so it works both as an
@@ -461,9 +466,13 @@ plugged into the line-in.
 
 Edit > Preferences. What actually does something today:
 
-- **Backend** — ALSA or JACK on Linux, DirectSound on Windows. Applied on
-  **OK**, since it stops and reopens the audio device. See
+- **Backend** — PipeWire, ALSA or JACK on Linux; DirectSound on Windows.
+  Applied on **OK**, since it stops and reopens the audio device. Eris starts
+  on **PipeWire** if PipeWire is actually running, and falls back to ALSA if
+  it isn't. See [Using PipeWire](#using-pipewire) and
   [Using JACK](#using-jack) below.
+- **Output** / **Input** — which device each direction uses. Live under
+  PipeWire only (see below); placeholders under ALSA, greyed under JACK.
 - **SP-1200** (On/Off) — applied immediately.
 - **Buffer size** (128–4096) — applied on **OK**, since it stops and reopens
   the audio device.
@@ -471,8 +480,33 @@ Edit > Preferences. What actually does something today:
   1024, a sensible size for line-in.
 - **Input gain** (−24…+24 dB) — applied immediately as you drag.
 
-**Output**, **Input** and **Sample rate** are placeholders for future options
-and don't do anything yet — Eris always opens the system default device.
+**Sample rate** is a placeholder and doesn't do anything yet.
+
+### Using PipeWire
+
+The default on any machine actually running PipeWire, and the one to use
+unless you have a reason not to. Eris connects as a real PipeWire client
+(not through the ALSA or JACK compatibility layers), so it appears in
+qpwgraph as its own node and can be rewired there like anything else.
+
+**Output** and **Input** list your PipeWire sinks and sources by name:
+
+- **Default (system)** — follow whatever your desktop's current default
+  device is, including when that changes later. This is the right choice
+  most of the time.
+- Anything else pins Eris to that specific device, and it stays pinned even
+  if the system default moves.
+
+**The lists refresh every time you open Preferences.** Plug an interface in,
+open Edit > Preferences, and it's there — no restart. They also refresh the
+moment you pick PipeWire in the Backend dropdown.
+
+Changing either device reopens both streams, so there's a brief gap in the
+audio when you hit OK. Selecting a device that has since disappeared falls
+back to the system default rather than going silent.
+
+The sample rate needs no attention here: Eris asks PipeWire for its own rate
+and PipeWire converts to whatever the graph is running at.
 
 ### Using JACK
 

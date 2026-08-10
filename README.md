@@ -4,7 +4,8 @@ A linear-timeline, audio-only DAW for jungle/breakbeat production, inspired by
 the early versions of Ableton Live, Player Pro, and OctaMED. Written in
 Object Pascal (Lazarus/FPC).
 
-Native, dependency-light audio path (ALSA on Linux, DirectSound on Windows),
+Native, dependency-light audio path (PipeWire, ALSA or JACK on Linux;
+DirectSound on Windows),
 non-destructive clip editing with three independent time-warp modes, a
 per-track/master effects chain, SP-1200-style per-track swing, and an SP-1200
 emulation mode baked identically into live monitoring and offline
@@ -60,8 +61,14 @@ DISCLAIMER: HEAVY LLM usage. I know decent Pascal but do not know about audio en
   the octave shift transposes the whole bank by whole octaves rather than
   pitching each key individually. Created via Track > Add Sampler Track
   (`Ctrl+Alt+N`).
+- **Audio backends**: selectable at runtime in Preferences — **PipeWire**
+  (a real pw_stream client, with per-direction device selection that
+  refreshes whenever Preferences is opened; the default when PipeWire is
+  running), **ALSA**, and **JACK** (registers as a normal JACK client, works
+  against jackd or pipewire-jack). All three hand-written bindings, no
+  third-party packages. Windows uses DirectSound.
 - **Input tracks**: a dedicated track type that records the live capture
-  device (ALSA line-in) instead of its own keyboard/timeline audio, with a
+  device (line-in) instead of its own keyboard/timeline audio, with a
   per-track `M` input-monitor toggle that routes the live signal into the mix
   with no recording and no playhead movement (so it doubles as headphone
   monitoring while tracking). Input buffer size and input gain are set in
