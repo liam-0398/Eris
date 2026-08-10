@@ -49,6 +49,27 @@ procedure AudioEngineSetLoop(AStart, AEnd: Int64);
 procedure AudioEngineClearLoop;
 procedure AudioEngineTriggerNote(ATrackIndex: Integer; AData: PSingle;
   AFrameCount, AChannels: Integer; ASemitoneOffset: Single; AGain: Single);
+{ Same note trigger as above, but safe to call from a foreign realtime thread
+  - specifically the MIDI input callback, which on Windows runs on a thread
+  owned by winmm and is not allowed to block, allocate, or re-enter the
+  system. AudioEngineTriggerNote can't serve that: it goes through
+  PushCommand, which is documented single-producer/main-thread-only and will
+  Sleep(1) in a loop while it waits for ring space. Calling it from the MIDI
+  callback would both race the main thread on RingHead and risk stalling a
+  driver thread for up to a quarter second.
+  So this is a second, independent SPSC ring - exactly ONE thread may call it
+  (the MIDI callback), drained by the audio thread inside DrainCommands. It
+  never waits: if the ring is full the note is dropped, which at 64 slots
+  means a burst no human is playing anyway. }
+procedure AudioEngineTriggerNoteRT(ATrackIndex: Integer; AData: PSingle;
+  AFrameCount, AChannels: Integer; ASemitoneOffset: Single; AGain: Single);
+{ Clears every effect's live DSP state - reverb tails, delay lines, filter
+  memory, compressor envelopes - without touching the transport or the
+  backend. AudioEngineInit does this as part of a full start-up; File>New
+  needs the same clean slate without tearing the audio device down, otherwise
+  the new project inherits the previous one's tails. Must not be called from
+  a realtime thread. }
+procedure AudioEngineResetEffectState;
 function AudioEngineIsPlaying: Boolean;
 { True while the realtime thread could still touch sample memory - Playing,
   a live note, or a note's release tail (AnyLiveNoteActive covers both) -
@@ -162,6 +183,9 @@ const
   { how long PushCommand will wait for the audio thread to free a ring slot
     before giving up - see PushCommand }
   CommandPushTimeoutMs = 250;
+  { slots in the separate never-waiting MIDI note ring - see
+    AudioEngineTriggerNoteRT }
+  NoteRingCapacity = 64;
   PendingFreeCapacity = 128;
   MaxTracks = Project.MaxTracks;
   NoteFadeSamples = 128; { short crossfade on hard-retrigger, avoids a click }
@@ -177,6 +201,17 @@ const
   CaptureRingBlocks = 8;
 
 type
+  { one queued MIDI note-on, the payload of the NoteRing below; the same
+    fields ckTriggerNote carries, minus the command tag }
+  TNoteEvent = record
+    TrackIndex: Integer;
+    Data: PSingle;
+    FrameCount: Integer;
+    Channels: Integer;
+    Rate: Double;
+    Gain: Single;
+  end;
+
   TCommandKind = (ckSetTrackClips, ckPlay, ckStop, ckSeek, ckTriggerNote,
     ckStartCountIn, ckStartRecording, ckStopRecording, ckSetLoop, ckClearLoop,
     ckSetSP1200Enabled, ckSetMetronomeEnabled);
@@ -252,6 +287,12 @@ var
   RingBuffer: array[0..RingBufferCapacity - 1] of TCommand;
   RingHead: Integer;
   RingTail: Integer;
+
+  { the MIDI-thread note ring - see AudioEngineTriggerNoteRT's comment for why
+    keyboard-played MIDI notes can't just go through RingBuffer above }
+  NoteRing: array[0..NoteRingCapacity - 1] of TNoteEvent;
+  NoteRingHead: Integer;
+  NoteRingTail: Integer;
 
   { audio thread -> main thread, the mirror image of the command ring above:
     DrainCommands (audio thread) retires a track's old TPlaybackClip array
@@ -363,6 +404,67 @@ begin
   Result := True;
 end;
 
+{ Starts (or hard-retriggers) a track's one keyboard voice. Shared by the
+  ckTriggerNote command path and the MIDI note ring below so both routes
+  produce an identical voice - including the short crossfade that keeps a
+  retrigger from clicking. Audio-thread only. }
+procedure StartLiveNote(ATrackIndex: Integer; AData: PSingle;
+  AFrameCount, AChannels: Integer; ARate: Double; AGain: Single);
+begin
+  if (ATrackIndex < 0) or (ATrackIndex >= MaxTracks) or (AData = nil)
+    or (AFrameCount <= 0) then
+    Exit;
+
+  if LiveNotes[ATrackIndex].Active then
+  begin
+    FadingNotes[ATrackIndex] := LiveNotes[ATrackIndex];
+    FadingNotes[ATrackIndex].FadeStep := 1.0 / NoteFadeSamples;
+  end;
+
+  LiveNotes[ATrackIndex].Data := AData;
+  LiveNotes[ATrackIndex].FrameCount := AFrameCount;
+  LiveNotes[ATrackIndex].Channels := AChannels;
+  LiveNotes[ATrackIndex].Position := 0;
+  LiveNotes[ATrackIndex].Rate := ARate;
+  LiveNotes[ATrackIndex].Gain := AGain;
+  LiveNotes[ATrackIndex].FadeGain := 1.0;
+  LiveNotes[ATrackIndex].FadeStep := 0;
+  LiveNotes[ATrackIndex].Active := True;
+end;
+
+{ MIDI-thread producer for the note ring. Never waits and never allocates -
+  see AudioEngineTriggerNoteRT's comment. }
+procedure PushNoteEvent(const AEvent: TNoteEvent);
+var
+  NextHead: Integer;
+begin
+  NextHead := (NoteRingHead + 1) mod NoteRingCapacity;
+  if NextHead = NoteRingTail then
+    Exit; { full - drop rather than stall a driver thread }
+
+  NoteRing[NoteRingHead] := AEvent;
+  { same publish ordering PushCommand relies on: the slot's contents have to
+    be visible before the head that advertises them }
+  WriteBarrier;
+  NoteRingHead := NextHead;
+end;
+
+{ Audio-thread consumer for the note ring, called from DrainCommands so MIDI
+  notes start on the same block boundary command-queued ones do. }
+procedure DrainNoteRing;
+var
+  Event: TNoteEvent;
+begin
+  while NoteRingTail <> NoteRingHead do
+  begin
+    ReadBarrier;
+    Event := NoteRing[NoteRingTail];
+    NoteRingTail := (NoteRingTail + 1) mod NoteRingCapacity;
+    StartLiveNote(Event.TrackIndex, Event.Data, Event.FrameCount,
+      Event.Channels, Event.Rate, Event.Gain);
+  end;
+end;
+
 { Audio-thread-only producer for the pending-free queue - see PendingFrees'
   declaration. Never called with more than one outstanding entry per track
   between two main-thread poll-timer ticks in practice, so 64 slots is far
@@ -469,6 +571,8 @@ var
   Cmd: TCommand;
   t: Integer;
 begin
+  DrainNoteRing;
+
   while PopCommand(Cmd) do
     case Cmd.Kind of
       ckSetTrackClips:
@@ -503,24 +607,8 @@ begin
             Playhead := 0;
         end;
       ckTriggerNote:
-        begin
-          t := Cmd.TrackIndex;
-          if LiveNotes[t].Active then
-          begin
-            FadingNotes[t] := LiveNotes[t];
-            FadingNotes[t].FadeStep := 1.0 / NoteFadeSamples;
-          end;
-
-          LiveNotes[t].Data := Cmd.NoteData;
-          LiveNotes[t].FrameCount := Cmd.NoteFrameCount;
-          LiveNotes[t].Channels := Cmd.NoteChannels;
-          LiveNotes[t].Position := 0;
-          LiveNotes[t].Rate := Cmd.NoteRate;
-          LiveNotes[t].Gain := Cmd.NoteGain;
-          LiveNotes[t].FadeGain := 1.0;
-          LiveNotes[t].FadeStep := 0;
-          LiveNotes[t].Active := True;
-        end;
+        StartLiveNote(Cmd.TrackIndex, Cmd.NoteData, Cmd.NoteFrameCount,
+          Cmd.NoteChannels, Cmd.NoteRate, Cmd.NoteGain);
       ckStartCountIn:
         begin
           RecordTrackIndex := Cmd.TrackIndex;
@@ -1797,7 +1885,30 @@ begin
       Backend.WriteBlock(MixBuffer, BlockFrames);
     end
     else
+    begin
+      {$IFDEF WINDOWS}
+      { DirectSound only. Its buffer is a LOOPING one: the play cursor never
+        stops, it just keeps running over whatever bytes are already in the
+        ring. So the moment we stop feeding it - a one-shot note ending, or
+        the transport being paused - it goes right on replaying the last few
+        blocks we happened to leave there, forever. That is the "one-shots
+        never end, they start repeating" bug, and it's also why pausing over
+        a clip loops that clip while pausing over empty timeline sounds fine:
+        in the empty case the stale bytes are already silence.
+
+        ALSA has no equivalent problem - stop writing and the PCM simply
+        drains and underruns into silence - so this is deliberately Windows
+        only, and the else branch below is the untouched original path.
+
+        Feeding actual silence instead of sleeping also paces this loop for
+        free: DirectSoundWriteBlock applies its own backpressure against the
+        play cursor, so it returns at roughly real time rather than spinning. }
+      FillChar(MixBuffer^, BlockFrames * OutputChannels * SizeOf(Single), 0);
+      Backend.WriteBlock(MixBuffer, BlockFrames);
+      {$ELSE}
       Sleep(10);
+      {$ENDIF}
+    end;
   end;
 end;
 
@@ -1881,6 +1992,8 @@ var
 begin
   RingHead := 0;
   RingTail := 0;
+  NoteRingHead := 0;
+  NoteRingTail := 0;
   Playhead := 0;
   Playing := False;
   LoopActive := False;
@@ -1900,14 +2013,8 @@ begin
     LiveNotes[i].Active := False;
     FadingNotes[i].Active := False;
     TrackTapLevel[i] := 0;
-    for e := 0 to Effects.MaxEffectsPerTrack - 1 do
-      Effects.EffectStateReset(TrackEffectState[i][e]);
   end;
-  for e := 0 to Effects.MaxEffectsPerTrack - 1 do
-    Effects.EffectStateReset(MasterEffectState[e]);
-  for i := 0 to Project.SendCount - 1 do
-    for e := 0 to Effects.MaxEffectsPerTrack - 1 do
-      Effects.EffectStateReset(SendEffectState[i][e]);
+  AudioEngineResetEffectState;
 
   BlockFrames := DefaultBlockFrames;
   GetMem(MixBuffer, BlockFrames * OutputChannels * SizeOf(Single));
@@ -2039,6 +2146,20 @@ begin
   PushCommand(Cmd);
 end;
 
+procedure AudioEngineTriggerNoteRT(ATrackIndex: Integer; AData: PSingle;
+  AFrameCount, AChannels: Integer; ASemitoneOffset: Single; AGain: Single);
+var
+  Event: TNoteEvent;
+begin
+  Event.TrackIndex := ATrackIndex;
+  Event.Data := AData;
+  Event.FrameCount := AFrameCount;
+  Event.Channels := AChannels;
+  Event.Rate := SemitonesToRate(ASemitoneOffset);
+  Event.Gain := AGain;
+  PushNoteEvent(Event);
+end;
+
 function AudioEngineIsPlaying: Boolean;
 begin
   Result := Playing;
@@ -2052,6 +2173,20 @@ end;
 procedure AudioEngineInvalidateGrainCache;
 begin
   { nothing to invalidate - see the declaration }
+end;
+
+procedure AudioEngineResetEffectState;
+var
+  i, e: Integer;
+begin
+  for i := 0 to MaxTracks - 1 do
+    for e := 0 to Effects.MaxEffectsPerTrack - 1 do
+      Effects.EffectStateReset(TrackEffectState[i][e]);
+  for e := 0 to Effects.MaxEffectsPerTrack - 1 do
+    Effects.EffectStateReset(MasterEffectState[e]);
+  for i := 0 to Project.SendCount - 1 do
+    for e := 0 to Effects.MaxEffectsPerTrack - 1 do
+      Effects.EffectStateReset(SendEffectState[i][e]);
 end;
 
 function AudioEngineHasClip: Boolean;

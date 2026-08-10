@@ -8,7 +8,7 @@ uses
   Classes, SysUtils, Math, Types, Forms, Controls, Graphics, Dialogs, Menus, ExtCtrls,
   StdCtrls, ComCtrls, Buttons, LCLType, ArrangementView, PrefsForm, FileBrowser,
   SampleTypes, AudioEngine, Project, ProjectFile, WarpEditor,
-  InstrumentEditor, SamplerEditor, Effects, EffectsRack, UIScale;
+  InstrumentEditor, SamplerEditor, Effects, EffectsRack, UIScale, MidiInput;
 
 type
   TForm1 = class(TForm)
@@ -214,6 +214,7 @@ type
     procedure SamplerKeySelected(Sender: TObject; AKeyIndex: Integer);
     procedure SamplerKeyEditorChanged(Sender: TObject);
     procedure TriggerSamplerKeyNote(ABoxIndex, AOctaveDelta: Integer);
+    procedure RefreshMidiSnapshot;
     procedure PlaybackPollTimerTimer(Sender: TObject);
     procedure FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
   public
@@ -228,6 +229,110 @@ implementation
 
 {$R *.lfm}
 
+const
+  { MIDI note number that plays a track's instrument at its own native pitch,
+    i.e. the MIDI equivalent of the QWERTY layout's offset 0. Middle C. }
+  MidiRootNote = 60;
+
+  { a track index no real target can equal - Project's bus targets run down to
+    BusSendLast, so anything below that forces the next UpdateDevicePanel to
+    rebuild the effects rack rather than assuming it's still current }
+  InvalidEffectsRackTrack = Project.BusSendLast - 1;
+
+type
+  { One playable voice, resolved down to what AudioEngineTriggerNoteRT needs
+    and nothing more - no sample IDs, no indices into anything the main
+    thread might reindex underneath us. Data is already advanced past the
+    trim start, so the MIDI thread does no arithmetic on Project state. }
+  TMidiVoice = record
+    Data: PSingle;
+    FrameCount: Integer;
+    Channels: Integer;
+  end;
+
+  { Everything the MIDI callback needs to turn a note number into a voice,
+    published by the main thread so the callback never reads Project or the
+    LCL. See MidiInput.pas's header for why the callback can't just call
+    TriggerKeyboardNote directly. }
+  TMidiSnapshot = record
+    Valid: Boolean;
+    TrackIndex: Integer;
+    IsSampler: Boolean;
+    Octave: Integer;
+    Gain: Single;
+    Instrument: TMidiVoice;
+    Slots: array[0..Project.SamplerKeysPerOctave - 1] of TMidiVoice;
+  end;
+
+var
+  { single writer (main thread, RefreshMidiSnapshot), single reader (the MIDI
+    driver thread). Valid is cleared for the duration of a rewrite so the
+    reader skips a torn record.
+
+    This leaves one narrow window - the reader can pass the Valid test and
+    then be descheduled while the main thread reassigns the instrument and
+    frees the old sample - which is knowingly not closed here. The audio
+    engine already holds raw sample-pool pointers across exactly the same
+    window (LiveNotes[t].Data), so closing it properly means refcounting the
+    pool, which is a much larger change than adding MIDI in. }
+  MidiSnapshot: TMidiSnapshot;
+
+{ Runs on the MIDI driver's thread - see MidiInput.pas's contract. Reads only
+  MidiSnapshot and pushes to the engine's lock-free note ring; touches no LCL
+  object and no Project global, allocates nothing, and blocks on nothing. }
+procedure MidiNoteReceived(ANote, AVelocity: Integer);
+var
+  Voice: TMidiVoice;
+  Index, Octave, Box, Offset: Integer;
+  Gain: Single;
+begin
+  if not MidiSnapshot.Valid then
+    Exit;
+  { pairs with RefreshMidiSnapshot's barrier - don't let the field reads
+    hoist above the Valid check that says they're populated }
+  ReadBarrier;
+
+  if MidiSnapshot.TrackIndex < 0 then
+    Exit;
+
+  Index := ANote - MidiRootNote;
+
+  if MidiSnapshot.IsSampler then
+  begin
+    { A Sampler Track has one octave of key boxes, so the note folds into a
+      box plus however many octaves above the bank it lands - same mapping
+      FormKeyDown does for QWERTY. It can't reuse div/mod the way FormKeyDown
+      does, though: those truncate toward zero, and unlike the QWERTY layout
+      (offsets 0..28) MIDI reaches well below the root, where truncation
+      would hand back a negative box index. Floor toward minus infinity
+      instead so notes under middle C wrap onto real keys. }
+    if Index >= 0 then
+      Octave := Index div Project.SamplerKeysPerOctave
+    else
+      Octave := -((-Index + Project.SamplerKeysPerOctave - 1)
+        div Project.SamplerKeysPerOctave);
+    Box := Index - Octave * Project.SamplerKeysPerOctave;
+    Voice := MidiSnapshot.Slots[Box];
+    Offset := (MidiSnapshot.Octave + Octave) * 12;
+  end
+  else
+  begin
+    Voice := MidiSnapshot.Instrument;
+    Offset := Index + MidiSnapshot.Octave * 12;
+  end;
+
+  if Voice.Data = nil then
+    Exit; { empty key, or no instrument loaded on this track }
+
+  { velocity straight onto the instrument's own gain trim. No range limit on
+    Offset on purpose: a five-octave controller plus the octave buttons can
+    ask for playback rates far outside anything musical, and that is a
+    legitimate thing to want out of a sampler. }
+  Gain := MidiSnapshot.Gain * (AVelocity / 127);
+  AudioEngineTriggerNoteRT(MidiSnapshot.TrackIndex, Voice.Data,
+    Voice.FrameCount, Voice.Channels, Offset, Gain);
+end;
+
 constructor TForm1.Create(AOwner: TComponent);
 begin
   inherited Create(AOwner);
@@ -239,12 +344,20 @@ begin
   AudioEngineInit;
   KeyPreview := True;
   OnKeyDown := @FormKeyDown;
+  { a plugged-in USB MIDI keyboard now plays the selected track's instrument
+    alongside the QWERTY keys. Returns False and changes nothing when there
+    isn't one, so there's no failure to report. Notes are ignored until the
+    first RefreshMidiSnapshot arms the snapshot below. }
+  MidiInputStart(@MidiNoteReceived);
 end;
 
 destructor TForm1.Destroy;
 var
   i: Integer;
 begin
+  { before AudioEngineShutdown and before the sample pool is freed - once
+    this returns, no further MIDI callback can reference either }
+  MidiInputStop;
   AudioEngineShutdown;
   for i := 0 to High(Project.SamplePool) do
     if Project.SamplePool[i].Data <> nil then
@@ -1010,6 +1123,16 @@ begin
     Sleep(1);
   AudioEngineInvalidateGrainCache;
   Project.NewProject;
+  { NewProject clears the effect CHAINS, but the engine's live effect state -
+    reverb tails, delay lines, filter memory - belongs to the audio engine and
+    survived the stop above, so the new project would otherwise start by
+    flushing out the last one's tails. }
+  AudioEngineResetEffectState;
+  { force the effects rack to rebuild. UpdateDevicePanel only rebuilds when
+    the selected track CHANGES, and File>New usually leaves the selection
+    exactly where it was - so without this the rack goes on showing widgets
+    for the effects the project no longer has. }
+  FLastEffectsRackTrack := InvalidEffectsRackTrack;
   FCurrentProjectPath := '';
   UpdateWindowTitle;
   RefreshAllTracksUI;
@@ -2520,6 +2643,7 @@ begin
   if FLastEffectsRackTrack <> Track then
     RebuildEffectWidgets;
   UpdateDevicePanelScroll;
+  RefreshMidiSnapshot;
 end;
 
 procedure TForm1.InstrumentDeleteClick(Sender: TObject);
@@ -2648,10 +2772,92 @@ begin
     Power(10, Project.TrackInstrumentGainDb[Track] / 20));
 end;
 
+{ Republishes what the MIDI thread is allowed to play - see MidiSnapshot.
+  Called from UpdateDevicePanel, which every instrument/octave/gain/track
+  change already funnels through, and again from the playback poll timer as a
+  backstop so a path that forgets to call UpdateDevicePanel can at worst leave
+  the snapshot one tick stale. That staleness only ever affects which sample
+  is armed, never note latency - notes themselves never touch this timer. }
+procedure TForm1.RefreshMidiSnapshot;
+var
+  Track, k: Integer;
+
+  procedure FillVoice(out AVoice: TMidiVoice; ASampleID: Integer;
+    AStart, AEnd: Int64);
+  var
+    Sample: TSample;
+    Count: Int64;
+  begin
+    AVoice.Data := nil;
+    AVoice.FrameCount := 0;
+    AVoice.Channels := 0;
+    if (ASampleID < 0) or (ASampleID > High(Project.SamplePool)) then
+      Exit;
+
+    Sample := Project.SamplePool[ASampleID];
+    if Sample.Data = nil then
+      Exit;
+
+    { same trim clamping TriggerKeyboardNote does before it hands a span to
+      the engine }
+    if AStart < 0 then
+      AStart := 0;
+    if AEnd > Sample.FrameCount then
+      AEnd := Sample.FrameCount;
+    Count := AEnd - AStart;
+    if Count <= 0 then
+      Exit;
+
+    AVoice.Data := @Sample.Data[AStart * Sample.Channels];
+    AVoice.FrameCount := Count;
+    AVoice.Channels := Sample.Channels;
+  end;
+
+begin
+  { disarm for the duration of the rewrite so the MIDI thread never reads a
+    half-updated record }
+  MidiSnapshot.Valid := False;
+  WriteBarrier;
+
+  Track := FArrangementView.KeyboardTrack;
+  MidiSnapshot.TrackIndex := Track;
+  MidiSnapshot.Instrument.Data := nil;
+  for k := 0 to Project.SamplerKeysPerOctave - 1 do
+    MidiSnapshot.Slots[k].Data := nil;
+
+  { a send bus or the master row has no instrument to play }
+  if (Track < 0) or (Track >= Project.MaxTracks) then
+  begin
+    WriteBarrier;
+    MidiSnapshot.Valid := True;
+    Exit;
+  end;
+
+  MidiSnapshot.IsSampler := Project.TrackIsSampler[Track];
+  MidiSnapshot.Octave := Project.TrackOctave[Track];
+  MidiSnapshot.Gain := Power(10, Project.TrackInstrumentGainDb[Track] / 20);
+
+  if MidiSnapshot.IsSampler then
+    for k := 0 to Project.SamplerKeysPerOctave - 1 do
+      FillVoice(MidiSnapshot.Slots[k],
+        Project.TrackSamplerSlots[Track][k].SampleID,
+        Project.TrackSamplerSlots[Track][k].StartFrame,
+        Project.TrackSamplerSlots[Track][k].EndFrame)
+  else
+    FillVoice(MidiSnapshot.Instrument, Project.TrackInstrument[Track],
+      Project.TrackInstrumentStart[Track], Project.TrackInstrumentEnd[Track]);
+
+  { publish: contents visible before the flag that advertises them }
+  WriteBarrier;
+  MidiSnapshot.Valid := True;
+end;
+
 procedure TForm1.PlaybackPollTimerTimer(Sender: TObject);
 var
   Track: Integer;
 begin
+  RefreshMidiSnapshot;
+
   { frees whatever old per-track clip arrays PushTrackToEngine's replacements
     have made obsolete since the last tick - see PendingFrees' declaration
     in AudioEngine.pas for why this can't happen on the audio thread itself }

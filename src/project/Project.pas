@@ -237,6 +237,9 @@ begin
   for s := 0 to SendCount - 1 do
   begin
     SendEffectCount[s] := 0;
+    { same reasoning as InitTrackInstruments' slot blanking below }
+    for i := 0 to Effects.MaxEffectsPerTrack - 1 do
+      SendEffects[s][i].Kind := Effects.ekNone;
     { unity return and unmuted, so dropping an effect on a send and turning
       one track's S button on is audible immediately with nothing else set }
     SendReturnLevel[s] := 1.0;
@@ -254,10 +257,18 @@ end;
 
 procedure InitTrackInstruments;
 var
-  i: Integer;
+  i, e: Integer;
 begin
   for i := 0 to MaxTracks - 1 do
   begin
+    { blank the slots themselves, not just the count. Everything that walks a
+      chain stops at TrackEffectCount, but leaving the previous project's
+      TEffect records sitting in the slots means the next AddTrackEffect
+      lands on top of stale parameters, and any code that tests Kind <>
+      ekNone (as the slot comment above promises it may) sees effects the new
+      project doesn't have. }
+    for e := 0 to Effects.MaxEffectsPerTrack - 1 do
+      TrackEffects[i][e].Kind := Effects.ekNone;
     TrackActive[i] := i < DefaultTrackCount;
     TrackInstrument[i] := -1;
     TrackOctave[i] := 0;
@@ -566,6 +577,9 @@ begin
   InitTrackInstruments;
   InitSendBuses;
   MasterEffectCount := 0;
+  { as with the track and send chains, blank the slots and not just the count }
+  for i := 0 to Effects.MaxEffectsPerTrack - 1 do
+    MasterEffects[i].Kind := Effects.ekNone;
   TempoBPM := DefaultTempoBPM;
 end;
 
