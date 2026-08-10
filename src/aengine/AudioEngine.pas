@@ -5,6 +5,9 @@ unit AudioEngine;
 interface
 
 const
+  { must stay equal to SampleTypes.CanonicalSampleRate, which every sample in
+    the pool is converted to on import - see that constant's comment. Can't
+    just reference it: this interface section has no uses clause. }
   ProjectSampleRate = 44100;
   { Ceiling on warp markers per clip - these back the fixed-size
     MarkerSource/MarkerTimeline arrays in TPlaybackClip below, which have to
@@ -203,7 +206,7 @@ const
 type
   { one queued MIDI note-on, the payload of the NoteRing below; the same
     fields ckTriggerNote carries, minus the command tag }
-  TNoteEvent = record
+  TQueuedNote = record
     TrackIndex: Integer;
     Data: PSingle;
     FrameCount: Integer;
@@ -290,7 +293,7 @@ var
 
   { the MIDI-thread note ring - see AudioEngineTriggerNoteRT's comment for why
     keyboard-played MIDI notes can't just go through RingBuffer above }
-  NoteRing: array[0..NoteRingCapacity - 1] of TNoteEvent;
+  NoteRing: array[0..NoteRingCapacity - 1] of TQueuedNote;
   NoteRingHead: Integer;
   NoteRingTail: Integer;
 
@@ -434,7 +437,7 @@ end;
 
 { MIDI-thread producer for the note ring. Never waits and never allocates -
   see AudioEngineTriggerNoteRT's comment. }
-procedure PushNoteEvent(const AEvent: TNoteEvent);
+procedure PushNoteEvent(const AEvent: TQueuedNote);
 var
   NextHead: Integer;
 begin
@@ -453,7 +456,7 @@ end;
   notes start on the same block boundary command-queued ones do. }
 procedure DrainNoteRing;
 var
-  Event: TNoteEvent;
+  Event: TQueuedNote;
 begin
   while NoteRingTail <> NoteRingHead do
   begin
@@ -2149,7 +2152,7 @@ end;
 procedure AudioEngineTriggerNoteRT(ATrackIndex: Integer; AData: PSingle;
   AFrameCount, AChannels: Integer; ASemitoneOffset: Single; AGain: Single);
 var
-  Event: TNoteEvent;
+  Event: TQueuedNote;
 begin
   Event.TrackIndex := ATrackIndex;
   Event.Data := AData;

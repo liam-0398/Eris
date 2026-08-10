@@ -183,6 +183,15 @@ procedure RemoveSendEffect(ASendIndex, AEffectIndex: Integer);
 { Bus target <-> send index. BusToSendIndex returns -1 for anything that
   isn't a send target, so callers can use it as the "is this a send?" test
   as well as the conversion. }
+{ How many SOURCE frames a clip actually consumes, which is NOT AClip.Length.
+  Length is a TIMELINE span - RescaleForTempoChange rewrites it to the last
+  warp marker's TimelineFrame - so for any clip that has been warped or lived
+  through a tempo change it no longer matches the stretch of sample sitting
+  behind it. Anything indexing back into the source sample must use this:
+  Offset + Length silently lands short of the real end when the tempo went up
+  (the end marker stops midway through the sample) and past it when the tempo
+  went down, where a bounds check quietly swaps in the whole sample instead. }
+function ClipSourceLength(const AClip: TClip): Int64;
 function BusToSendIndex(ATarget: Integer): Integer;
 function SendIndexToBus(ASendIndex: Integer): Integer;
 
@@ -581,6 +590,17 @@ begin
   for i := 0 to Effects.MaxEffectsPerTrack - 1 do
     MasterEffects[i].Kind := Effects.ekNone;
   TempoBPM := DefaultTempoBPM;
+end;
+
+function ClipSourceLength(const AClip: TClip): Int64;
+begin
+  { markers are relative to Offset and start at SourceFrame 0, so the last
+    one's SourceFrame is the source-frame count - see RescaleForTempoChange,
+    which seeds exactly that pair for a clip that had no markers yet }
+  if System.Length(AClip.WarpMarkers) >= 2 then
+    Result := AClip.WarpMarkers[High(AClip.WarpMarkers)].SourceFrame
+  else
+    Result := AClip.Length;
 end;
 
 procedure RescaleForTempoChange(AOldBPM, ANewBPM: Single);

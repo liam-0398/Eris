@@ -5,7 +5,7 @@ unit WavDecoder;
 interface
 
 uses
-  Classes, SysUtils, SampleTypes, AiffDecoder;
+  Classes, SysUtils, SampleTypes, AiffDecoder, Resample;
   { Mp3Decoder is not wired in yet - it doesn't exist as a unit yet, this
     is a deliberate midpoint so AIFF support and the sample-load thread fix
     can be built and tested independently of the still-unwritten MP3 port }
@@ -252,6 +252,41 @@ const
     { .mp3 added once Mp3Decoder exists }
   );
 
+{ Converts a freshly decoded sample to CanonicalSampleRate in place, so the
+  pool only ever holds one rate - see that constant's comment for why a
+  mixed-rate pool misbehaves. Uses Resample.Interpolate, the same interpolator
+  the engine's own vari-speed playback runs on, so an imported 48k file sounds
+  exactly like the engine pitching it would. A no-op for anything already at
+  the canonical rate, which is every file Eris itself writes. }
+procedure ResampleToCanonical(var ASample: TSample);
+var
+  NewData: PSingle;
+  NewCount, i, c: Integer;
+  Ratio: Double;
+begin
+  if (ASample.Data = nil) or (ASample.FrameCount <= 0)
+    or (ASample.Channels <= 0) or (ASample.SampleRate <= 0)
+    or (ASample.SampleRate = CanonicalSampleRate) then
+    Exit;
+
+  { source frames consumed per output frame - >1 downsampling, <1 upsampling }
+  Ratio := ASample.SampleRate / CanonicalSampleRate;
+  NewCount := Round(ASample.FrameCount / Ratio);
+  if NewCount <= 0 then
+    Exit;
+
+  GetMem(NewData, Int64(NewCount) * ASample.Channels * SizeOf(Single));
+  for i := 0 to NewCount - 1 do
+    for c := 0 to ASample.Channels - 1 do
+      NewData[i * ASample.Channels + c] := Resample.Interpolate(
+        ASample.Data, ASample.FrameCount, ASample.Channels, c, i * Ratio);
+
+  FreeMem(ASample.Data);
+  ASample.Data := NewData;
+  ASample.FrameCount := NewCount;
+  ASample.SampleRate := CanonicalSampleRate;
+end;
+
 function DecodeSampleFile(const APath: string; out ASample: TSample): Boolean;
 var
   Ext: string;
@@ -263,6 +298,10 @@ begin
     if Decoders[i].Ext = Ext then
     begin
       Result := Decoders[i].Decode(APath, ASample);
+      { before any caller computes peaks, transients or periods off it, and
+        before it can reach the pool at a foreign rate }
+      if Result then
+        ResampleToCanonical(ASample);
       Exit;
     end;
 end;

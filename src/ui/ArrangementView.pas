@@ -1953,8 +1953,10 @@ begin
           Height, same as the volume-slider drag above tolerates X doing. }
         if (Y >= Height) and Assigned(FOnClipActivate) then
         begin
+          { source frames, not FDragOrigClip.Length - the receiver adds this
+            to Offset to index back into the sample, see ClipSourceLength }
           FOnClipActivate(Self, FDragOrigClip.SampleID, FDragOrigClip.Offset,
-            FDragOrigClip.Length);
+            Project.ClipSourceLength(FDragOrigClip));
           FDragActive := False;
           FDragMode := dmNone;
           Invalidate;
@@ -2189,9 +2191,10 @@ begin
   if not HitTestClip(TrackIndex, P.X, ClipIndex, Mode) then
     Exit;
   if Assigned(FOnClipActivate) then
+    { source frames, not .Length - see ClipSourceLength }
     FOnClipActivate(Self, Project.Tracks[TrackIndex].Clips[ClipIndex].SampleID,
       Project.Tracks[TrackIndex].Clips[ClipIndex].Offset,
-      Project.Tracks[TrackIndex].Clips[ClipIndex].Length);
+      Project.ClipSourceLength(Project.Tracks[TrackIndex].Clips[ClipIndex]));
 end;
 
 { Extracts whatever portion of AClip falls inside [ARangeStart, ARangeEnd),

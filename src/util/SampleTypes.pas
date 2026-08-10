@@ -30,6 +30,18 @@ type
   TFrameArray = array of Int64;
 
 const
+  { The one sample rate everything in the pool is held at. The engine has no
+    per-sample rate: AudioEngine plays every voice at ProjectSampleRate and
+    derives its playback rate purely from pitch, while the editors size their
+    rulers and markers from TSample.SampleRate - so a sample stored at any
+    other rate makes those two disagree, which put the instrument editor's end
+    marker away from the end of the audio and played the sample off-pitch by
+    the rate ratio. WavDecoder.DecodeSampleFile converts everything to this on
+    the way in so the mismatch can't arise. Must stay equal to
+    AudioEngine.ProjectSampleRate, which can't reference it (AudioEngine's
+    interface section has no uses clause). }
+  CanonicalSampleRate = 44100;
+
   { Beats (default): each segment plays at 1:1 and loops/truncates its tail
     to hit the next marker, preserving pitch - see AudioEngine.ClipSourcePosition.
     RePitch: the classic continuous vari-speed warp - each segment resamples
