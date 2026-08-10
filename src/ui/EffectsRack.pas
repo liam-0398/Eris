@@ -493,9 +493,14 @@ begin
       silently transposed into a squashed, overflowing box }
     FEQGainSlider[b].Orientation := trVertical;
     FEQGainSlider[b].Left := Px(bx);
-    FEQGainSlider[b].Top := Px(128);
+    { Top raised from the original 128 to 114 (bottom margin unchanged at
+      10) so the slider itself is exactly 1/3 taller than its original 42px
+      - see UIScale.Px's comment: too little travel and GTK2 renders a
+      vertical TTrackBar as barely more than its own round thumb, unusable
+      on X11. }
+    FEQGainSlider[b].Top := Px(114);
     FEQGainSlider[b].Width := Px(EQBandWidth);
-    FEQGainSlider[b].Height := Px(WidgetHeight) - Px(128) - Px(10);
+    FEQGainSlider[b].Height := Px(WidgetHeight) - Px(114) - Px(10);
     { GTK's un-inverted vertical range puts the Min value at the top, which
       reads backwards for a gain fader - flip it so dragging up means more
       gain, matching every real mixer/EQ }
