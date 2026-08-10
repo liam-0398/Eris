@@ -163,6 +163,7 @@ type
     procedure InstrumentZoomOutClick(Sender: TObject);
     procedure RefreshWarpWidgetSize;
     procedure RefreshInstrumentWidgetSize;
+    procedure RefreshSamplerWidgetSize;
     function EffectsRackBaseLeft: Integer;
     function EffectsRackTotalWidth: Integer;
     procedure RebuildEffectWidgets;
@@ -316,6 +317,7 @@ begin
   AddInputTrackItem := AddItem(TrackMenu, 'Add &Input Track', @TrackAddInputClick);
   AddInputTrackItem.ShortCut := Menus.ShortCut(Ord('N'), [ssCtrl, ssShift]);
   AddSamplerTrackItem := AddItem(TrackMenu, 'Add Sam&pler Track', @TrackAddSamplerClick);
+  AddSamplerTrackItem.ShortCut := Menus.ShortCut(Ord('N'), [ssCtrl, ssAlt]);
   DeleteTrackItem := AddItem(TrackMenu, '&Delete Track', @TrackDeleteClick);
   DeleteTrackItem.ShortCut := Menus.ShortCut(Ord('D'), [ssCtrl]);
 
@@ -779,6 +781,12 @@ begin
   FSamplerEditorWidget.BevelOuter := bvRaised;
   FSamplerEditorWidget.Visible := False;
   FSamplerEditorWidget.Caption := '';
+
+  { same zoom level/buttons as the instrument waveform editor - both share
+    InstrumentEditor.InstrumentZoomPixelsPerSecond, so one zoom click
+    affects whichever of the two is currently shown (and the other next
+    time it's shown) via RefreshInstrumentWidgetSize/RefreshSamplerWidgetSize. }
+  AddZoomButtons(FSamplerEditorWidget, @InstrumentZoomInClick, @InstrumentZoomOutClick);
 
   FSamplerKeyEditor := TSamplerKeyEditor.Create(Self);
   FSamplerKeyEditor.Parent := FSamplerEditorWidget;
@@ -1418,7 +1426,11 @@ end;
 
 procedure TForm1.ArrangementViewClipSelectionChanged(Sender: TObject);
 begin
-  if FArrangementView.SelectedClipIndex >= 0 then
+  { a Sampler Track is sample-only - its device panel slot is always the
+    per-key waveform editor, never the clip/warp editor, even if a clip
+    happens to be sitting on its timeline lane and gets selected. }
+  if (FArrangementView.SelectedClipIndex >= 0) and
+    not Project.TrackIsSampler[FArrangementView.SelectedTrack] then
   begin
     FWarpEditor.SetClip(FArrangementView.SelectedTrack,
       FArrangementView.SelectedClipIndex);
@@ -1717,12 +1729,14 @@ procedure TForm1.InstrumentZoomInClick(Sender: TObject);
 begin
   InstrumentEditor.InstrumentZoomIn;
   RefreshInstrumentWidgetSize;
+  RefreshSamplerWidgetSize;
 end;
 
 procedure TForm1.InstrumentZoomOutClick(Sender: TObject);
 begin
   InstrumentEditor.InstrumentZoomOut;
   RefreshInstrumentWidgetSize;
+  RefreshSamplerWidgetSize;
 end;
 
 procedure TForm1.RefreshWarpWidgetSize;
@@ -1760,6 +1774,28 @@ begin
         Project.SamplePool[SampleID].FrameCount, Project.SamplePool[SampleID].SampleRate);
   end;
   FInstrumentEditor.Invalidate;
+  UpdateDevicePanelScroll;
+end;
+
+{ mirrors RefreshInstrumentWidgetSize above, just keyed off the selected
+  Sampler Track key's own slot instead of the track's single TrackInstrument }
+procedure TForm1.RefreshSamplerWidgetSize;
+var
+  Track, KeyIndex, SampleID: Integer;
+begin
+  Track := FArrangementView.KeyboardTrack;
+  if (Track >= 0) and Project.TrackIsSampler[Track] then
+  begin
+    KeyIndex := FSamplerKeys.SelectedKey;
+    if KeyIndex >= 0 then
+    begin
+      SampleID := Project.TrackSamplerSlots[Track][KeyIndex].SampleID;
+      if SampleID >= 0 then
+        FSamplerEditorWidget.Width := InstrumentWidthForFrames(
+          Project.SamplePool[SampleID].FrameCount, Project.SamplePool[SampleID].SampleRate);
+    end;
+  end;
+  FSamplerKeyEditor.Invalidate;
   UpdateDevicePanelScroll;
 end;
 
@@ -2207,7 +2243,10 @@ begin
 
     FSamplerEditorWidget.Visible := not FWarpWidget.Visible;
     if FSamplerEditorWidget.Visible then
+    begin
       FSamplerKeyEditor.SetKey(Track, FSamplerKeys.SelectedKey);
+      RefreshSamplerWidgetSize;
+    end;
   end
   else
   begin

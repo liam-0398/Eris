@@ -27,6 +27,8 @@ type
   private
     const
       MarkerGrabPixels = 6;
+      { same fixed ruler-strip height as WarpEditor.WarpRulerHeight }
+      RulerHeight = 18;
     var
       FTrackIndex: Integer;
       FDragWhich: Integer; { -1 none, 0 start marker, 1 end marker }
@@ -37,7 +39,17 @@ type
     function FrameToX(AFrame: Int64; ASampleRate: Integer): Integer;
     function XToFrame(AX: Integer; ASampleRate: Integer): Int64;
     function HitTestMarker(X: Integer; ASampleRate: Integer): Integer;
+    { same tempo-grid math as WarpEditor.BeatFrames/BarBeatLabel, just
+      parameterized on the sample's own rate instead of a fixed project rate
+      (matching FrameToX/XToFrame above) - a keyboard-play sample has no
+      warp markers/Position, so unlike WarpEditor's ruler labels (which add
+      the clip's timeline Position) this grid always starts counting from
+      frame 0, i.e. bar 1 beat 0, at the very start of the sample. }
+    function BeatFrames(ASampleRate: Integer): Int64;
+    function BarBeatLabel(AFrame: Int64; ASampleRate: Integer): string;
     procedure DrawClipWaveform(ASampleID: Integer);
+    procedure DrawGrid(ASampleRate: Integer);
+    procedure DrawRulerStrip(ASampleRate: Integer);
     procedure DrawMarkers(ASampleRate: Integer);
     procedure DrawPlayhead(ASampleRate: Integer);
   protected
@@ -124,13 +136,102 @@ begin
     Exit(0);
 end;
 
+function TInstrumentEditor.BeatFrames(ASampleRate: Integer): Int64;
+begin
+  if Project.TempoBPM <= 0 then
+    Exit(0);
+  Result := Round((ASampleRate * 60) / Project.TempoBPM);
+end;
+
+function TInstrumentEditor.BarBeatLabel(AFrame: Int64; ASampleRate: Integer): string;
+var
+  BF, TotalBeats, BarNum, BeatInBar: Int64;
+begin
+  BF := BeatFrames(ASampleRate);
+  if BF <= 0 then
+    Exit('1.0');
+  TotalBeats := AFrame div BF;
+  BarNum := TotalBeats div 4;
+  BeatInBar := TotalBeats mod 4;
+  Result := IntToStr(BarNum + 1) + '.' + IntToStr(BeatInBar);
+end;
+
 procedure TInstrumentEditor.DrawClipWaveform(ASampleID: Integer);
 var
   Sample: TSample;
 begin
   Sample := Project.SamplePool[ASampleID];
-  DrawWaveform(Canvas, Rect(0, 0, Width, Height), Project.SamplePeaks[ASampleID],
+  DrawWaveform(Canvas, Rect(0, RulerHeight, Width, Height), Project.SamplePeaks[ASampleID],
     Sample.FrameCount, 0, Sample.FrameCount, nil, clAqua);
+end;
+
+procedure TInstrumentEditor.DrawGrid(ASampleRate: Integer);
+var
+  Eighth, Beat, BarLen, Frame: Int64;
+  x: Integer;
+begin
+  Eighth := BeatFrames(ASampleRate) div 2;
+  if Eighth <= 0 then
+    Exit;
+  Beat := Eighth * 2;
+  BarLen := Beat * 4;
+
+  Frame := 0;
+  x := FrameToX(Frame, ASampleRate);
+  while x < Width do
+  begin
+    if Frame mod BarLen = 0 then
+    begin
+      Canvas.Pen.Color := clBlack;
+      Canvas.Pen.Width := 2;
+    end
+    else if Frame mod Beat = 0 then
+    begin
+      Canvas.Pen.Color := clGray;
+      Canvas.Pen.Width := 1;
+    end
+    else
+    begin
+      Canvas.Pen.Color := clSilver;
+      Canvas.Pen.Width := 1;
+    end;
+    Canvas.Line(x, RulerHeight, x, Height);
+    Frame := Frame + Eighth;
+    x := FrameToX(Frame, ASampleRate);
+  end;
+  Canvas.Pen.Width := 1;
+end;
+
+procedure TInstrumentEditor.DrawRulerStrip(ASampleRate: Integer);
+var
+  Beat, BarLen, Frame: Int64;
+  x: Integer;
+begin
+  Canvas.Brush.Color := clBtnFace;
+  Canvas.FillRect(Rect(0, 0, Width, RulerHeight));
+  Canvas.Pen.Color := clBtnShadow;
+  Canvas.Line(0, RulerHeight - 1, Width, RulerHeight - 1);
+
+  Beat := BeatFrames(ASampleRate);
+  if Beat <= 0 then
+    Exit;
+  BarLen := Beat * 4;
+
+  Frame := 0;
+  x := FrameToX(Frame, ASampleRate);
+  while x < Width do
+  begin
+    if Frame mod BarLen = 0 then
+      Canvas.Pen.Color := clBlack
+    else
+      Canvas.Pen.Color := clBtnShadow;
+    Canvas.Line(x, RulerHeight - 6, x, RulerHeight);
+    Canvas.Brush.Style := bsClear;
+    Canvas.TextOut(x + 2, 2, BarBeatLabel(Frame, ASampleRate));
+    Canvas.Brush.Style := bsSolid;
+    Frame := Frame + Beat;
+    x := FrameToX(Frame, ASampleRate);
+  end;
 end;
 
 procedure TInstrumentEditor.DrawMarkers(ASampleRate: Integer);
@@ -143,7 +244,7 @@ begin
   Canvas.Line(sx, 0, sx, Height);
   Canvas.Pen.Width := 1;
   Canvas.Brush.Color := clLime;
-  Canvas.Polygon([Point(sx - 5, 0), Point(sx + 5, 0), Point(sx, 8)]);
+  Canvas.Polygon([Point(sx - 5, RulerHeight), Point(sx + 5, RulerHeight), Point(sx, RulerHeight + 8)]);
 
   ex := FrameToX(Project.TrackInstrumentEnd[FTrackIndex], ASampleRate);
   Canvas.Pen.Color := clRed;
@@ -151,7 +252,7 @@ begin
   Canvas.Line(ex, 0, ex, Height);
   Canvas.Pen.Width := 1;
   Canvas.Brush.Color := clRed;
-  Canvas.Polygon([Point(ex - 5, 0), Point(ex + 5, 0), Point(ex, 8)]);
+  Canvas.Polygon([Point(ex - 5, RulerHeight), Point(ex + 5, RulerHeight), Point(ex, RulerHeight + 8)]);
 end;
 
 procedure TInstrumentEditor.DrawPlayhead(ASampleRate: Integer);
@@ -179,6 +280,8 @@ begin
     Exit;
 
   DrawClipWaveform(SampleID);
+  DrawGrid(Project.SamplePool[SampleID].SampleRate);
+  DrawRulerStrip(Project.SamplePool[SampleID].SampleRate);
   DrawMarkers(Project.SamplePool[SampleID].SampleRate);
   DrawPlayhead(Project.SamplePool[SampleID].SampleRate);
 end;
