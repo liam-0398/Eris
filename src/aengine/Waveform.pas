@@ -24,43 +24,30 @@ function ComputeWaveformPeaks(const ASample: TSample): TWaveformPeaks;
 function DetectTransients(AData: PSingle; AFrameCount, AChannels,
   ASampleRate: Integer): TFrameArray;
 
-{ Clip-warp segment lookup shared by every warp-aware consumer (the realtime
-  engine keeps its own fixed-size copy of this same math for lock-free
-  safety - see AudioEngine.ClipSourcePosition). Returns a frame position
-  relative to the clip's Offset; an empty/short AMarkers means unwarped 1:1
-  playback.
+{ Nominal timeline -> source map for a warped clip, as a frame position
+  relative to the clip's Offset. An empty/short AMarkers means unwarped 1:1.
 
-  Each marker-to-marker segment is subdivided into small grains (roughly
-  WarpGrainMs each, approximating transient-bounded slices) that all play
-  back at 1:1 (pitch untouched): a grain that needs more time than it
-  naturally has plays forward to its end, then ping-pongs (back-and-forth)
-  near its own midpoint to fill the rest, matching Ableton's "Beats" mode
-  "Loop Back-and-Forth" transient loop - a grain that needs less time just
-  gets cut short. This is a world apart from a continuous vari-speed/Re-Pitch
-  resample across the whole segment - nudging one marker only affects the
-  one adjusted segment's grains, not the whole clip's pitch.
+  For AWarpMode = WarpModeRePitch this IS the playback position: the classic
+  continuous vari-speed warp (same math as keyboard pitch-shifting), each
+  segment resampling linearly across its whole span, so dragging a marker
+  audibly stretches/compresses both neighbouring segments together.
 
-  AData/AFrameCount/AChannels are optional: when supplied, loop and
-  truncation cut points are snapped to nearby zero crossings to avoid
-  clicking. Callers that only need this for on-screen drawing (no click risk)
-  can omit them.
-
-  AWarpMode = WarpModeRePitch switches to the classic continuous vari-speed
-  warp instead (same math as keyboard pitch-shifting): each segment resamples
-  linearly across its whole span, so dragging a marker audibly
-  stretches/compresses both neighboring segments together. }
+  For Beats it is the nominal map ONLY. Beats playback does not read through
+  a single position at all - it sums overlapping transient slices, see
+  WarpedSourceSample - so this is for callers that need one answer per frame
+  rather than audio: split points, marker placement, waveform drawing. It
+  needs no sample data or transients, which is why it no longer takes them. }
 function WarpedSourcePosition(const AMarkers: TWarpMarkerArray;
-  ATimelineFrame: Int64; AData: PSingle = nil; AFrameCount: Integer = 0;
-  AChannels: Integer = 0; ASampleRate: Integer = 44100;
-  AWarpMode: Integer = WarpModeBeats;
-  const ATransients: TFrameArray = nil; AGrainEnd: PInt64 = nil;
-  AOffset: Int64 = 0): Double;
+  ATimelineFrame: Int64; ASampleRate: Integer = 44100;
+  AWarpMode: Integer = WarpModeBeats): Double;
 
-{ Sample-domain crossfade wrapper around WarpedSourcePosition - see
-  AudioEngine.ClipSourceSample for the full rationale (this is the
-  shared/offline-safe copy of the same algorithm). AClipLength is the clip's
-  own total timeline length (frames), used to avoid crossfading past the
-  clip's own end; AOffset is the clip's source offset, same as DetunedSample. }
+{ The audio-producing warp entry point: Ableton-style Beats (a sum over the
+  transient slices sounding at ATimelineFrame - see the implementation) or a
+  straight read through the RePitch position map. This is the shared/offline
+  copy of AudioEngine.BeatsClipSample, used by the render path so a bounce
+  matches live playback. AOffset is the clip's source offset, same as
+  DetunedSample. AClipLength is retained for signature compatibility with
+  that caller and is not used. }
 function WarpedSourceSample(const AMarkers: TWarpMarkerArray;
   ATimelineFrame: Int64; AClipLength: Int64; AOffset: Int64; AData: PSingle;
   AFrameCount: Integer; AChannels: Integer; ASampleRate: Integer;
@@ -123,7 +110,11 @@ function DetunedSample(const AMarkers: TWarpMarkerArray; ATimelineFrame: Int64;
   ATotalFrameCount frames covered by APeaks) into ARect. When AMarkers has
   fewer than 2 entries this is a plain linear stretch; otherwise each pixel
   column is mapped through the warp before looking up its peak bin, so the
-  drawn waveform visually stretches/compresses exactly like the audio does. }
+  drawn waveform visually stretches/compresses exactly like the audio does.
+
+  ATransients is retained for call-site compatibility but no longer read: the
+  columns are mapped through the nominal warp position, which needs no slice
+  layout. It can go once the UI callers stop passing it. }
 procedure DrawWaveform(ACanvas: TCanvas; const ARect: TRect;
   const APeaks: TWaveformPeaks; ATotalFrameCount, AStartFrame, AEndFrame: Int64;
   const AMarkers: TWarpMarkerArray; AColor: TColor; AWarpMode: Integer = WarpModeBeats;
@@ -287,159 +278,24 @@ begin
 end;
 
 const
+  { see the matching constants in AudioEngine - this unit is the offline/
+    shared copy of the identical algorithm and must stay in step with it, or
+    a bounce stops matching what was heard live }
   WarpGrainMs = 120;
-  WarpZeroCrossSearchFrames = 32;
-  WarpReversalFadeMs = 4;
-  { width of the position blend applied before each RePitch-mode marker, to
-    absorb the rate kink between two segments - see WarpedSourcePosition }
+  WarpSliceReleaseMs = 30;
+  WarpSliceAttackFrames = 24;
+  WarpReversalFadeMs = 3;
+  WarpMaxOverlapSlices = 4;
   WarpRepitchFadeMs = 4;
 
-function FindNearestZeroCrossing(AData: PSingle; AFrameCount, AChannels: Integer;
-  ACenterFrame: Int64; ASearchRadius: Integer): Int64;
-var
-  i, lo, hi: Int64;
-  ch: Integer;
-  amp, bestAmp: Single;
-begin
-  if (AData = nil) or (AFrameCount <= 0) then
-    Exit(ACenterFrame);
-
-  Result := ACenterFrame;
-  if Result < 0 then
-    Result := 0;
-  if Result > AFrameCount - 1 then
-    Result := AFrameCount - 1;
-
-  lo := ACenterFrame - ASearchRadius;
-  if lo < 0 then
-    lo := 0;
-  hi := ACenterFrame + ASearchRadius;
-  if hi > AFrameCount - 1 then
-    hi := AFrameCount - 1;
-
-  bestAmp := 1.0e30;
-  for i := lo to hi do
-  begin
-    amp := 0;
-    for ch := 0 to AChannels - 1 do
-      amp := amp + Abs(AData[i * AChannels + ch]);
-    if amp < bestAmp then
-    begin
-      bestAmp := amp;
-      Result := i;
-    end;
-  end;
-end;
-
 function WarpedSourcePosition(const AMarkers: TWarpMarkerArray;
-  ATimelineFrame: Int64; AData: PSingle; AFrameCount: Integer;
-  AChannels: Integer; ASampleRate: Integer; AWarpMode: Integer;
-  const ATransients: TFrameArray; AGrainEnd: PInt64; AOffset: Int64): Double;
+  ATimelineFrame: Int64; ASampleRate: Integer; AWarpMode: Integer): Double;
 var
   k: Integer;
   SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen: Int64;
-  OffsetIntoSeg, StopPoint, SnappedStop, CandidatePos: Int64;
-  GrainSourceLen, GrainCount, GrainIndex: Int64;
-  GrainTimelineLenF: Double;
-  GrainStartTimeline, GrainStartSource, GrainOffsetIntoGrain: Int64;
-  GrainEndTimeline: Int64;
-  Overflow, LoopRegionStart, LoopRegionEnd, LoopLen, Period: Int64;
-  Phase, FadeFrames, FadeT, PosA, PosB, SignedOffset, DistToPeak: Double;
-  HaveTransientGrain: Boolean;
+  OffsetIntoSeg: Int64;
   RePitchFadeFrames, RePitchDistToEnd, NextSegSourceLen, NextSegTimelineLen: Int64;
   RePitchPosA, RePitchPosB, RePitchFadeT: Double;
-
-  { Looks up the transient-bounded grain (SourceFrame span between two
-    detected onsets, or between a segment edge and the nearest onset) that
-    OffsetIntoSeg falls into, scaling each grain's natural source length by
-    the segment's overall stretch ratio to get its timeline span. Returns
-    False (leaving the fixed-grid fallback below in charge) when there are no
-    transients to work with. }
-  function FindTransientGrain(out AGrainStartSource, AGrainSourceLen,
-    AGrainStartTimeline, AGrainEndTimeline: Int64;
-    out AGrainTimelineLenF: Double): Boolean;
-  var
-    Ratio: Double;
-    TIdx: Integer;
-    BoundaryPos, NextBoundaryPos, NaturalLen: Int64;
-    AccumTimeline, GrainTL: Double;
-  begin
-    Result := False;
-    if Length(ATransients) = 0 then
-      Exit;
-
-    Ratio := SegTimelineLen / SegSourceLen;
-
-    { ATransients holds ABSOLUTE positions within the whole sample file
-      (DetectTransients' frame of reference; the same cached array is shared
-      by every clip chopping a different region of one sample) - but
-      SegStartSource/SegSourceLen are CLIP-relative (relative to AOffset,
-      same as AMarkers' SourceFrame). Translate by -AOffset before every
-      comparison, exactly like AudioEngine.ClipSourcePosition's copy. }
-    TIdx := 0;
-    while (TIdx < Length(ATransients)) and
-      (ATransients[TIdx] - AOffset <= SegStartSource) do
-      Inc(TIdx);
-
-    { no transient strictly inside this segment: report failure so the
-      fixed-grid fallback subdivides it (~WarpGrainMs grains) instead of
-      treating the whole segment as ONE giant grain, whose single long
-      ping-pong is exactly the obvious-loop sound grains exist to avoid }
-    if (TIdx >= Length(ATransients)) or
-      (ATransients[TIdx] - AOffset >= SegStartSource + SegSourceLen) then
-      Exit;
-
-    BoundaryPos := SegStartSource;
-    AccumTimeline := 0;
-
-    while True do
-    begin
-      if (TIdx < Length(ATransients)) and
-        (ATransients[TIdx] - AOffset < SegStartSource + SegSourceLen) then
-        NextBoundaryPos := ATransients[TIdx] - AOffset
-      else
-        NextBoundaryPos := SegStartSource + SegSourceLen;
-
-      NaturalLen := NextBoundaryPos - BoundaryPos;
-      if NaturalLen < 1 then
-      begin
-        { degenerate boundary - shouldn't normally happen given
-          DetectTransients' own minimum spacing, but never trust it blindly }
-        if NextBoundaryPos >= SegStartSource + SegSourceLen then
-          Exit;
-        BoundaryPos := NextBoundaryPos;
-        Inc(TIdx);
-        Continue;
-      end;
-
-      GrainTL := NaturalLen * Ratio;
-
-      if (OffsetIntoSeg < AccumTimeline + GrainTL) or
-        (NextBoundaryPos >= SegStartSource + SegSourceLen) then
-      begin
-        AGrainStartSource := BoundaryPos;
-        AGrainSourceLen := NaturalLen;
-        AGrainStartTimeline := Trunc(AccumTimeline);
-        { the FIRST timeline frame the lookup above assigns to the NEXT
-          grain, i.e. ceil of this grain's real (fractional) end. Trunc'ing
-          both start and length instead loses up to 2 frames, reporting a
-          "grain end" that still belongs to THIS grain - the crossfade in
-          WarpedSourceSample then converges onto this grain's own natural
-          continuation (a no-op) and the real splice 1-2 frames later plays
-          completely unfaded. }
-        AGrainEndTimeline := Trunc(AccumTimeline + GrainTL);
-        if AGrainEndTimeline < AccumTimeline + GrainTL then
-          Inc(AGrainEndTimeline);
-        AGrainTimelineLenF := GrainTL;
-        Exit(True);
-      end;
-
-      AccumTimeline := AccumTimeline + GrainTL;
-      BoundaryPos := NextBoundaryPos;
-      Inc(TIdx);
-    end;
-  end;
-
 begin
   if Length(AMarkers) < 2 then
     Exit(ATimelineFrame);
@@ -467,9 +323,7 @@ begin
       this segment's own formula with the next segment's, extrapolated
       backward, over a short window ending exactly at the marker: since both
       converge to the same value there, this fully absorbs the rate change
-      before the marker instead of snapping it - same idea as the ping-pong
-      reversal smoothing below, applied to a rate kink instead of a
-      direction reversal. }
+      before the marker instead of snapping it. }
     if k < Length(AMarkers) - 2 then
     begin
       RePitchFadeFrames := (WarpRepitchFadeMs * ASampleRate) div 1000;
@@ -501,162 +355,30 @@ begin
   if SegSourceLen <= 0 then
     Exit(SegStartSource);
 
-  { Beats: subdivide into grains bounded by detected transients (falling back
-    to a fixed grid when no transients are available) and distribute the
-    stretch/compression evenly across each grain - see
-    AudioEngine.ClipSourcePosition for the full rationale (this is the
-    shared/offline-safe copy of the same algorithm). }
-  HaveTransientGrain := FindTransientGrain(GrainStartSource, GrainSourceLen,
-    GrainStartTimeline, GrainEndTimeline, GrainTimelineLenF);
-
-  if not HaveTransientGrain then
-  begin
-    GrainSourceLen := (WarpGrainMs * ASampleRate) div 1000;
-    if GrainSourceLen > SegSourceLen then
-      GrainSourceLen := SegSourceLen;
-    if GrainSourceLen < 1 then
-      GrainSourceLen := 1;
-    GrainCount := SegSourceLen div GrainSourceLen;
-    if GrainCount < 1 then
-      GrainCount := 1;
-    GrainSourceLen := SegSourceLen div GrainCount;
-
-    GrainTimelineLenF := SegTimelineLen / GrainCount;
-    GrainIndex := Trunc(OffsetIntoSeg / GrainTimelineLenF);
-    if GrainIndex >= GrainCount then
-      GrainIndex := GrainCount - 1;
-    GrainStartTimeline := Trunc(GrainIndex * GrainTimelineLenF);
-    GrainStartSource := SegStartSource + GrainIndex * GrainSourceLen;
-    { first timeline frame at which Trunc(OffsetIntoSeg / GrainTimelineLenF)
-      actually flips to the next index - ceil, for the same reason as the
-      transient path (see FindTransientGrain's grain-end comment) }
-    GrainEndTimeline := Trunc((GrainIndex + 1) * GrainTimelineLenF);
-    if GrainEndTimeline < (GrainIndex + 1) * GrainTimelineLenF then
-      Inc(GrainEndTimeline);
-  end;
-
-  { float accumulation can push the last grain's ceil'd end a frame past the
-    segment - clamp to the next marker's own frame, which is exactly where
-    the next segment's first grain takes over }
-  if GrainEndTimeline > SegTimelineLen then
-    GrainEndTimeline := SegTimelineLen;
-
-  GrainOffsetIntoGrain := OffsetIntoSeg - GrainStartTimeline;
-
-  if AGrainEnd <> nil then
-    AGrainEnd^ := SegStartTimeline + GrainEndTimeline;
-
-  if GrainOffsetIntoGrain < GrainSourceLen then
-  begin
-    if GrainTimelineLenF < GrainSourceLen then
-    begin
-      StopPoint := GrainStartSource + Trunc(GrainTimelineLenF);
-      { AData/AFrameCount span the WHOLE sample file (absolute frame 0 =
-        start of the WAV) while StopPoint is clip-relative (relative to
-        AOffset, same as AMarkers' SourceFrame values) - translate to
-        absolute for the search, then back for the returned (clip-relative)
-        position, or a clip that's a chop of a longer sample (AOffset <> 0)
-        snaps to a "zero crossing" that's actually near an unrelated part of
-        the file. }
-      SnappedStop := FindNearestZeroCrossing(AData, AFrameCount, AChannels,
-        StopPoint + AOffset, WarpZeroCrossSearchFrames) - AOffset;
-      CandidatePos := GrainStartSource + GrainOffsetIntoGrain;
-      if CandidatePos >= SnappedStop then
-        Exit(SnappedStop);
-      Exit(CandidatePos);
-    end;
-    Exit(GrainStartSource + GrainOffsetIntoGrain);
-  end;
-
-  { ping-pong (Ableton's "Loop Back-and-Forth") within the back half of this
-    grain to fill extra time, instead of a forward-repeat that tends to
-    sound like an obvious loop }
-  Overflow := GrainOffsetIntoGrain - GrainSourceLen;
-  { same clip-relative -> absolute -> clip-relative translation as the
-    truncate branch above - see the comment there }
-  LoopRegionStart := FindNearestZeroCrossing(AData, AFrameCount, AChannels,
-    GrainStartSource + GrainSourceLen div 2 + AOffset, WarpZeroCrossSearchFrames) - AOffset;
-  LoopRegionEnd := FindNearestZeroCrossing(AData, AFrameCount, AChannels,
-    GrainStartSource + GrainSourceLen + AOffset, WarpZeroCrossSearchFrames) - AOffset;
-  { never snap PAST the grain's own natural boundary - only earlier, so the
-    loop can never read into the next grain (or past the segment's end) }
-  if LoopRegionEnd > GrainStartSource + GrainSourceLen then
-    LoopRegionEnd := GrainStartSource + GrainSourceLen;
-
-  LoopLen := LoopRegionEnd - LoopRegionStart;
-  if LoopLen < 1 then
-    LoopLen := 1;
-  Period := 2 * LoopLen;
-  Phase := Overflow mod Period;
-
-  { A reversal flips the read pointer's direction outright - a slope
-    discontinuity that zero-crossing snapping (which only fixes amplitude
-    discontinuities) can't touch. Blend the two candidate POSITIONS on
-    either side of each reversal so the read pointer's trajectory turns
-    around smoothly instead of snapping instantly; both candidates reference
-    the same underlying audio (just approached from opposite directions), so
-    blending positions here - unlike across unrelated grains - is a
-    legitimate smoothing of one continuous path. }
-  FadeFrames := (WarpReversalFadeMs * ASampleRate) / 1000;
-  if FadeFrames > LoopLen / 2 then
-    FadeFrames := LoopLen / 2;
-  if FadeFrames < 1 then
-    FadeFrames := 1;
-
-  { valley: reversal at Phase = LoopLen (forward pass hands off to backward) }
-  if Abs(Phase - LoopLen) < FadeFrames then
-  begin
-    FadeT := (Phase - LoopLen + FadeFrames) / (2 * FadeFrames);
-    PosA := LoopRegionEnd - Phase;
-    PosB := LoopRegionStart + (Phase - LoopLen);
-    Exit(PosA * (1 - FadeT) + PosB * FadeT);
-  end;
-
-  { peak: reversal at Phase = 0 / Period (backward pass hands off to forward) }
-  DistToPeak := Phase;
-  if Period - Phase < DistToPeak then
-    DistToPeak := Period - Phase;
-  if DistToPeak < FadeFrames then
-  begin
-    if Phase > Period - FadeFrames then
-      SignedOffset := Phase - Period
-    else
-      SignedOffset := Phase;
-    FadeT := (SignedOffset + FadeFrames) / (2 * FadeFrames);
-    { both legs expressed around the peak itself: the pre-reversal
-      (incoming, forward) leg is E + SignedOffset, the post-reversal
-      (outgoing, backward) leg is E - SignedOffset. Building the incoming
-      leg from the WRAPPED phase instead (the old
-      LoopRegionStart + (Phase - LoopLen)) is a full Period short once
-      Phase wraps past 0 - and at the very first entry into the ping-pong
-      (Phase = 0, blend forced to its midpoint) it output the loop
-      MIDPOINT instead of the grain end: a hard position jump of half the
-      loop region at the tail of EVERY stretched grain. }
-    PosB := LoopRegionEnd + SignedOffset;
-    PosA := LoopRegionEnd - SignedOffset;
-    Exit(PosB * (1 - FadeT) + PosA * FadeT);
-  end;
-
-  if Phase < LoopLen then
-    Result := LoopRegionEnd - Phase
-  else
-    Result := LoopRegionStart + (Phase - LoopLen);
+  Result := SegStartSource + OffsetIntoSeg * (SegSourceLen / SegTimelineLen);
 end;
 
-const
-  { see AudioEngine.ClipSourceSample - grains are unrelated slices of audio,
-    so their boundary needs a real sample-domain crossfade, unlike a
-    ping-pong reversal (which can be smoothed by blending positions alone). }
-  WarpGrainCrossfadeMs = 4;
-
+{ Beats warp renderer - the offline/shared copy of AudioEngine.BeatsClipSample.
+  See that function's header comment for the full rationale (why Beats is a sum
+  over overlapping transient slices rather than a single read position, and why
+  the zero-crossing snapping and grain cache the old implementation needed are
+  both gone). This copy exists because the realtime side can only ever have a
+  raw PInt64/Count pair for its transients, the lock-free-safe shape, while
+  every other caller has a TFrameArray; the two must stay in step. }
 function WarpedSourceSample(const AMarkers: TWarpMarkerArray;
   ATimelineFrame: Int64; AClipLength: Int64; AOffset: Int64; AData: PSingle;
   AFrameCount: Integer; AChannels: Integer; ASampleRate: Integer;
-  AWarpMode: Integer; AChannel: Integer; const ATransients: TFrameArray): Single;
+  AWarpMode: Integer; AChannel: Integer;
+  const ATransients: TFrameArray): Single;
 var
-  PosA, PosB0, PosB, FadeT: Double;
-  GrainEnd, FadeFrames, DistToEnd: Int64;
-  SampleA, SampleB: Single;
+  k: Integer;
+  SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen: Int64;
+  FirstTrans, TransInSeg: Integer;
+  SliceCount, GridLen: Int64;
+  ReleaseMax, ReversalFade: Int64;
+  CurSlice, i: Int64;
+  Used: Integer;
+  Acc: Double;
 
   function SafeInterp(APos: Double): Single;
   var
@@ -669,31 +391,267 @@ var
       Result := Interpolate(AData, AFrameCount, AChannels, AChannel, AbsPos);
   end;
 
+  procedure LoadSegment(AK: Integer);
+  var
+    lo, hi, mid: Integer;
+    SegEnd: Int64;
+  begin
+    SegStartTimeline := AMarkers[AK].TimelineFrame;
+    SegStartSource := AMarkers[AK].SourceFrame;
+    SegTimelineLen := AMarkers[AK + 1].TimelineFrame - SegStartTimeline;
+    SegSourceLen := AMarkers[AK + 1].SourceFrame - SegStartSource;
+    SegEnd := SegStartSource + SegSourceLen;
+
+    FirstTrans := 0;
+    TransInSeg := 0;
+    GridLen := 0;
+    SliceCount := 1;
+    if (SegTimelineLen <= 0) or (SegSourceLen <= 0) then
+      Exit;
+
+    { ATransients holds ABSOLUTE positions within the whole sample file while
+      SegStartSource is CLIP-relative - hence the -AOffset on every comparison,
+      exactly as in AudioEngine's copy. }
+    if Length(ATransients) > 0 then
+    begin
+      lo := 0;
+      hi := Length(ATransients);
+      while lo < hi do
+      begin
+        mid := lo + (hi - lo) div 2;
+        if ATransients[mid] - AOffset <= SegStartSource then
+          lo := mid + 1
+        else
+          hi := mid;
+      end;
+      FirstTrans := lo;
+
+      hi := Length(ATransients);
+      while lo < hi do
+      begin
+        mid := lo + (hi - lo) div 2;
+        if ATransients[mid] - AOffset < SegEnd then
+          lo := mid + 1
+        else
+          hi := mid;
+      end;
+      TransInSeg := lo - FirstTrans;
+    end;
+
+    if TransInSeg > 0 then
+      SliceCount := TransInSeg + 1
+    else
+    begin
+      GridLen := (WarpGrainMs * ASampleRate) div 1000;
+      if GridLen > SegSourceLen then
+        GridLen := SegSourceLen;
+      if GridLen < 1 then
+        GridLen := 1;
+      SliceCount := SegSourceLen div GridLen;
+      if SliceCount < 1 then
+        SliceCount := 1;
+      GridLen := SegSourceLen div SliceCount;
+    end;
+  end;
+
+  function SliceLo(AIndex: Int64): Int64;
+  begin
+    if AIndex <= 0 then
+      Exit(SegStartSource);
+    if AIndex >= SliceCount then
+      Exit(SegStartSource + SegSourceLen);
+    if TransInSeg > 0 then
+      Result := ATransients[FirstTrans + AIndex - 1] - AOffset
+    else
+      Result := SegStartSource + AIndex * GridLen;
+  end;
+
+  function TimelineOf(ASource: Int64): Int64;
+  begin
+    Result := SegStartTimeline +
+      ((ASource - SegStartSource) * SegTimelineLen) div SegSourceLen;
+  end;
+
+  function FindSlice: Int64;
+  var
+    NominalSrc, lo, hi, mid: Int64;
+  begin
+    NominalSrc := SegStartSource +
+      ((ATimelineFrame - SegStartTimeline) * SegSourceLen) div SegTimelineLen;
+
+    if TransInSeg > 0 then
+    begin
+      lo := 0;
+      hi := SliceCount - 1;
+      while lo < hi do
+      begin
+        mid := lo + (hi - lo + 1) div 2;
+        if SliceLo(mid) <= NominalSrc then
+          lo := mid
+        else
+          hi := mid - 1;
+      end;
+      Result := lo;
+    end
+    else
+      Result := (NominalSrc - SegStartSource) div GridLen;
+
+    if Result < 0 then
+      Result := 0;
+    if Result > SliceCount - 1 then
+      Result := SliceCount - 1;
+
+    while (Result > 0) and (ATimelineFrame < TimelineOf(SliceLo(Result))) do
+      Dec(Result);
+    while (Result < SliceCount - 1) and
+      (ATimelineFrame >= TimelineOf(SliceLo(Result + 1))) do
+      Inc(Result);
+  end;
+
+  function SliceContribution(AIndex: Int64): Single;
+  var
+    Lo, Natural, TL, TLen, Release, Attack, t: Int64;
+    LoopStart, LoopEnd, LoopLen, Ov, Ph, F, s: Int64;
+    Gain, w: Double;
+  begin
+    Result := 0;
+    Lo := SliceLo(AIndex);
+    Natural := SliceLo(AIndex + 1) - Lo;
+    if Natural < 1 then
+      Exit;
+
+    TL := TimelineOf(Lo);
+    TLen := TimelineOf(Lo + Natural) - TL;
+    if TLen < 1 then
+      Exit;
+
+    t := ATimelineFrame - TL;
+    if t < 0 then
+      Exit;
+
+    Release := Natural - TLen;
+    if Release < 0 then
+      Release := -Release;
+    if Release > ReleaseMax then
+      Release := ReleaseMax;
+    if t >= TLen + Release then
+      Exit;
+
+    Gain := 1;
+    if Natural <> TLen then
+    begin
+      Attack := WarpSliceAttackFrames;
+      if Attack > TLen then
+        Attack := TLen;
+      if (Attack > 0) and (t < Attack) then
+        Gain := t / Attack;
+    end;
+    if (Release > 0) and (t >= TLen) then
+      Gain := Gain * (1 - (t - TLen) / Release);
+
+    if t < Natural then
+    begin
+      Result := SafeInterp(Lo + t) * Gain;
+      Exit;
+    end;
+
+    LoopEnd := Lo + Natural;
+    LoopStart := Lo + Natural div 2;
+    LoopLen := LoopEnd - LoopStart;
+    if LoopLen < 1 then
+    begin
+      Result := SafeInterp(LoopEnd) * Gain;
+      Exit;
+    end;
+
+    F := ReversalFade;
+    if F > LoopLen div 2 then
+      F := LoopLen div 2;
+    if F < 1 then
+      F := 1;
+
+    Ov := t - Natural;
+    Ph := Ov mod (2 * LoopLen);
+
+    if Ph > 2 * LoopLen - F then
+      s := Ph - 2 * LoopLen
+    else
+      s := Ph;
+
+    if (s > -F) and (s < F) then
+    begin
+      w := (s + F) / (2 * F);
+      Result := (SafeInterp(LoopEnd + s) * (1 - w) +
+        SafeInterp(LoopEnd - s) * w) * Gain;
+      Exit;
+    end;
+
+    s := Ph - LoopLen;
+    if (s > -F) and (s < F) then
+    begin
+      w := (s + F) / (2 * F);
+      Result := (SafeInterp(LoopStart - s) * (1 - w) +
+        SafeInterp(LoopStart + s) * w) * Gain;
+      Exit;
+    end;
+
+    if Ph < LoopLen then
+      Result := SafeInterp(LoopEnd - Ph) * Gain
+    else
+      Result := SafeInterp(LoopStart + (Ph - LoopLen)) * Gain;
+  end;
+
 begin
   if Length(AMarkers) < 2 then
     Exit(SafeInterp(ATimelineFrame));
 
-  GrainEnd := -1;
-  PosA := WarpedSourcePosition(AMarkers, ATimelineFrame, AData, AFrameCount,
-    AChannels, ASampleRate, AWarpMode, ATransients, @GrainEnd, AOffset);
-  SampleA := SafeInterp(PosA);
+  if AWarpMode = WarpModeRePitch then
+    Exit(SafeInterp(WarpedSourcePosition(AMarkers, ATimelineFrame, ASampleRate,
+      AWarpMode)));
 
-  FadeFrames := (WarpGrainCrossfadeMs * ASampleRate) div 1000;
-  if FadeFrames < 1 then
-    FadeFrames := 1;
+  k := 0;
+  while (k < Length(AMarkers) - 2) and
+    (ATimelineFrame >= AMarkers[k + 1].TimelineFrame) do
+    Inc(k);
 
-  DistToEnd := GrainEnd - ATimelineFrame;
-  if (GrainEnd < 0) or (DistToEnd <= 0) or (DistToEnd > FadeFrames) or
-    (GrainEnd >= AClipLength) then
-    Exit(SampleA);
+  LoadSegment(k);
+  if (SegTimelineLen <= 0) or (SegSourceLen <= 0) then
+    Exit(SafeInterp(SegStartSource));
 
-  PosB0 := WarpedSourcePosition(AMarkers, GrainEnd, AData, AFrameCount,
-    AChannels, ASampleRate, AWarpMode, ATransients, nil, AOffset);
-  PosB := PosB0 - DistToEnd;
-  SampleB := SafeInterp(PosB);
+  ReleaseMax := (WarpSliceReleaseMs * ASampleRate) div 1000;
+  if ReleaseMax < 1 then
+    ReleaseMax := 1;
+  ReversalFade := (WarpReversalFadeMs * ASampleRate) div 1000;
+  if ReversalFade < 1 then
+    ReversalFade := 1;
 
-  FadeT := 1 - (DistToEnd / FadeFrames);
-  Result := SampleA * (1 - FadeT) + SampleB * FadeT;
+  CurSlice := FindSlice;
+
+  Acc := 0;
+  Used := 0;
+  i := CurSlice;
+  while Used < WarpMaxOverlapSlices do
+  begin
+    Acc := Acc + SliceContribution(i);
+    Inc(Used);
+
+    Dec(i);
+    if i < 0 then
+    begin
+      if k = 0 then
+        Break;
+      Dec(k);
+      LoadSegment(k);
+      if (SegTimelineLen <= 0) or (SegSourceLen <= 0) then
+        Break;
+      i := SliceCount - 1;
+    end;
+
+    if ATimelineFrame >= TimelineOf(SliceLo(i + 1)) + ReleaseMax then
+      Break;
+  end;
+
+  Result := Acc;
 end;
 
 { Forward-drift/re-anchor granular pitch trim - see AudioEngine.
@@ -743,12 +701,10 @@ begin
   GrainOffsetIntoGrain := ATimelineFrame - GrainStartTimeline;
 
   { anchors use the raw position lookup WITH transients, matching the
-    realtime copy (AudioEngine's ClipSourcePosition always sees the clip's
-    transients) - otherwise a bounce's detune grains would anchor to
-    fixed-grid warp positions while live playback anchors to
-    transient-bounded ones }
-  AnchorStart := WarpedSourcePosition(AMarkers, GrainStartTimeline, AData,
-    AFrameCount, AChannels, ASampleRate, AWarpMode, ATransients, nil, AOffset);
+    realtime copy (AudioEngine.DetunedClipSample anchors to the same nominal
+    map), so a bounce's detune grains land exactly where live playback's do }
+  AnchorStart := WarpedSourcePosition(AMarkers, GrainStartTimeline,
+    ASampleRate, AWarpMode);
 
   PosCurrent := AnchorStart + GrainOffsetIntoGrain * Rate;
   SampleCurrent := SafeInterp(PosCurrent);
@@ -761,7 +717,7 @@ begin
     underneath the tail of this one and lands exactly on its own anchor at
     the boundary }
   AnchorEnd := WarpedSourcePosition(AMarkers, GrainStartTimeline + GrainFrames,
-    AData, AFrameCount, AChannels, ASampleRate, AWarpMode, ATransients, nil, AOffset);
+    ASampleRate, AWarpMode);
   PosNext := AnchorEnd + (GrainOffsetIntoGrain - GrainFrames) * Rate;
   SampleNext := SafeInterp(PosNext);
 
@@ -807,13 +763,18 @@ begin
     (OffsetIntoSeg < SegTimelineLen) and (SegTimelineLen > SegSourceLen) and
     (SegSourceLen > 0) then
   begin
-    { a cut strictly inside one grain's ping-pong loop zone can't be
-      represented by simply rebasing markers there: the loop math is driven
-      by that grain's own natural length, and truncating it for the right
-      half would reconstruct a different (wrong) loop. Snap forward to that
-      GRAIN's own end (not the whole segment's, now that segments are
-      subdivided into small grains - see WarpedSourcePosition) - a much
-      smaller nudge than the old whole-segment snap. }
+    { a cut strictly inside a stretched slice's ping-pong fill can't be
+      represented by simply rebasing markers there: the fill is driven by that
+      slice's own natural length, and truncating it for the right half would
+      reconstruct a different (wrong) loop. Snap forward to that slice's end
+      instead - a much smaller nudge than snapping to the whole segment's.
+
+      This walks a FIXED GRID rather than the transient-bounded slices
+      WarpedSourceSample actually plays, because callers don't hand this
+      function a transient array; it was already an approximation before the
+      slice rework and stays one. The consequence is only that a split inside
+      a stretched segment can land up to one slice away from where it would
+      ideally snap - never a wrong split, just a slightly coarser one. }
     GrainSourceLen := (WarpGrainMs * ASampleRate) div 1000;
     if GrainSourceLen > SegSourceLen then
       GrainSourceLen := SegSourceLen;
@@ -847,7 +808,7 @@ begin
   if ASplitFrame >= AMarkers[High(AMarkers)].TimelineFrame then
     SplitSource := AMarkers[High(AMarkers)].SourceFrame
   else
-    SplitSource := Round(WarpedSourcePosition(AMarkers, ASplitFrame, nil, 0, 0,
+    SplitSource := Round(WarpedSourcePosition(AMarkers, ASplitFrame,
       ASampleRate, AWarpMode));
 
   if ASplitSourceOut <> nil then
@@ -924,13 +885,15 @@ begin
     if TimelineFrame1 <= TimelineFrame0 then
       TimelineFrame1 := TimelineFrame0 + 1;
 
-    { AStartFrame doubles as the clip's source offset here - passing it as
-      AOffset keeps the transient-bounded grain mapping identical to what
-      playback computes, so the drawn stretch matches the audible one }
+    { the nominal map is relative to the clip's own Offset, which AStartFrame
+      is here - so add it back to get an absolute source frame. Drawing the
+      nominal map (rather than the old per-grain ping-pong positions) is also
+      what makes a stretched region read as a smooth stretch on screen instead
+      of a scribble. }
     SrcFrame0 := AStartFrame + WarpedSourcePosition(AMarkers, TimelineFrame0,
-      nil, 0, 0, 44100, AWarpMode, ATransients, nil, AStartFrame);
+      44100, AWarpMode);
     SrcFrame1 := AStartFrame + WarpedSourcePosition(AMarkers, TimelineFrame1,
-      nil, 0, 0, 44100, AWarpMode, ATransients, nil, AStartFrame);
+      44100, AWarpMode);
     if SrcFrame1 <= SrcFrame0 then
       SrcFrame1 := SrcFrame0 + 1;
 

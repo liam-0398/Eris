@@ -1756,7 +1756,12 @@ begin
   if (FArrangementView.SelectedTrack >= 0) and (FArrangementView.SelectedClipIndex >= 0) and
     (FArrangementView.SelectedClipIndex <= High(Project.Tracks[FArrangementView.SelectedTrack].Clips)) then
   begin
-    FWarpWidget.Width := WarpWidthForFrames(
+    { FWarpEditor is inset by FWarpEditor.Left (the zoom/RP buttons and the
+      gain/detune sliders), so the widget has to be that much wider than the
+      waveform itself or the editor ends up Left pixels too narrow - which put
+      the clip's own end marker off the right edge and made it ungrabbable.
+      The MinTotalWidth floor just below already assumed this shape. }
+    FWarpWidget.Width := FWarpEditor.Left + WarpWidthForFrames(
       Project.Tracks[FArrangementView.SelectedTrack].Clips[FArrangementView.SelectedClipIndex].Length);
     { the zoom/RP buttons and the gain/detune sliders both take a fixed
       amount of width off the top - never let the waveform itself collapse

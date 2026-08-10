@@ -29,6 +29,10 @@ type
   private
     const
       MarkerGrabPixels = 6;
+      { the right edge gets a wider grab zone than a plain marker: it is the
+        "drag five bars onto four" gesture the whole clip's tempo fit hangs
+        on, so it should be easy to catch }
+      EdgeGrabPixels = 10;
       MinMarkerGapFrames = 100;
     var
       FTrackIndex: Integer;
@@ -46,6 +50,8 @@ type
     function EighthNoteFrames: Int64;
     function BarBeatLabel(AFrame: Int64): string;
     function HitTestMarker(const AClip: TClip; X: Integer): Integer;
+    function RightEdgeX(const AClip: TClip): Integer;
+    function SnapToBeat(AFrame: Int64): Int64;
     procedure DeleteMarker(const AClip: TClip; AIndex: Integer);
     procedure DrawRulerStrip(const AClip: TClip);
     procedure DrawGrid;
@@ -180,6 +186,31 @@ begin
   end;
 end;
 
+{ x of the clip's right edge - the end marker, which is also the resize
+  handle. Always goes through FrameToX so it agrees with the ruler, the grid,
+  the markers and (since DrawClipWaveform was corrected) the waveform. }
+function TWarpEditor.RightEdgeX(const AClip: TClip): Integer;
+begin
+  Result := FrameToX(AClip.WarpMarkers[High(AClip.WarpMarkers)].TimelineFrame);
+end;
+
+{ nearest beat on the grid this editor actually draws (clip-relative, counted
+  from the clip's own frame 0, same as DrawGrid) }
+function TWarpEditor.SnapToBeat(AFrame: Int64): Int64;
+var
+  BF, Rem: Int64;
+begin
+  Result := AFrame;
+  BF := BeatFrames;
+  if BF <= 0 then
+    Exit;
+  Rem := AFrame mod BF;
+  if Rem * 2 >= BF then
+    Result := AFrame - Rem + BF
+  else
+    Result := AFrame - Rem;
+end;
+
 procedure TWarpEditor.DeleteMarker(const AClip: TClip; AIndex: Integer);
 var
   NewMarkers: TWarpMarkerArray;
@@ -277,11 +308,23 @@ end;
 procedure TWarpEditor.DrawClipWaveform(const AClip: TClip);
 var
   Sample: TSample;
+  RightX: Integer;
 begin
   if AClip.SampleID > High(Project.SamplePeaks) then
     Exit;
   Sample := Project.SamplePool[AClip.SampleID];
-  DrawWaveform(Canvas, Rect(0, WarpRulerHeight, Width, Height),
+
+  { The waveform has to use the SAME frame -> pixel mapping as the ruler, the
+    grid and the markers, all of which go through FrameToX. This used to
+    stretch the clip across the control's full Width instead, which is
+    FWarpEditor.Left pixels narrower than FrameToX's own idea of where the
+    clip ends - so every marker drifted progressively right of the waveform
+    peak it was pinned to, and the end marker landed off the right edge
+    entirely, which is why the edge could not be grabbed at all. }
+  RightX := FrameToX(AClip.Length);
+  if RightX <= 0 then
+    Exit;
+  DrawWaveform(Canvas, Rect(0, WarpRulerHeight, RightX, Height),
     Project.SamplePeaks[AClip.SampleID], Sample.FrameCount, AClip.Offset,
     AClip.Offset + AClip.Length, AClip.WarpMarkers, clAqua, AClip.WarpMode,
     Project.SampleTransients[AClip.SampleID]);
@@ -307,6 +350,12 @@ begin
     Canvas.Polygon([Point(x - 5, WarpRulerHeight), Point(x + 5, WarpRulerHeight),
       Point(x, WarpRulerHeight + 8)]);
   end;
+
+  { grab bar inside the end marker, so the right edge reads as a resize handle
+    rather than just another marker line }
+  x := RightEdgeX(AClip);
+  Canvas.Brush.Color := clRed;
+  Canvas.FillRect(Rect(x - 3, WarpRulerHeight, x, Height));
 end;
 
 procedure TWarpEditor.DrawPlayhead(const AClip: TClip);
@@ -386,6 +435,12 @@ begin
   if Button <> mbLeft then
     Exit;
 
+  { the right edge wins over any interior marker sitting under the cursor:
+    an interior marker can always be re-added with a double-click, whereas
+    the edge is only reachable here }
+  if Abs(X - RightEdgeX(Clip)) <= EdgeGrabPixels then
+    HitIndex := High(Clip.WarpMarkers);
+
   FDragMarkerIndex := HitIndex;
   if FDragMarkerIndex = 0 then
     FDragMarkerIndex := -1; { start marker is fixed }
@@ -401,7 +456,14 @@ begin
   inherited MouseMove(Shift, X, Y);
 
   if FDragMarkerIndex < 0 then
+  begin
+    { hover feedback for the resize handle }
+    if GetClip(Clip) and (Abs(X - RightEdgeX(Clip)) <= EdgeGrabPixels) then
+      Cursor := crSizeWE
+    else
+      Cursor := crDefault;
     Exit;
+  end;
   if not GetClip(Clip) then
     Exit;
 
@@ -413,9 +475,17 @@ begin
 
   if FDragMarkerIndex = High(NewMarkers) then
   begin
-    { the end marker: dragging it changes the clip's total length, keeping
-      the source content it points to fixed - a vari-speed stretch of the
-      final segment }
+    { The end marker, i.e. the waveform's right edge. Dragging it changes the
+      clip's total timeline length while the source content it points at stays
+      put, so the final segment stretches or compresses to fit - in Beats mode
+      that redistributes the slices without touching pitch, in RePitch it is a
+      vari-speed stretch.
+
+      Snapped to the beat grid drawn underneath it, because landing exactly on
+      a bar line is the entire point of the gesture (five bars onto four is
+      worthless if it lands on 3.97). Hold Alt to place it freely. }
+    if not (ssAlt in Shift) then
+      NewFrame := SnapToBeat(NewFrame);
     MinFrame := NewMarkers[FDragMarkerIndex - 1].TimelineFrame + 1;
     if NewFrame < MinFrame then
       NewFrame := MinFrame;
@@ -474,9 +544,6 @@ var
   ClickFrame: Int64;
   NewMarkers: TWarpMarkerArray;
   InsertAt, i: Integer;
-  SampleData: PSingle;
-  SampleFrameCount, SampleChannels: Integer;
-  Transients: TFrameArray;
 begin
   inherited DblClick;
 
@@ -508,29 +575,18 @@ begin
     (Abs(Clip.WarpMarkers[InsertAt - 1].TimelineFrame - ClickFrame) < MinMarkerGapFrames) then
     Exit;
 
-  { pin the new marker to where playback ACTUALLY reads at that timeline
-    frame: pass the sample data (zero-crossing snapping) and transients
-    (transient-bounded Beats grains), or the computed SourceFrame comes from
-    the no-data/fixed-grid code path and inserting a marker - supposedly a
-    playback no-op until dragged - would audibly shift Beats-mode audio }
-  SampleData := nil;
-  SampleFrameCount := 0;
-  SampleChannels := 0;
-  Transients := nil;
-  if (Clip.SampleID >= 0) and (Clip.SampleID <= High(Project.SamplePool)) then
-  begin
-    SampleData := Project.SamplePool[Clip.SampleID].Data;
-    SampleFrameCount := Project.SamplePool[Clip.SampleID].FrameCount;
-    SampleChannels := Project.SamplePool[Clip.SampleID].Channels;
-    Transients := Project.SampleTransients[Clip.SampleID];
-  end;
-
+  { pin the new marker to the source frame the warp already maps this timeline
+    frame to, which makes inserting it a genuine playback no-op until it's
+    dragged: splitting a segment there leaves both halves with the segment's
+    original ratio, so every slice keeps the timeline position and length it
+    already had. (This used to have to pass sample data and transients so the
+    pin matched the old engine's per-grain ping-pong read position; the nominal
+    map needs neither - see Waveform.WarpedSourcePosition.) }
   SetLength(NewMarkers, Length(Clip.WarpMarkers) + 1);
   for i := 0 to InsertAt - 1 do
     NewMarkers[i] := Clip.WarpMarkers[i];
   NewMarkers[InsertAt].SourceFrame := Round(WarpedSourcePosition(Clip.WarpMarkers,
-    ClickFrame, SampleData, SampleFrameCount, SampleChannels,
-    AudioEngine.ProjectSampleRate, Clip.WarpMode, Transients, nil, Clip.Offset));
+    ClickFrame, AudioEngine.ProjectSampleRate, Clip.WarpMode));
   NewMarkers[InsertAt].TimelineFrame := ClickFrame;
   for i := InsertAt to High(Clip.WarpMarkers) do
     NewMarkers[i + 1] := Clip.WarpMarkers[i];
