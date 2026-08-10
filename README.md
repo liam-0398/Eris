@@ -70,50 +70,22 @@ DISCLAIMER: HEAVY LLM usage. I know decent Pascal but do not know about audio en
   arm and record immediately with no count-in. Records straight to a new clip
   at the cursor on the selected track.
 - **Tempo-aware metronome**, independent of count-in, toggled on/off live.
-- **Effects**: per-track and master-bus insert chains — Lowpass, Highpass and
-  Bandpass filters, 4-band EQ, Limiter, Chorus, Flanger, Phaser, Overdrive
-  (band-focused saturation for loudness, 808 mangling or plain crunch),
-  Sidechain (ducking keyed off another track's level), Tuner (a passive
-  note/cents readout that listens to the track without touching it), Basic
-  Reverb, and an experimental Drowning (vocal-wash) effect (see
-  `documentation/usage.md` for every parameter), plus a dedicated **Master**
-  track/bus row for global effects.
-- **QuadraVerb emulation**: the Alesis QuadraVerb's reverb and delay
-  sections, with every page of the original's front panel (reverb type,
-  predelay + predelay mix, decay/reverse time, diffusion, density, separate
-  low- and high-frequency decay; mono/stereo/ping-pong delay at the
-  original's own 800/400ms QuadMode ceilings). The wet path runs at the
-  original's 31.25kHz internal rate through 16-bit delay memory, and the dry
-  path is never digitised at all — the band limit and the compounding
-  quantisation grain are the point, not an accident. Aimed squarely at the
-  Good Looking / atmospheric-jungle use of the box.
-- **Alesis 3630 emulation** (`Compressor - 3630`): the cheap dual
-  compressor/limiter/gate that ended up on more jungle records than every
-  expensive compressor put together. Peak/RMS response, hard/soft knee, the
-  panel's own -40…+20 dBu threshold, 1:1 to INF:1, 0.1-200ms attack,
-  50ms-3s release, and the built-in noise gate. RMS mode ignores the attack
-  and release knobs entirely — as the original's manual says it does — and
-  runs a program-dependent detector whose release stretches the harder the
-  box has been working, which is why a pad wash breathes back up between
-  snares.
-- **BBE Sonic Maximizer 422A emulation** (`Exciter - 422A`): not a treble
-  EQ. The signal is split at 150Hz/1.2kHz and the two lower bands are pushed
-  2.5ms and 0.5ms *behind* the top one, then the high band is driven by a
-  VCA comparing its own RMS level against the mid band's — a
-  program-dependent dynamic EQ rather than a shelf. Recombining three bands
-  that no longer share a timebase is what makes a break sit in front of the
-  pads instead of inside them, and is most of why so many mid-90s
-  atmospheric records went through one of these on the way to DAT.
+- **Effects**: insert chains on every track, on the send buses and on a
+  dedicated **Master** row — filters, EQ, modulation (chorus/flanger/phaser),
+  overdrive, compression, limiting, reverb, delay, an exciter, sidechain
+  ducking and a tuner. Several are emulations of the cheap 90s hardware this
+  music was actually made on, aimed at the atmospheric-jungle use of those
+  boxes rather than at being general-purpose plugins. See
+  [`documentation/usage.md`](documentation/usage.md) for the list.
 - **Send buses**: two sends (S1/S2) pinned to the bottom of the track pane,
   with a per-track enable button and send-level slider on every track
   header, and per-bus return level, pre/post-fader tap and mute. One effect
   chain serves every track feeding it — so a reverb shared across the break,
   the pads and the stabs is one room they are all in, at one reverb's worth
   of CPU rather than one per track.
-- **SP-1200 emulation**: a separate, always-available master-bus lo-fi
-  decimation mode (sample-and-hold to ~26kHz/12-bit, no anti-aliasing), baked
-  identically into live playback and rendered/exported audio so they can
-  never drift apart.
+- **SP-1200 emulation**: a separate, always-available master-bus lo-fi mode,
+  baked identically into live playback and rendered/exported audio so they
+  can never drift apart.
 - **Save/Load**: `.er` project files are real tar archives (native
   reader/writer, no external `tar` dependency on any platform), backward
   compatible with older loose-directory `.er` bundles. Recorded audio with no
@@ -181,8 +153,8 @@ fpcupdeluxe):
 
 ## Documentation
 
-See [`documentation/usage.md`](documentation/usage.md) for the full keyboard
-shortcut and mouse-gesture reference, including non-obvious interactions
+See [`documentation/usage.md`](documentation/usage.md) for the user guide —
+every keyboard shortcut and mouse gesture, including the non-obvious ones
 (loop points, warp marker dragging, modifier-key behavior, etc).
 
 ## Status

@@ -253,6 +253,11 @@ begin
   inherited Create(AOwner);
   DoubleBuffered := True;
   ControlStyle := ControlStyle + [csOpaque];
+  { the LCL only captures the mouse for the buttons listed here (default is
+    [mbLeft]) - range selection is a RIGHT-drag (see MouseDown), so without
+    mbRight the drag would stop getting MouseMove/MouseUp the moment the
+    pointer left the control }
+  CaptureMouseButtons := [mbLeft, mbRight];
   TabStop := True;
   FPixelsPerSecond := DefaultPixelsPerSecond;
   FSelectedTrack := -1;
@@ -1535,7 +1540,38 @@ begin
       end;
       UpdateEngineLoop;
       Invalidate;
+      Exit;
     end;
+
+    { Right-drag anywhere in the lane area draws a time-range selection -
+      clips included. This used to be the left-button gesture, but a left
+      press that landed on a clip was always a clip move/resize grab, so a
+      drag that started over (or near) any clip selected and dragged that
+      clip instead of drawing a range. On the right button nothing else
+      competes for the press, so the drag can start from anywhere. }
+    if X >= HeaderLeft then
+      Exit;
+
+    TrackIndex := TrackIndexAtY(Y);
+    if TrackIndex < 0 then
+      Exit;
+
+    Frame := SnapFrame(XToFrame(X));
+    if Frame < 0 then
+      Frame := 0;
+
+    { same teardown the old left-button path did before arming a range drag:
+      drop any single-clip selection and any previous range, so a plain
+      right-click (press with no drag) clears the selection and MouseMove is
+      what turns this into a real range }
+    SelectClip(-1, -1);
+    FGroupDragItems := nil;
+    FRangeSelectActive := False;
+    FDragMode := dmRangeSelect;
+    FDragActive := True;
+    FRangeDragStartFrame := Frame;
+    FRangeDragStartTrack := TrackIndex;
+    Invalidate;
     Exit;
   end;
 
@@ -1739,16 +1775,10 @@ begin
       Frame := 0;
     FCursorFrame := Frame;
 
-    { clicking empty lane space seeks immediately (unchanged); it also
-      arms a potential time-range selection drag, same as Ableton - a plain
-      click leaves no visible range (MouseMove below is what actually turns
-      this into a real selection), a click-drag selects [start,end) across
-      whichever tracks the drag crosses }
-    FDragMode := dmRangeSelect;
-    FDragActive := True;
+    { clicking empty lane space just seeks and drops any active range - the
+      range-select drag itself moved to the right button (see the mbRight
+      branch at the top), so a left drag here no longer starts one }
     FRangeSelectActive := False;
-    FRangeDragStartFrame := Frame;
-    FRangeDragStartTrack := TrackIndex;
 
     Invalidate;
     if Assigned(FOnSeek) then
@@ -1931,6 +1961,22 @@ var
   HasGroupItem, IsGroupMember: Boolean;
 begin
   inherited MouseUp(Button, Shift, X, Y);
+
+  { the range-select drag is the one right-button gesture, and it's finished
+    the moment the button comes up - FRangeSelectActive/the range bounds are
+    left standing, that IS the selection. Handled (and returned) before the
+    slider drags are cleared below so a stray right-click during a fader or
+    send drag can't cancel it. }
+  if Button = mbRight then
+  begin
+    if FDragActive and (FDragMode = dmRangeSelect) then
+    begin
+      FDragActive := False;
+      FDragMode := dmNone;
+      Invalidate;
+    end;
+    Exit;
+  end;
 
   FDraggingVolumeTrack := -1;
   FDraggingSendTrack := -1;
