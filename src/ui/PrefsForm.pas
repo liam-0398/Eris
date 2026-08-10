@@ -118,7 +118,16 @@ begin
   else
     FBufferSizeCombo.ItemIndex := 2;
 
-  FInputBufferSizeCombo := AddRow('Input buffer:', 160);
+  FSP1200Combo := AddRow('SP-1200 emulation:', 160);
+  FSP1200Combo.Items.Add('Off');
+  FSP1200Combo.Items.Add('On');
+  if AudioEngineGetSP1200Enabled then
+    FSP1200Combo.ItemIndex := 1
+  else
+    FSP1200Combo.ItemIndex := 0;
+  FSP1200Combo.OnChange := @SP1200ComboChange;
+
+  FInputBufferSizeCombo := AddRow('Input buffer:', 196);
   FInputBufferSizeCombo.Items.Add('128');
   FInputBufferSizeCombo.Items.Add('256');
   FInputBufferSizeCombo.Items.Add('512');
@@ -136,7 +145,7 @@ begin
     gain slider) - applied on change, unlike the buffer-size combos, since
     it's just a plain unsynchronized Single (see AudioEngineSetInputGainDb),
     not something that stops/reopens the audio backend }
-  FInputGainSlider := AddSliderRow('Input gain:', 196);
+  FInputGainSlider := AddSliderRow('Input gain:', 232);
   FInputGainSlider.Min := -24;
   FInputGainSlider.Max := 24;
   FInputGainSlider.Frequency := 6;
@@ -145,15 +154,6 @@ begin
   FInputGainSlider.ShowHint := True;
   FInputGainSlider.Hint := IntToStr(FInputGainSlider.Position) + ' dB';
   FInputGainSlider.OnChange := @InputGainSliderChange;
-
-  FSP1200Combo := AddRow('SP-1200 emulation:', 232);
-  FSP1200Combo.Items.Add('Off');
-  FSP1200Combo.Items.Add('On');
-  if AudioEngineGetSP1200Enabled then
-    FSP1200Combo.ItemIndex := 1
-  else
-    FSP1200Combo.ItemIndex := 0;
-  FSP1200Combo.OnChange := @SP1200ComboChange;
 
   FOKButton := TButton.Create(Self);
   FOKButton.Parent := Self;
