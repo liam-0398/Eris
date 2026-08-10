@@ -957,7 +957,7 @@ var
   Frame, OutIdx, SampleIdx: Int64;
   SP1200St: TSP1200State;
   MasterEffectState: array[0..Effects.MaxEffectsPerTrack - 1] of Effects.TEffectState;
-  L, R: Single;
+  L, R, MonoSample: Single;
   e, sIdx: Integer;
   RenderBeatFrames, SwungPos: Int64;
   { send buses, mirroring AudioEngine.FillBlock's SendL/SendR accumulators -
@@ -1055,18 +1055,18 @@ begin
             making bounces audibly diverge from what was heard live }
           if Sample.Channels = 1 then
           begin
-            TrackBuffers[t][OutIdx] := TrackBuffers[t][OutIdx] +
-              DetunedSample(Clip.WarpMarkers, Frame, Clip.PitchSemitones, Clip.Offset,
-                Sample.Data, Sample.FrameCount, Sample.Channels,
-                AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length,
-                Project.SampleTransients[Clip.SampleID],
-                  Project.SamplePeriods[Clip.SampleID]) * Clip.Gain;
-            TrackBuffers[t][OutIdx + 1] := TrackBuffers[t][OutIdx + 1] +
-              DetunedSample(Clip.WarpMarkers, Frame, Clip.PitchSemitones, Clip.Offset,
-                Sample.Data, Sample.FrameCount, Sample.Channels,
-                AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length,
-                Project.SampleTransients[Clip.SampleID],
-                  Project.SamplePeriods[Clip.SampleID]) * Clip.Gain;
+            { ONE call, fanned out to both outputs - mirrors the identical
+              fix in AudioEngine.FillBlock's mono branch (see there). The two
+              calls this replaced took the same arguments, channel 0 included,
+              so the whole warp/interpolation ran twice per frame to produce
+              one number. }
+            MonoSample := DetunedSample(Clip.WarpMarkers, Frame,
+              Clip.PitchSemitones, Clip.Offset, Sample.Data, Sample.FrameCount,
+              Sample.Channels, AudioEngine.ProjectSampleRate, Clip.WarpMode, 0,
+              Clip.Length, Project.SampleTransients[Clip.SampleID],
+              Project.SamplePeriods[Clip.SampleID]) * Clip.Gain;
+            TrackBuffers[t][OutIdx] := TrackBuffers[t][OutIdx] + MonoSample;
+            TrackBuffers[t][OutIdx + 1] := TrackBuffers[t][OutIdx + 1] + MonoSample;
           end
           else
           begin

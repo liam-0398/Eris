@@ -1641,6 +1641,7 @@ var
   GlobalFrame, ClipRelFrame, SwungPos: Int64;
   Clip: PPlaybackClip;
   L, R, TrackL, TrackR, RecL, RecR, ClickVal, CapL, CapR: Single;
+  MonoSample: Single;
   PreFaderL, PreFaderR, SendTapL, SendTapR, SendAmount: Single;
   SendL, SendR: array[0..Project.SendCount - 1] of Single;
   BeatFrames: Int64;
@@ -1690,8 +1691,15 @@ begin
 
           if Clip^.Channels = 1 then
           begin
-            TrackL := TrackL + DetunedClipSample(Clip, ClipRelFrame, 0) * Clip^.Gain;
-            TrackR := TrackR + DetunedClipSample(Clip, ClipRelFrame, 0) * Clip^.Gain;
+            { ONE call, fanned out to both outputs. DetunedClipSample is by
+              far the most expensive thing in this loop (granular warp, the
+              overlapping-slice sum, interpolation) and is pure in its
+              arguments, so the two identical calls this replaced did all of
+              that twice to arrive at the same number - a flat 2x on every
+              mono clip, on the audio thread. }
+            MonoSample := DetunedClipSample(Clip, ClipRelFrame, 0) * Clip^.Gain;
+            TrackL := TrackL + MonoSample;
+            TrackR := TrackR + MonoSample;
           end
           else
           begin
