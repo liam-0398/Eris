@@ -19,15 +19,21 @@ type
 
   { The 12-box key strip shown in the device panel for a Sampler Track's
     keyboard track - one box per key of KeyToSemitoneOffset's lower row.
-    Clicking a box selects it (see SetKey/TSamplerKeyEditor below); a clip
-    dropped from the timeline onto a box (see MainForm.ArrangementViewClipActivate)
-    calls SelectKey directly, without going through MouseDown. }
+    Left-clicking a box selects it (see SetKey/TSamplerKeyEditor below); a
+    clip dropped from the timeline onto a box (see
+    MainForm.ArrangementViewClipActivate) calls SelectKey directly, without
+    going through MouseDown. Right-clicking a filled box clones its sample+
+    trim into the next empty box and selects that - the fast way to spread
+    one long sample (e.g. a breakbeat) across several keys, then drag each
+    key's own start/end markers in TSamplerKeyEditor to pick a different
+    slice per key. }
   TSamplerKeysWidget = class(TCustomControl)
   private
     FTrackIndex: Integer;
     FSelectedKey: Integer;
     FOnKeySelected: TSamplerKeySelectEvent;
     function BoxRect(AKeyIndex: Integer): TRect;
+    function NextEmptyKey(AFromKey: Integer): Integer;
   protected
     procedure Paint; override;
     procedure MouseDown(Button: TMouseButton; Shift: TShiftState;
@@ -159,21 +165,55 @@ begin
   end;
 end;
 
+{ First empty (SampleID < 0) box found scanning forward from AFromKey,
+  wrapping around; -1 if every box is filled. Never returns AFromKey itself -
+  callers only reach here after confirming AFromKey is filled. }
+function TSamplerKeysWidget.NextEmptyKey(AFromKey: Integer): Integer;
+var
+  i, Idx: Integer;
+begin
+  Result := -1;
+  for i := 1 to Project.SamplerKeysPerOctave do
+  begin
+    Idx := (AFromKey + i) mod Project.SamplerKeysPerOctave;
+    if Project.TrackSamplerSlots[FTrackIndex][Idx].SampleID < 0 then
+      Exit(Idx);
+  end;
+end;
+
 procedure TSamplerKeysWidget.MouseDown(Button: TMouseButton; Shift: TShiftState;
   X, Y: Integer);
 var
-  k: Integer;
+  k, Target: Integer;
 begin
   inherited MouseDown(Button, Shift, X, Y);
-  if Button <> mbLeft then
+  if (FTrackIndex < 0) or (FTrackIndex >= Project.MaxTracks) then
     Exit;
   k := XToKeyIndex(X);
   if k < 0 then
     Exit;
-  FSelectedKey := k;
-  Invalidate;
-  if Assigned(FOnKeySelected) then
-    FOnKeySelected(Self, k);
+
+  if Button = mbLeft then
+  begin
+    FSelectedKey := k;
+    Invalidate;
+    if Assigned(FOnKeySelected) then
+      FOnKeySelected(Self, k);
+  end
+  else if Button = mbRight then
+  begin
+    if Project.TrackSamplerSlots[FTrackIndex][k].SampleID < 0 then
+      Exit; { nothing to duplicate }
+    Target := NextEmptyKey(k);
+    if Target < 0 then
+      Exit; { bank is full }
+    Project.TrackSamplerSlots[FTrackIndex][Target] :=
+      Project.TrackSamplerSlots[FTrackIndex][k];
+    FSelectedKey := Target;
+    Invalidate;
+    if Assigned(FOnKeySelected) then
+      FOnKeySelected(Self, Target);
+  end;
 end;
 
 { TSamplerKeyEditor }
