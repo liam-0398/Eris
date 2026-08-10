@@ -1053,43 +1053,58 @@ begin
 end;
 
 const
-  { Tones grain length is two fundamental periods, hopping one - 50% overlap,
-    which is what makes the Hann windows sum to unity. When no period was
-    detected (percussive or noisy material) fall back to a fixed grain of
-    this length so the mode still behaves, just without phase locking. }
-  TonesFallbackGrainMs = 25;
+  { LF slices are whole NOTES, not grains. Any onset crowded closer than this
+    to the one before it is treated as belonging to the same note rather than
+    starting a new slice: DetectTransients' 40ms floor is right for drums and
+    far too eager inside a sustained 808, where the amplitude swell from the
+    distortion and the pitch glide both read as onsets and produce splices in
+    the middle of a note. }
+  TonesMinNoteMs = 150;
+  { how long a note's tail keeps sounding, decaying, under the next one }
+  TonesReleaseMs = 120;
+  { declick ramp at a note start - short enough not to soften an 808's attack }
+  TonesAttackFrames = 24;
+  { cap on the crowded-onset walks below, so a long dense roll can't make the
+    lookup unbounded on the realtime thread }
+  TonesMaxOnsetWalk = 64;
 
 { ---------------------------------------------------------------------------
-  Tones warp ("LF"): pitch-synchronous overlap-add, for sustained
-  low-frequency material - 808s, sub bass, anything monophonic.
+  Tones warp ("LF"): note-triggered 1:1 playback, for sustained low-frequency
+  material - 808s, sub bass, anything monophonic.
 
-  Beats is the wrong algorithm for this and no amount of tuning fixes it. It
-  splices in the time domain, and a 40 Hz fundamental has a 25 ms period -
-  longer than the crossfade - so every splice lands at an arbitrary point in
-  the cycle and combs. Worse, on a sustained note the outgoing slice is still
-  at full level when the next one starts, so the overlap sums two near-0 dBFS
-  copies and clips against FillBlock's limiter.
+  This does NOT granulate, and that is the whole design. The first attempt
+  here was pitch-synchronous overlap-add, snapping each grain's source start
+  to a whole multiple of the detected fundamental period. That fails for the
+  job this mode exists to do. Quantising means nudging note onsets, so the
+  ratios are close to 1, and at those ratios the snap's accumulated error
+  sawtooths slowly: every N grains it duplicates or skips one entire cycle.
+  Each of those is a phase jump, heard as slow roughness plus a wobble in the
+  time base, and where two grains land anti-phase they cancel while in-phase
+  they sum to +6dB into the clipper. Worse, the snap assumes ONE period for
+  the whole sample, which a gliding 808 does not have.
 
-  Both problems have the same root: the splice ignores the waveform's phase.
-  So this places grains on WHOLE PERIODS instead. A grain's source start is
-  the nominal warp position snapped to an integer multiple of the detected
-  period from the segment's own start, which means every grain begins at the
-  same point in the cycle no matter where the warp put it. Consecutive grains
-  are therefore phase-continuous by construction: they reinforce instead of
-  combing, and because a Hann window at 50% overlap sums to exactly 1, the
-  result stays at unity gain instead of stacking towards the clipper.
+  So nothing is resynthesised. Each note is found by its onset, placed at the
+  timeline position the warp maps that onset to, and played FORWARD at 1:1
+  from its own start - exactly what a producer chopping and re-triggering
+  hits by hand would get. Interior audio is untouched, so there is no
+  granular artefact to hear at all: no phase jumps, no comb, no pitch wobble.
 
-  The cost is timing precision - snapping moves a grain by up to half a period
-  (12 ms at 40 Hz). Inaudible on sustained bass, which is the entire point of
-  restricting this mode to it; it would smear a drum loop badly, which is what
-  Beats is for.
+  A note that overruns its slot (compression) keeps playing and decays under
+  the note that has already started, which is what real overlapping 808 tails
+  do anyway. A note whose slot is longer than its audio (stretch) simply ends
+  and leaves its own natural decay - never a loop, which on bass would be an
+  obvious artefact. That is the deliberate trade: LF cannot fill time, so it
+  is for correcting timing, not for large stretches. Beats is for those.
   --------------------------------------------------------------------------- }
 function TonesClipSample(Clip: PPlaybackClip; AClipRelativeFrame: Int64;
   AChannel: Integer): Single;
 var
-  k: Integer;
-  SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen: Int64;
-  P, OffsetIntoSeg, gCur: Int64;
+  k, Guard: Integer;
+  SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen, SegEnd: Int64;
+  FirstTrans, TransInSeg: Integer;
+  MinNote, ReleaseMax, P, NominalSrc: Int64;
+  CurLo, CurHi, PrevLo, PrevHi: Int64;
+  Acc: Double;
 
   function SafeInterp(APos: Double): Single;
   var
@@ -1103,26 +1118,172 @@ var
         AChannel, AbsPos);
   end;
 
-  { windowed contribution of grain Ag, which occupies output frames
-    [Ag * P, Ag * P + 2P) within this segment }
-  function GrainAt(Ag: Int64): Double;
-  var
-    OutStart, NomSrc, SrcStart, u: Int64;
-    w: Double;
+  function TransAt(AIndex: Integer): Int64;
   begin
-    Result := 0;
-    OutStart := Ag * P;
-    u := OffsetIntoSeg - OutStart;
-    if (u < 0) or (u >= 2 * P) then
+    Result := (Clip^.Transients + AIndex)^ - Clip^.Offset;
+  end;
+
+  { same segment/transient-range setup as BeatsClipSample - see there }
+  procedure LoadSegment(AK: Integer);
+  var
+    lo, hi, mid: Integer;
+  begin
+    SegStartTimeline := Clip^.MarkerTimeline[AK];
+    SegStartSource := Clip^.MarkerSource[AK];
+    SegTimelineLen := Clip^.MarkerTimeline[AK + 1] - SegStartTimeline;
+    SegSourceLen := Clip^.MarkerSource[AK + 1] - SegStartSource;
+    SegEnd := SegStartSource + SegSourceLen;
+
+    FirstTrans := 0;
+    TransInSeg := 0;
+    if (SegTimelineLen <= 0) or (SegSourceLen <= 0) then
+      Exit;
+    if (Clip^.Transients = nil) or (Clip^.TransientCount <= 0) then
       Exit;
 
-    { nominal source position for this grain's start, then snapped to a whole
-      period from the segment start - the phase lock }
-    NomSrc := (OutStart * SegSourceLen) div SegTimelineLen;
-    SrcStart := SegStartSource + Round(NomSrc / P) * P;
+    lo := 0;
+    hi := Clip^.TransientCount;
+    while lo < hi do
+    begin
+      mid := lo + (hi - lo) div 2;
+      if TransAt(mid) <= SegStartSource then
+        lo := mid + 1
+      else
+        hi := mid;
+    end;
+    FirstTrans := lo;
 
-    w := 0.5 - 0.5 * Cos(2 * Pi * u / (2 * P));
-    Result := SafeInterp(SrcStart + u) * w;
+    hi := Clip^.TransientCount;
+    while lo < hi do
+    begin
+      mid := lo + (hi - lo) div 2;
+      if TransAt(mid) < SegEnd then
+        lo := mid + 1
+      else
+        hi := mid;
+    end;
+    TransInSeg := lo - FirstTrans;
+  end;
+
+  function TimelineOf(ASource: Int64): Int64;
+  begin
+    Result := SegStartTimeline +
+      ((ASource - SegStartSource) * SegTimelineLen) div SegSourceLen;
+  end;
+
+  { Source bounds of the note containing ASrc.
+
+    An onset counts as a note start only if the onset before it is at least
+    MinNote away - a purely LOCAL test, so it needs no filtered copy of the
+    transient array and gives the same answer from any frame. A cluster of
+    swell-triggered onsets inside one sustained note therefore collapses onto
+    the first of the cluster, which is the real attack. }
+  procedure NoteBounds(ASrc: Int64; out ALo, AHi: Int64);
+  var
+    lo, hi, mid, j, steps: Integer;
+  begin
+    ALo := SegStartSource;
+    AHi := SegEnd;
+    if TransInSeg <= 0 then
+      Exit;
+
+    { before the first onset inside the segment: the note runs from the
+      segment's own start up to it }
+    if TransAt(FirstTrans) > ASrc then
+    begin
+      AHi := TransAt(FirstTrans);
+      Exit;
+    end;
+
+    lo := FirstTrans;
+    hi := FirstTrans + TransInSeg - 1;
+    while lo < hi do
+    begin
+      mid := lo + (hi - lo + 1) div 2;
+      if TransAt(mid) <= ASrc then
+        lo := mid
+      else
+        hi := mid - 1;
+    end;
+    j := lo;
+
+    steps := 0;
+    while (j > FirstTrans) and (TransAt(j) - TransAt(j - 1) < MinNote) and
+      (steps < TonesMaxOnsetWalk) do
+    begin
+      Dec(j);
+      Inc(steps);
+    end;
+    ALo := TransAt(j);
+
+    steps := 0;
+    Inc(j);
+    while (j < FirstTrans + TransInSeg) and
+      (TransAt(j) - TransAt(j - 1) < MinNote) and (steps < TonesMaxOnsetWalk) do
+    begin
+      Inc(j);
+      Inc(steps);
+    end;
+    if j < FirstTrans + TransInSeg then
+      AHi := TransAt(j)
+    else
+      AHi := SegEnd;
+
+    if ALo < SegStartSource then
+      ALo := SegStartSource;
+    if AHi > SegEnd then
+      AHi := SegEnd;
+  end;
+
+  { one note's enveloped output at AClipRelativeFrame, or 0 if it isn't (or is
+    no longer) sounding }
+  function NoteContribution(ALo, AHi: Int64): Double;
+  var
+    Natural, TL, TLen, Release, FadeStart, t: Int64;
+    Gain: Double;
+  begin
+    Result := 0;
+    Natural := AHi - ALo;
+    if Natural < 1 then
+      Exit;
+
+    TL := TimelineOf(ALo);
+    TLen := TimelineOf(AHi) - TL;
+    if TLen < 1 then
+      Exit;
+
+    t := AClipRelativeFrame - TL;
+    if t < 0 then
+      Exit;
+
+    Release := ReleaseMax;
+    if Release > Natural then
+      Release := Natural;
+    { a whole number of cycles, so the ramp itself doesn't put an amplitude
+      artefact on the tail of a low-frequency note }
+    if (P > 1) and (Release > P) then
+      Release := (Release div P) * P;
+    if Release < 1 then
+      Release := 1;
+
+    { fade from the slot's end when the note overruns it, or from ReleaseMax
+      before the audio runs out when it doesn't }
+    FadeStart := TLen;
+    if FadeStart > Natural - Release then
+      FadeStart := Natural - Release;
+    if FadeStart < 0 then
+      FadeStart := 0;
+
+    if t >= FadeStart + Release then
+      Exit;
+
+    Gain := 1;
+    if t >= FadeStart then
+      Gain := 1 - (t - FadeStart) / Release;
+    if t < TonesAttackFrames then
+      Gain := Gain * (t / TonesAttackFrames);
+
+    Result := SafeInterp(ALo + t) * Gain;
   end;
 
 begin
@@ -1134,24 +1295,54 @@ begin
     (AClipRelativeFrame >= Clip^.MarkerTimeline[k + 1]) do
     Inc(k);
 
-  SegStartTimeline := Clip^.MarkerTimeline[k];
-  SegStartSource := Clip^.MarkerSource[k];
-  SegTimelineLen := Clip^.MarkerTimeline[k + 1] - SegStartTimeline;
-  SegSourceLen := Clip^.MarkerSource[k + 1] - SegStartSource;
+  LoadSegment(k);
   if (SegTimelineLen <= 0) or (SegSourceLen <= 0) then
     Exit(SafeInterp(SegStartSource));
 
+  MinNote := (TonesMinNoteMs * ProjectSampleRate) div 1000;
+  ReleaseMax := (TonesReleaseMs * ProjectSampleRate) div 1000;
   P := Clip^.PeriodFrames;
-  if P < 2 then
-    P := (TonesFallbackGrainMs * ProjectSampleRate) div 1000;
-  if P < 2 then
-    P := 2;
 
-  OffsetIntoSeg := AClipRelativeFrame - SegStartTimeline;
-  gCur := OffsetIntoSeg div P;
+  NominalSrc := SegStartSource +
+    ((AClipRelativeFrame - SegStartTimeline) * SegSourceLen) div SegTimelineLen;
+  NoteBounds(NominalSrc, CurLo, CurHi);
 
-  { exactly two grains overlap at any output frame, by construction }
-  Result := GrainAt(gCur) + GrainAt(gCur - 1);
+  { the seed came from the nominal source position, so correct it against the
+    real timeline bounds the renderer itself uses - 0 or 1 steps in practice }
+  Guard := 0;
+  while (CurLo > SegStartSource) and (AClipRelativeFrame < TimelineOf(CurLo)) and
+    (Guard < TonesMaxOnsetWalk) do
+  begin
+    NoteBounds(CurLo - 1, CurLo, CurHi);
+    Inc(Guard);
+  end;
+  while (CurHi < SegEnd) and (AClipRelativeFrame >= TimelineOf(CurHi)) and
+    (Guard < TonesMaxOnsetWalk) do
+  begin
+    NoteBounds(CurHi, CurLo, CurHi);
+    Inc(Guard);
+  end;
+
+  Acc := NoteContribution(CurLo, CurHi);
+
+  { plus the previous note, if its tail is still decaying over this frame -
+    crossing back over a marker when it has to, same as the Beats renderer }
+  if CurLo > SegStartSource then
+  begin
+    NoteBounds(CurLo - 1, PrevLo, PrevHi);
+    Acc := Acc + NoteContribution(PrevLo, PrevHi);
+  end
+  else if k > 0 then
+  begin
+    LoadSegment(k - 1);
+    if (SegTimelineLen > 0) and (SegSourceLen > 0) then
+    begin
+      NoteBounds(SegEnd - 1, PrevLo, PrevHi);
+      Acc := Acc + NoteContribution(PrevLo, PrevHi);
+    end;
+  end;
+
+  Result := Acc;
 end;
 
 { The audio-producing entry point for a warped clip: Beats goes through the

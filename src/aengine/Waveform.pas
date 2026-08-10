@@ -394,7 +394,10 @@ const
   WarpReversalFadeMs = 3;
   WarpMaxOverlapSlices = 4;
   WarpRepitchFadeMs = 4;
-  TonesFallbackGrainMs = 25;
+  TonesMinNoteMs = 150;
+  TonesReleaseMs = 120;
+  TonesAttackFrames = 24;
+  TonesMaxOnsetWalk = 64;
 
 function WarpedSourcePosition(const AMarkers: TWarpMarkerArray;
   ATimelineFrame: Int64; ASampleRate: Integer; AWarpMode: Integer): Double;
@@ -474,17 +477,20 @@ end;
   raw PInt64/Count pair for its transients, the lock-free-safe shape, while
   every other caller has a TFrameArray; the two must stay in step. }
 { Tones ("LF") renderer - the offline/shared copy of AudioEngine.
-  TonesClipSample. See that function's header for why sustained low-frequency
-  material needs grains placed on whole waveform periods rather than Beats'
-  transient slices. }
+  TonesClipSample. See that function's header for why this places whole notes
+  at 1:1 rather than granulating. }
 function TonesSourceSample(const AMarkers: TWarpMarkerArray;
   ATimelineFrame: Int64; AOffset: Int64; AData: PSingle;
   AFrameCount: Integer; AChannels: Integer; ASampleRate: Integer;
-  AChannel: Integer; APeriodFrames: Integer): Single;
+  AChannel: Integer; const ATransients: TFrameArray;
+  APeriodFrames: Integer): Single;
 var
-  k: Integer;
-  SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen: Int64;
-  P, OffsetIntoSeg, gCur: Int64;
+  k, Guard: Integer;
+  SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen, SegEnd: Int64;
+  FirstTrans, TransInSeg: Integer;
+  MinNote, ReleaseMax, P, NominalSrc: Int64;
+  CurLo, CurHi, PrevLo, PrevHi: Int64;
+  Acc: Double;
 
   function SafeInterp(APos: Double): Single;
   var
@@ -497,22 +503,172 @@ var
       Result := Interpolate(AData, AFrameCount, AChannels, AChannel, AbsPos);
   end;
 
-  function GrainAt(Ag: Int64): Double;
-  var
-    OutStart, NomSrc, SrcStart, u: Int64;
-    w: Double;
+  function TransAt(AIndex: Integer): Int64;
   begin
-    Result := 0;
-    OutStart := Ag * P;
-    u := OffsetIntoSeg - OutStart;
-    if (u < 0) or (u >= 2 * P) then
+    Result := ATransients[AIndex] - AOffset;
+  end;
+
+  { same segment/transient-range setup as BeatsClipSample - see there }
+  procedure LoadSegment(AK: Integer);
+  var
+    lo, hi, mid: Integer;
+  begin
+    SegStartTimeline := AMarkers[AK].TimelineFrame;
+    SegStartSource := AMarkers[AK].SourceFrame;
+    SegTimelineLen := AMarkers[AK + 1].TimelineFrame - SegStartTimeline;
+    SegSourceLen := AMarkers[AK + 1].SourceFrame - SegStartSource;
+    SegEnd := SegStartSource + SegSourceLen;
+
+    FirstTrans := 0;
+    TransInSeg := 0;
+    if (SegTimelineLen <= 0) or (SegSourceLen <= 0) then
+      Exit;
+    if Length(ATransients) = 0 then
       Exit;
 
-    NomSrc := (OutStart * SegSourceLen) div SegTimelineLen;
-    SrcStart := SegStartSource + Round(NomSrc / P) * P;
+    lo := 0;
+    hi := Length(ATransients);
+    while lo < hi do
+    begin
+      mid := lo + (hi - lo) div 2;
+      if TransAt(mid) <= SegStartSource then
+        lo := mid + 1
+      else
+        hi := mid;
+    end;
+    FirstTrans := lo;
 
-    w := 0.5 - 0.5 * Cos(2 * Pi * u / (2 * P));
-    Result := SafeInterp(SrcStart + u) * w;
+    hi := Length(ATransients);
+    while lo < hi do
+    begin
+      mid := lo + (hi - lo) div 2;
+      if TransAt(mid) < SegEnd then
+        lo := mid + 1
+      else
+        hi := mid;
+    end;
+    TransInSeg := lo - FirstTrans;
+  end;
+
+  function TimelineOf(ASource: Int64): Int64;
+  begin
+    Result := SegStartTimeline +
+      ((ASource - SegStartSource) * SegTimelineLen) div SegSourceLen;
+  end;
+
+  { Source bounds of the note containing ASrc.
+
+    An onset counts as a note start only if the onset before it is at least
+    MinNote away - a purely LOCAL test, so it needs no filtered copy of the
+    transient array and gives the same answer from any frame. A cluster of
+    swell-triggered onsets inside one sustained note therefore collapses onto
+    the first of the cluster, which is the real attack. }
+  procedure NoteBounds(ASrc: Int64; out ALo, AHi: Int64);
+  var
+    lo, hi, mid, j, steps: Integer;
+  begin
+    ALo := SegStartSource;
+    AHi := SegEnd;
+    if TransInSeg <= 0 then
+      Exit;
+
+    { before the first onset inside the segment: the note runs from the
+      segment's own start up to it }
+    if TransAt(FirstTrans) > ASrc then
+    begin
+      AHi := TransAt(FirstTrans);
+      Exit;
+    end;
+
+    lo := FirstTrans;
+    hi := FirstTrans + TransInSeg - 1;
+    while lo < hi do
+    begin
+      mid := lo + (hi - lo + 1) div 2;
+      if TransAt(mid) <= ASrc then
+        lo := mid
+      else
+        hi := mid - 1;
+    end;
+    j := lo;
+
+    steps := 0;
+    while (j > FirstTrans) and (TransAt(j) - TransAt(j - 1) < MinNote) and
+      (steps < TonesMaxOnsetWalk) do
+    begin
+      Dec(j);
+      Inc(steps);
+    end;
+    ALo := TransAt(j);
+
+    steps := 0;
+    Inc(j);
+    while (j < FirstTrans + TransInSeg) and
+      (TransAt(j) - TransAt(j - 1) < MinNote) and (steps < TonesMaxOnsetWalk) do
+    begin
+      Inc(j);
+      Inc(steps);
+    end;
+    if j < FirstTrans + TransInSeg then
+      AHi := TransAt(j)
+    else
+      AHi := SegEnd;
+
+    if ALo < SegStartSource then
+      ALo := SegStartSource;
+    if AHi > SegEnd then
+      AHi := SegEnd;
+  end;
+
+  { one note's enveloped output at ATimelineFrame, or 0 if it isn't (or is
+    no longer) sounding }
+  function NoteContribution(ALo, AHi: Int64): Double;
+  var
+    Natural, TL, TLen, Release, FadeStart, t: Int64;
+    Gain: Double;
+  begin
+    Result := 0;
+    Natural := AHi - ALo;
+    if Natural < 1 then
+      Exit;
+
+    TL := TimelineOf(ALo);
+    TLen := TimelineOf(AHi) - TL;
+    if TLen < 1 then
+      Exit;
+
+    t := ATimelineFrame - TL;
+    if t < 0 then
+      Exit;
+
+    Release := ReleaseMax;
+    if Release > Natural then
+      Release := Natural;
+    { a whole number of cycles, so the ramp itself doesn't put an amplitude
+      artefact on the tail of a low-frequency note }
+    if (P > 1) and (Release > P) then
+      Release := (Release div P) * P;
+    if Release < 1 then
+      Release := 1;
+
+    { fade from the slot's end when the note overruns it, or from ReleaseMax
+      before the audio runs out when it doesn't }
+    FadeStart := TLen;
+    if FadeStart > Natural - Release then
+      FadeStart := Natural - Release;
+    if FadeStart < 0 then
+      FadeStart := 0;
+
+    if t >= FadeStart + Release then
+      Exit;
+
+    Gain := 1;
+    if t >= FadeStart then
+      Gain := 1 - (t - FadeStart) / Release;
+    if t < TonesAttackFrames then
+      Gain := Gain * (t / TonesAttackFrames);
+
+    Result := SafeInterp(ALo + t) * Gain;
   end;
 
 begin
@@ -524,23 +680,54 @@ begin
     (ATimelineFrame >= AMarkers[k + 1].TimelineFrame) do
     Inc(k);
 
-  SegStartTimeline := AMarkers[k].TimelineFrame;
-  SegStartSource := AMarkers[k].SourceFrame;
-  SegTimelineLen := AMarkers[k + 1].TimelineFrame - SegStartTimeline;
-  SegSourceLen := AMarkers[k + 1].SourceFrame - SegStartSource;
+  LoadSegment(k);
   if (SegTimelineLen <= 0) or (SegSourceLen <= 0) then
     Exit(SafeInterp(SegStartSource));
 
+  MinNote := (TonesMinNoteMs * ASampleRate) div 1000;
+  ReleaseMax := (TonesReleaseMs * ASampleRate) div 1000;
   P := APeriodFrames;
-  if P < 2 then
-    P := (TonesFallbackGrainMs * ASampleRate) div 1000;
-  if P < 2 then
-    P := 2;
 
-  OffsetIntoSeg := ATimelineFrame - SegStartTimeline;
-  gCur := OffsetIntoSeg div P;
+  NominalSrc := SegStartSource +
+    ((ATimelineFrame - SegStartTimeline) * SegSourceLen) div SegTimelineLen;
+  NoteBounds(NominalSrc, CurLo, CurHi);
 
-  Result := GrainAt(gCur) + GrainAt(gCur - 1);
+  { the seed came from the nominal source position, so correct it against the
+    real timeline bounds the renderer itself uses - 0 or 1 steps in practice }
+  Guard := 0;
+  while (CurLo > SegStartSource) and (ATimelineFrame < TimelineOf(CurLo)) and
+    (Guard < TonesMaxOnsetWalk) do
+  begin
+    NoteBounds(CurLo - 1, CurLo, CurHi);
+    Inc(Guard);
+  end;
+  while (CurHi < SegEnd) and (ATimelineFrame >= TimelineOf(CurHi)) and
+    (Guard < TonesMaxOnsetWalk) do
+  begin
+    NoteBounds(CurHi, CurLo, CurHi);
+    Inc(Guard);
+  end;
+
+  Acc := NoteContribution(CurLo, CurHi);
+
+  { plus the previous note, if its tail is still decaying over this frame -
+    crossing back over a marker when it has to, same as the Beats renderer }
+  if CurLo > SegStartSource then
+  begin
+    NoteBounds(CurLo - 1, PrevLo, PrevHi);
+    Acc := Acc + NoteContribution(PrevLo, PrevHi);
+  end
+  else if k > 0 then
+  begin
+    LoadSegment(k - 1);
+    if (SegTimelineLen > 0) and (SegSourceLen > 0) then
+    begin
+      NoteBounds(SegEnd - 1, PrevLo, PrevHi);
+      Acc := Acc + NoteContribution(PrevLo, PrevHi);
+    end;
+  end;
+
+  Result := Acc;
 end;
 
 function WarpedSourceSample(const AMarkers: TWarpMarkerArray;
@@ -785,7 +972,7 @@ begin
 
   if AWarpMode = WarpModeTones then
     Exit(TonesSourceSample(AMarkers, ATimelineFrame, AOffset, AData, AFrameCount,
-      AChannels, ASampleRate, AChannel, APeriodFrames));
+      AChannels, ASampleRate, AChannel, ATransients, APeriodFrames));
 
   if AWarpMode = WarpModeRePitch then
     Exit(SafeInterp(WarpedSourcePosition(AMarkers, ATimelineFrame, ASampleRate,
