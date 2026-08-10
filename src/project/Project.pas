@@ -11,10 +11,21 @@ const
   MaxTracks = 16;
   DefaultTrackCount = 4;
   DefaultTempoBPM = 160.0;
+  SamplerKeysPerOctave = 12;
 
 type
   TTrack = record
     Clips: TClipArray;
+  end;
+
+  { One key of a Sampler Track's one-octave key bank. SampleID = -1 means the
+    key is empty (silent). StartFrame/EndFrame are trim points into the
+    source sample, same meaning as TrackInstrumentStart/End below - the key
+    plays that trimmed span at whatever rate TrackOctave (plus the pressed
+    key's own octave, see MainForm.TriggerSamplerKeyNote) works out to. }
+  TSamplerSlot = record
+    SampleID: Integer;
+    StartFrame, EndFrame: Int64;
   end;
 
 var
@@ -64,6 +75,15 @@ var
   TrackIsInput: array[0..MaxTracks - 1] of Boolean;
   TrackMonitorEnabled: array[0..MaxTracks - 1] of Boolean;
 
+  { Sampler Track: a track dedicated entirely to a one-octave bank of
+    keyboard-played samples (see MainForm's sampler device-panel widget and
+    TriggerSamplerKeyNote) instead of the normal single-instrument keyboard
+    play above - set only at track-creation time via AddSamplerTrack,
+    mirroring TrackIsInput/AddInputTrack, and never combined with
+    TrackInstrument/TrackIsInput on the same track. }
+  TrackIsSampler: array[0..MaxTracks - 1] of Boolean;
+  TrackSamplerSlots: array[0..MaxTracks - 1, 0..SamplerKeysPerOctave - 1] of TSamplerSlot;
+
   { SP-1200-style swing: delays every other grid step's clips later by a
     percentage. 50 = straight/off, 54..71 mirror the SP-1200's own five
     detents, 75 is the theoretical ceiling (off-step lands exactly on the
@@ -98,6 +118,8 @@ function PopUndo(out ATrackIndex: Integer): Boolean;
 
 function AddTrack: Boolean;
 function AddInputTrack: Boolean;
+function AddSamplerTrack: Boolean;
+procedure AssignSamplerSlot(ATrackIndex, AKeyIndex, ASampleID: Integer; AStartFrame: Int64);
 function DeleteTrack(ATrackIndex: Integer): Boolean;
 procedure NewProject;
 
@@ -122,6 +144,18 @@ type
 var
   UndoStack: array of TUndoSnapshot;
 
+procedure ClearSamplerSlots(ATrackIndex: Integer);
+var
+  k: Integer;
+begin
+  for k := 0 to SamplerKeysPerOctave - 1 do
+  begin
+    TrackSamplerSlots[ATrackIndex][k].SampleID := -1;
+    TrackSamplerSlots[ATrackIndex][k].StartFrame := 0;
+    TrackSamplerSlots[ATrackIndex][k].EndFrame := 0;
+  end;
+end;
+
 procedure InitTrackInstruments;
 var
   i: Integer;
@@ -140,6 +174,8 @@ begin
     TrackSwingDivision[i] := 16;
     TrackIsInput[i] := False;
     TrackMonitorEnabled[i] := False;
+    TrackIsSampler[i] := False;
+    ClearSamplerSlots(i);
   end;
 end;
 
@@ -284,6 +320,8 @@ begin
   TrackSwingDivision[TrackCount] := 16;
   TrackIsInput[TrackCount] := False;
   TrackMonitorEnabled[TrackCount] := False;
+  TrackIsSampler[TrackCount] := False;
+  ClearSamplerSlots(TrackCount);
   Inc(TrackCount);
   Inc(NextTrackID);
   Result := True;
@@ -294,6 +332,27 @@ begin
   Result := AddTrack;
   if Result then
     TrackIsInput[TrackCount - 1] := True;
+end;
+
+function AddSamplerTrack: Boolean;
+begin
+  Result := AddTrack;
+  if Result then
+    TrackIsSampler[TrackCount - 1] := True;
+end;
+
+procedure AssignSamplerSlot(ATrackIndex, AKeyIndex, ASampleID: Integer; AStartFrame: Int64);
+begin
+  if (ATrackIndex < 0) or (ATrackIndex >= MaxTracks) then
+    Exit;
+  if (AKeyIndex < 0) or (AKeyIndex >= SamplerKeysPerOctave) then
+    Exit;
+  if (ASampleID < 0) or (ASampleID > High(SamplePool)) then
+    Exit;
+  { drop onto an occupied key replaces it outright - no stacking/round-robin }
+  TrackSamplerSlots[ATrackIndex][AKeyIndex].SampleID := ASampleID;
+  TrackSamplerSlots[ATrackIndex][AKeyIndex].StartFrame := AStartFrame;
+  TrackSamplerSlots[ATrackIndex][AKeyIndex].EndFrame := SamplePool[ASampleID].FrameCount;
 end;
 
 function DeleteTrack(ATrackIndex: Integer): Boolean;
@@ -320,6 +379,8 @@ begin
     TrackSwingDivision[t] := TrackSwingDivision[t + 1];
     TrackIsInput[t] := TrackIsInput[t + 1];
     TrackMonitorEnabled[t] := TrackMonitorEnabled[t + 1];
+    TrackIsSampler[t] := TrackIsSampler[t + 1];
+    Move(TrackSamplerSlots[t + 1, 0], TrackSamplerSlots[t, 0], SizeOf(TrackSamplerSlots[t]));
     Move(TrackEffects[t + 1, 0], TrackEffects[t, 0], SizeOf(TrackEffects[t]));
   end;
 

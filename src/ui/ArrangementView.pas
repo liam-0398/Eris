@@ -21,7 +21,11 @@ type
     directly rather than a path: the sample is already resident in
     Project.SamplePool (loaded from disk, or - for a recorded clip - never
     backed by a file at all), so there's nothing to import. }
-  TClipSampleEvent = procedure(Sender: TObject; ASampleID: Integer) of object;
+  { AOffset is the clip's own Offset (its trim point into the source sample)
+    - carried along so a drop onto a Sampler Track's key strip (see
+    MainForm.ArrangementViewClipActivate) can seed that key's start marker
+    from wherever the dragged clip itself started, instead of always 0. }
+  TClipSampleEvent = procedure(Sender: TObject; ASampleID: Integer; AOffset: Int64) of object;
 
   TDragMode = (dmNone, dmMove, dmResizeLeft, dmResizeRight, dmRangeSelect, dmGroupMove);
 
@@ -1462,7 +1466,7 @@ begin
           Height, same as the volume-slider drag above tolerates X doing. }
         if (Y >= Height) and Assigned(FOnClipActivate) then
         begin
-          FOnClipActivate(Self, FDragOrigClip.SampleID);
+          FOnClipActivate(Self, FDragOrigClip.SampleID, FDragOrigClip.Offset);
           FDragActive := False;
           FDragMode := dmNone;
           Invalidate;
@@ -1697,7 +1701,8 @@ begin
   if not HitTestClip(TrackIndex, P.X, ClipIndex, Mode) then
     Exit;
   if Assigned(FOnClipActivate) then
-    FOnClipActivate(Self, Project.Tracks[TrackIndex].Clips[ClipIndex].SampleID);
+    FOnClipActivate(Self, Project.Tracks[TrackIndex].Clips[ClipIndex].SampleID,
+      Project.Tracks[TrackIndex].Clips[ClipIndex].Offset);
 end;
 
 { Extracts whatever portion of AClip falls inside [ARangeStart, ARangeEnd),

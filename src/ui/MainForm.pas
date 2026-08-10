@@ -5,10 +5,10 @@ unit MainForm;
 interface
 
 uses
-  Classes, SysUtils, Math, Forms, Controls, Graphics, Dialogs, Menus, ExtCtrls,
+  Classes, SysUtils, Math, Types, Forms, Controls, Graphics, Dialogs, Menus, ExtCtrls,
   StdCtrls, ComCtrls, Buttons, LCLType, ArrangementView, PrefsForm, FileBrowser,
   SampleTypes, AudioEngine, Project, ProjectFile, WarpEditor,
-  InstrumentEditor, Effects, EffectsRack, UIScale;
+  InstrumentEditor, SamplerEditor, Effects, EffectsRack, UIScale;
 
 type
   TForm1 = class(TForm)
@@ -72,6 +72,13 @@ type
     FClipDetuneValueLabel: TLabel;
     FInstrumentEditorWidget: TPanel;
     FInstrumentEditor: TInstrumentEditor;
+    FSamplerWidget: TPanel;
+    FSamplerOctaveLabel: TLabel;
+    FSamplerOctaveMinusButton: TButton;
+    FSamplerOctavePlusButton: TButton;
+    FSamplerKeys: TSamplerKeysWidget;
+    FSamplerEditorWidget: TPanel;
+    FSamplerKeyEditor: TSamplerKeyEditor;
     FDeviceScrollBar: TScrollBar;
     FEffectsMenu: TPopupMenu;
     FEffectWidgets: array of TEffectWidget;
@@ -119,6 +126,7 @@ type
     procedure ViewZoomOutClick(Sender: TObject);
     procedure TrackAddClick(Sender: TObject);
     procedure TrackAddInputClick(Sender: TObject);
+    procedure TrackAddSamplerClick(Sender: TObject);
     procedure TrackDeleteClick(Sender: TObject);
     procedure HelpAboutClick(Sender: TObject);
     procedure StopClick(Sender: TObject);
@@ -131,7 +139,7 @@ type
     procedure GridTrackBarChange(Sender: TObject);
     procedure ArrangementViewFileDrop(Sender: TObject; ATrackIndex: Integer;
       AFramePosition: Int64; const AFilePath: string);
-    procedure ArrangementViewClipActivate(Sender: TObject; ASampleID: Integer);
+    procedure ArrangementViewClipActivate(Sender: TObject; ASampleID: Integer; AOffset: Int64);
     procedure ArrangementViewSeek(Sender: TObject; AFrameOffset: Int64);
     procedure ArrangementViewKeyboardTrackChanged(Sender: TObject);
     procedure ArrangementViewClipSelectionChanged(Sender: TObject);
@@ -189,6 +197,9 @@ type
     procedure OctaveMinusClick(Sender: TObject);
     procedure OctavePlusClick(Sender: TObject);
     procedure TriggerKeyboardNote(ASemitoneOffset: Integer);
+    procedure SamplerKeySelected(Sender: TObject; AKeyIndex: Integer);
+    procedure SamplerKeyEditorChanged(Sender: TObject);
+    procedure TriggerSamplerKeyNote(ABoxIndex, AOctaveDelta: Integer);
     procedure PlaybackPollTimerTimer(Sender: TObject);
     procedure FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
   public
@@ -254,7 +265,7 @@ var
   FileMenu, EditMenu, ViewMenu, TrackMenu, HelpMenu, UndoItem,
   ZoomInItem, ZoomOutItem, CopyItem, PasteItem, DuplicateItem, SplitItem,
   DeleteItem, ConsolidateItem,
-  AddTrackItem, AddInputTrackItem, DeleteTrackItem: TMenuItem;
+  AddTrackItem, AddInputTrackItem, AddSamplerTrackItem, DeleteTrackItem: TMenuItem;
 begin
   FMainMenu := TMainMenu.Create(Self);
   Menu := FMainMenu;
@@ -304,6 +315,7 @@ begin
   AddTrackItem.ShortCut := Menus.ShortCut(Ord('N'), [ssCtrl]);
   AddInputTrackItem := AddItem(TrackMenu, 'Add &Input Track', @TrackAddInputClick);
   AddInputTrackItem.ShortCut := Menus.ShortCut(Ord('N'), [ssCtrl, ssShift]);
+  AddSamplerTrackItem := AddItem(TrackMenu, 'Add Sam&pler Track', @TrackAddSamplerClick);
   DeleteTrackItem := AddItem(TrackMenu, '&Delete Track', @TrackDeleteClick);
   DeleteTrackItem.ShortCut := Menus.ShortCut(Ord('D'), [ssCtrl]);
 
@@ -712,6 +724,67 @@ begin
   FInstrumentEditor.Align := alClient;
   FInstrumentEditor.OnChanged := @InstrumentEditorChanged;
 
+  { Sampler Track keyboard widget - shares the instrument slot, shown
+    instead of it when the keyboard track is a Sampler Track. Octave
+    controls reuse the same TrackOctave click handlers as the instrument
+    widget's, since both just Inc/Dec Project.TrackOctave[KeyboardTrack]. }
+  FSamplerWidget := TPanel.Create(Self);
+  FSamplerWidget.Parent := FDevicePanel;
+  FSamplerWidget.Left := Px(InstrumentSlotLeft);
+  FSamplerWidget.Top := Px(WidgetTop);
+  FSamplerWidget.Width := Px(220);
+  FSamplerWidget.Height := Px(WidgetHeight);
+  FSamplerWidget.BevelOuter := bvRaised;
+  FSamplerWidget.Visible := False;
+
+  FSamplerOctaveLabel := TLabel.Create(Self);
+  FSamplerOctaveLabel.Parent := FSamplerWidget;
+  FSamplerOctaveLabel.Left := Px(8);
+  FSamplerOctaveLabel.Top := Px(8);
+  FSamplerOctaveLabel.Caption := 'Octave: 0';
+
+  FSamplerOctaveMinusButton := TButton.Create(Self);
+  FSamplerOctaveMinusButton.Parent := FSamplerWidget;
+  FSamplerOctaveMinusButton.Caption := '-';
+  FSamplerOctaveMinusButton.Left := Px(8);
+  FSamplerOctaveMinusButton.Top := Px(32);
+  FSamplerOctaveMinusButton.Width := Px(28);
+  FSamplerOctaveMinusButton.Height := Px(24);
+  FSamplerOctaveMinusButton.OnClick := @OctaveMinusClick;
+
+  FSamplerOctavePlusButton := TButton.Create(Self);
+  FSamplerOctavePlusButton.Parent := FSamplerWidget;
+  FSamplerOctavePlusButton.Caption := '+';
+  FSamplerOctavePlusButton.Left := Px(44);
+  FSamplerOctavePlusButton.Top := Px(32);
+  FSamplerOctavePlusButton.Width := Px(28);
+  FSamplerOctavePlusButton.Height := Px(24);
+  FSamplerOctavePlusButton.OnClick := @OctavePlusClick;
+
+  FSamplerKeys := TSamplerKeysWidget.Create(Self);
+  FSamplerKeys.Parent := FSamplerWidget;
+  FSamplerKeys.Left := Px(8);
+  FSamplerKeys.Top := Px(64);
+  FSamplerKeys.Width := FSamplerWidget.Width - Px(16);
+  FSamplerKeys.Height := Px(100);
+  FSamplerKeys.OnKeySelected := @SamplerKeySelected;
+
+  { per-key waveform/marker editor - shares the warp/instrument-editor slot }
+  FSamplerEditorWidget := TPanel.Create(Self);
+  FSamplerEditorWidget.Parent := FDevicePanel;
+  FSamplerEditorWidget.Left := Px(WarpSlotLeft);
+  FSamplerEditorWidget.Top := Px(WidgetTop);
+  FSamplerEditorWidget.Width := Px(400);
+  FSamplerEditorWidget.Height := Px(WidgetHeight);
+  FSamplerEditorWidget.BevelOuter := bvRaised;
+  FSamplerEditorWidget.Visible := False;
+  FSamplerEditorWidget.Caption := '';
+
+  FSamplerKeyEditor := TSamplerKeyEditor.Create(Self);
+  FSamplerKeyEditor.Parent := FSamplerEditorWidget;
+  FSamplerKeyEditor.Align := alClient;
+  FSamplerKeyEditor.OnChanged := @SamplerKeyEditorChanged;
+
   FSplitter := TSplitter.Create(Self);
   FSplitter.Parent := Self;
   FSplitter.Align := alBottom;
@@ -1083,6 +1156,14 @@ end;
 procedure TForm1.TrackAddInputClick(Sender: TObject);
 begin
   if Project.AddInputTrack then
+    FArrangementView.Invalidate
+  else
+    ShowMessage(Format('Maximum of %d tracks reached.', [Project.MaxTracks]));
+end;
+
+procedure TForm1.TrackAddSamplerClick(Sender: TObject);
+begin
+  if Project.AddSamplerTrack then
     FArrangementView.Invalidate
   else
     ShowMessage(Format('Maximum of %d tracks reached.', [Project.MaxTracks]));
@@ -1875,6 +1956,8 @@ begin
     Result := Px(WarpSlotLeft) + FWarpWidget.Width + Px(8)
   else if FInstrumentEditorWidget.Visible then
     Result := Px(WarpSlotLeft) + FInstrumentEditorWidget.Width + Px(8)
+  else if FSamplerEditorWidget.Visible then
+    Result := Px(WarpSlotLeft) + FSamplerEditorWidget.Width + Px(8)
   else
     Result := Px(WarpSlotLeft);
 end;
@@ -1896,8 +1979,10 @@ begin
   FTrackWidget.Left := Px(TrackWidgetLeft) - Offset;
   FInstrumentWidget.Left := Px(InstrumentSlotLeft) - Offset;
   FDropHintLabel.Left := Px(InstrumentSlotLeft) - Offset;
+  FSamplerWidget.Left := Px(InstrumentSlotLeft) - Offset;
   FWarpWidget.Left := Px(WarpSlotLeft) - Offset;
   FInstrumentEditorWidget.Left := Px(WarpSlotLeft) - Offset;
+  FSamplerEditorWidget.Left := Px(WarpSlotLeft) - Offset;
 
   EffLeft := EffectsRackBaseLeft - Offset;
   for i := 0 to High(FEffectWidgets) do
@@ -1915,10 +2000,14 @@ begin
   ContentRight := Px(TrackWidgetLeft) + FTrackWidget.Width;
   if FInstrumentWidget.Visible then
     ContentRight := Max(ContentRight, Px(InstrumentSlotLeft) + FInstrumentWidget.Width);
+  if FSamplerWidget.Visible then
+    ContentRight := Max(ContentRight, Px(InstrumentSlotLeft) + FSamplerWidget.Width);
   if FWarpWidget.Visible then
     ContentRight := Max(ContentRight, Px(WarpSlotLeft) + FWarpWidget.Width)
   else if FInstrumentEditorWidget.Visible then
-    ContentRight := Max(ContentRight, Px(WarpSlotLeft) + FInstrumentEditorWidget.Width);
+    ContentRight := Max(ContentRight, Px(WarpSlotLeft) + FInstrumentEditorWidget.Width)
+  else if FSamplerEditorWidget.Visible then
+    ContentRight := Max(ContentRight, Px(WarpSlotLeft) + FSamplerEditorWidget.Width);
   if Length(FEffectWidgets) > 0 then
     ContentRight := Max(ContentRight, EffectsRackBaseLeft + EffectsRackTotalWidth);
   ContentRight := ContentRight + Px(TrackWidgetLeft); { trailing margin }
@@ -1953,8 +2042,13 @@ end;
 procedure TForm1.DevicePanelDragOver(Sender, Source: TObject; X, Y: Integer;
   State: TDragState; var Accept: Boolean);
 begin
-  Accept := (FArrangementView.KeyboardTrack >= 0) and (Source is TControl) and
-    (TControl(Source).Parent is TFileBrowser);
+  { Sampler Tracks are sample-only - no single "load an instrument" slot, so
+    file-browser drops onto the device panel background are only accepted
+    for a normal (non-sampler) track. A sampler key gets its sample from a
+    timeline clip dragged onto its own box instead - see ArrangementViewClipActivate. }
+  Accept := (FArrangementView.KeyboardTrack >= 0) and
+    not Project.TrackIsSampler[FArrangementView.KeyboardTrack] and
+    (Source is TControl) and (TControl(Source).Parent is TFileBrowser);
 end;
 
 procedure TForm1.DevicePanelDragDrop(Sender, Source: TObject; X, Y: Integer);
@@ -1982,6 +2076,10 @@ begin
     Exit;
   FPendingImportTrack := FArrangementView.KeyboardTrack;
   if FPendingImportTrack < 0 then
+    Exit;
+  { Sampler Tracks have no single instrument slot to load a file into - see
+    DevicePanelDragOver's comment. }
+  if Project.TrackIsSampler[FPendingImportTrack] then
     Exit;
 
   SetBackgroundBusy(True, 'Importing...', True);
@@ -2025,10 +2123,35 @@ begin
   AssignSampleAsKeyboardInstrumentFor(FArrangementView.KeyboardTrack, ASampleID);
 end;
 
-procedure TForm1.ArrangementViewClipActivate(Sender: TObject; ASampleID: Integer);
+procedure TForm1.ArrangementViewClipActivate(Sender: TObject; ASampleID: Integer;
+  AOffset: Int64);
+var
+  Track, KeyIdx: Integer;
+  P: TPoint;
 begin
   if FBackgroundBusy then
     Exit;
+
+  Track := FArrangementView.KeyboardTrack;
+  if (Track >= 0) and Project.TrackIsSampler[Track] then
+  begin
+    { dropped/double-clicked onto a Sampler Track: which of the 12 key boxes
+      is the mouse over right now, in FSamplerKeys' own client coordinates -
+      only meaningful for the drag-past-the-bottom-edge gesture (MouseUp),
+      not for a plain double-click, which has no "over a box" position and
+      is simply a no-op here. }
+    P := FSamplerKeys.ScreenToClient(Mouse.CursorPos);
+    if (P.Y < 0) or (P.Y >= FSamplerKeys.Height) then
+      Exit;
+    KeyIdx := FSamplerKeys.XToKeyIndex(P.X);
+    if KeyIdx < 0 then
+      Exit;
+    Project.AssignSamplerSlot(Track, KeyIdx, ASampleID, AOffset);
+    FSamplerKeys.SelectKey(KeyIdx);
+    UpdateDevicePanel;
+    Exit;
+  end;
+
   AssignSampleAsKeyboardInstrument(ASampleID);
 end;
 
@@ -2044,6 +2167,8 @@ begin
     FTrackWidgetLabel.Caption := 'Master';
     FInstrumentWidget.Visible := False;
     FInstrumentEditorWidget.Visible := False;
+    FSamplerWidget.Visible := False;
+    FSamplerEditorWidget.Visible := False;
     FWarpWidget.Visible := False;
     FDropHintLabel.Caption := 'Master bus - no instrument or warp';
     FDropHintLabel.Visible := True;
@@ -2058,6 +2183,8 @@ begin
     FTrackWidgetLabel.Caption := 'No Track';
     FInstrumentWidget.Visible := False;
     FInstrumentEditorWidget.Visible := False;
+    FSamplerWidget.Visible := False;
+    FSamplerEditorWidget.Visible := False;
     FDropHintLabel.Caption := 'Select a track to load an instrument';
     FDropHintLabel.Visible := not FWarpWidget.Visible;
     if FLastEffectsRackTrack <> Track then
@@ -2068,26 +2195,46 @@ begin
 
   FTrackWidgetLabel.Caption := 'Track ' + IntToStr(Track + 1);
 
-  SampleID := Project.TrackInstrument[Track];
-  if SampleID < 0 then
+  if Project.TrackIsSampler[Track] then
   begin
     FInstrumentWidget.Visible := False;
     FInstrumentEditorWidget.Visible := False;
-    FDropHintLabel.Caption := 'Drag a WAV file here to sample it';
-    FDropHintLabel.Visible := not FWarpWidget.Visible;
+    FDropHintLabel.Visible := False;
+
+    FSamplerWidget.Visible := True;
+    FSamplerOctaveLabel.Caption := Format('Octave: %d', [Project.TrackOctave[Track]]);
+    FSamplerKeys.SetTrack(Track);
+
+    FSamplerEditorWidget.Visible := not FWarpWidget.Visible;
+    if FSamplerEditorWidget.Visible then
+      FSamplerKeyEditor.SetKey(Track, FSamplerKeys.SelectedKey);
   end
   else
   begin
-    FDropHintLabel.Visible := False;
-    FInstrumentWidget.Visible := True;
-    FInstrumentNameLabel.Caption := Project.SampleNames[SampleID];
-    FOctaveLabel.Caption := Format('Octave: %d', [Project.TrackOctave[Track]]);
+    FSamplerWidget.Visible := False;
+    FSamplerEditorWidget.Visible := False;
 
-    FInstrumentEditorWidget.Visible := not FWarpWidget.Visible;
-    if FInstrumentEditorWidget.Visible then
+    SampleID := Project.TrackInstrument[Track];
+    if SampleID < 0 then
     begin
-      FInstrumentEditor.SetTrack(Track);
-      RefreshInstrumentWidgetSize;
+      FInstrumentWidget.Visible := False;
+      FInstrumentEditorWidget.Visible := False;
+      FDropHintLabel.Caption := 'Drag a WAV file here to sample it';
+      FDropHintLabel.Visible := not FWarpWidget.Visible;
+    end
+    else
+    begin
+      FDropHintLabel.Visible := False;
+      FInstrumentWidget.Visible := True;
+      FInstrumentNameLabel.Caption := Project.SampleNames[SampleID];
+      FOctaveLabel.Caption := Format('Octave: %d', [Project.TrackOctave[Track]]);
+
+      FInstrumentEditorWidget.Visible := not FWarpWidget.Visible;
+      if FInstrumentEditorWidget.Visible then
+      begin
+        FInstrumentEditor.SetTrack(Track);
+        RefreshInstrumentWidgetSize;
+      end;
     end;
   end;
 
@@ -2158,6 +2305,58 @@ begin
     Exit;
 
   TotalOffset := ASemitoneOffset + Project.TrackOctave[Track] * 12;
+  AudioEngineTriggerNote(Track, @Sample.Data[StartFrame * Sample.Channels],
+    TrimmedCount, Sample.Channels, TotalOffset, Project.TrackVolume[Track]);
+end;
+
+procedure TForm1.SamplerKeySelected(Sender: TObject; AKeyIndex: Integer);
+begin
+  UpdateDevicePanel;
+end;
+
+procedure TForm1.SamplerKeyEditorChanged(Sender: TObject);
+begin
+  FSamplerKeys.Invalidate;
+end;
+
+{ ABoxIndex is 0..11 (one of the 12 keys); AOctaveDelta is how many octaves
+  above the key bank's own resting pitch the pressed physical key represents
+  (0 for the lower QWERTY row, 1+ for the upper row - see FormKeyDown). Each
+  key plays its own assigned sample at native rate at AOctaveDelta=0 and
+  Project.TrackOctave[Track]=0; unlike instrument mode's single sample
+  pitch-shifted per key, here only the *octave* (never a smaller semitone
+  offset) is applied, real-time vari-speed via the same engine path. }
+procedure TForm1.TriggerSamplerKeyNote(ABoxIndex, AOctaveDelta: Integer);
+var
+  Track, SampleID, TotalOffset: Integer;
+  Sample: TSample;
+  Slot: Project.TSamplerSlot;
+  StartFrame, EndFrame, TrimmedCount: Int64;
+begin
+  Track := FArrangementView.KeyboardTrack;
+  if (Track < 0) or not Project.TrackIsSampler[Track] then
+    Exit;
+  if (ABoxIndex < 0) or (ABoxIndex >= Project.SamplerKeysPerOctave) then
+    Exit;
+
+  Slot := Project.TrackSamplerSlots[Track][ABoxIndex];
+  SampleID := Slot.SampleID;
+  if SampleID < 0 then
+    Exit; { empty key = silent }
+
+  Sample := Project.SamplePool[SampleID];
+
+  StartFrame := Slot.StartFrame;
+  EndFrame := Slot.EndFrame;
+  if StartFrame < 0 then
+    StartFrame := 0;
+  if EndFrame > Sample.FrameCount then
+    EndFrame := Sample.FrameCount;
+  TrimmedCount := EndFrame - StartFrame;
+  if TrimmedCount <= 0 then
+    Exit;
+
+  TotalOffset := (Project.TrackOctave[Track] + AOctaveDelta) * 12;
   AudioEngineTriggerNote(Track, @Sample.Data[StartFrame * Sample.Channels],
     TrimmedCount, Sample.Channels, TotalOffset, Project.TrackVolume[Track]);
 end;
@@ -2240,7 +2439,7 @@ end;
 
 procedure TForm1.FormKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
 var
-  Offset: Integer;
+  Offset, Track: Integer;
 begin
   if ActiveControl is TCustomEdit then
     Exit;
@@ -2269,7 +2468,17 @@ begin
 
   if KeyToSemitoneOffset(Key, Offset) then
   begin
-    TriggerKeyboardNote(Offset);
+    Track := FArrangementView.KeyboardTrack;
+    if (Track >= 0) and Project.TrackIsSampler[Track] then
+      { Offset spans two-plus octaves of KeyToSemitoneOffset's tracker-style
+        layout (lower row 0..11, upper row 12..28+); a Sampler Track has
+        only 12 boxes, so fold that back to a box index plus how many whole
+        octaves above the bank's own pitch the key represents - see
+        TriggerSamplerKeyNote's comment. }
+      TriggerSamplerKeyNote(Offset mod Project.SamplerKeysPerOctave,
+        Offset div Project.SamplerKeysPerOctave)
+    else
+      TriggerKeyboardNote(Offset);
     Key := 0;
   end;
 end;

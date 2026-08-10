@@ -373,7 +373,7 @@ end;
 
 function SaveProject(const APath: string): Boolean;
 var
-  Dir, IniPath, Section, EmbeddedName, TmpPath: string;
+  Dir, IniPath, Section, Prefix, EmbeddedName, TmpPath: string;
   Ini: TIniFile;
   t, i, e: Integer;
 begin
@@ -453,6 +453,17 @@ begin
       Ini.WriteInteger(Section, 'SwingDivision', Project.TrackSwingDivision[t]);
       Ini.WriteBool(Section, 'IsInput', Project.TrackIsInput[t]);
       Ini.WriteBool(Section, 'MonitorEnabled', Project.TrackMonitorEnabled[t]);
+
+      Ini.WriteBool(Section, 'IsSampler', Project.TrackIsSampler[t]);
+      if Project.TrackIsSampler[t] then
+        for i := 0 to Project.SamplerKeysPerOctave - 1 do
+        begin
+          Prefix := 'SamplerSlot' + IntToStr(i) + '.';
+          Ini.WriteInteger(Section, Prefix + 'SampleID',
+            Project.TrackSamplerSlots[t][i].SampleID);
+          Ini.WriteInt64(Section, Prefix + 'Start', Project.TrackSamplerSlots[t][i].StartFrame);
+          Ini.WriteInt64(Section, Prefix + 'End', Project.TrackSamplerSlots[t][i].EndFrame);
+        end;
 
       Ini.WriteInteger(Section, 'EffectCount', Project.TrackEffectCount[t]);
       for e := 0 to Project.TrackEffectCount[t] - 1 do
@@ -697,6 +708,22 @@ begin
       Project.TrackSwingDivision[t] := Ini.ReadInteger(Section, 'SwingDivision', 16);
       Project.TrackIsInput[t] := Ini.ReadBool(Section, 'IsInput', False);
       Project.TrackMonitorEnabled[t] := Ini.ReadBool(Section, 'MonitorEnabled', False);
+
+      Project.TrackIsSampler[t] := Ini.ReadBool(Section, 'IsSampler', False);
+      if Project.TrackIsSampler[t] then
+        for i := 0 to Project.SamplerKeysPerOctave - 1 do
+        begin
+          Prefix := 'SamplerSlot' + IntToStr(i) + '.';
+          Project.TrackSamplerSlots[t][i].SampleID :=
+            Ini.ReadInteger(Section, Prefix + 'SampleID', -1);
+          Project.TrackSamplerSlots[t][i].StartFrame :=
+            Ini.ReadInt64(Section, Prefix + 'Start', 0);
+          Project.TrackSamplerSlots[t][i].EndFrame :=
+            Ini.ReadInt64(Section, Prefix + 'End', 0);
+          if (Project.TrackSamplerSlots[t][i].SampleID < 0) or
+            (Project.TrackSamplerSlots[t][i].SampleID > High(Project.SamplePool)) then
+            Project.TrackSamplerSlots[t][i].SampleID := -1;
+        end;
 
       Project.TrackInstrumentStart[t] := Ini.ReadInt64(Section, 'InstrumentStart', 0);
       if (Project.TrackInstrument[t] >= 0) and
