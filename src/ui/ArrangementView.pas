@@ -68,6 +68,23 @@ type
       MuteButtonSize = 16;
       MuteButtonMargin = 4;
       MonitorButtonSize = 16;
+      { per-track send strip, on its own line under the volume fader: an
+        S1/S2 enable button and a level slider for each }
+      SendRowY = 60;
+      SendButtonWidth = 20;
+      SendButtonHeight = 14;
+      SendSliderWidth = 44;
+      SendSliderRadius = 4;
+      SendSliderGrabPixels = 8;
+      SendGroupWidth = 76; { button + gap + slider, per send }
+      SendLeftMargin = 6;
+      { The two send-bus rows are PINNED to the bottom of the header column
+        rather than living in the scrolling row list the way the Master row
+        does - they're a permanent destination you reach for while looking
+        at any part of the arrangement, so scrolling them off screen would
+        defeat them. They occupy the header column only and never extend
+        left into the timeline. }
+      SendRowHeight = 40;
     var
       FOnFileDrop: TFileDropEvent;
       FOnSeek: TSeekEvent;
@@ -94,6 +111,12 @@ type
       FLoopStart: Int64;
       FLoopEnd: Int64;
       FDraggingVolumeTrack: Integer;
+      { which per-track send level is being dragged, -1 for none; the send
+        index of that drag lives alongside it }
+      FDraggingSendTrack: Integer;
+      FDraggingSendIndex: Integer;
+      { which pinned send-bus row's return level is being dragged, -1 none }
+      FDraggingReturnSend: Integer;
       FGridDivision: Integer; { divisions per bar, e.g. 16 = 1/16th notes }
       FRangeSelectActive: Boolean;
       FRangeDragStartFrame: Int64;
@@ -127,6 +150,20 @@ type
     function HitTestVolumeSlider(ATrackIndex, Y: Integer): Boolean;
     function MuteButtonRect(ATrackIndex: Integer): TRect;
     function MonitorButtonRect(ATrackIndex: Integer): TRect;
+    function SendButtonRect(ATrackIndex, ASendIndex: Integer): TRect;
+    function SendSliderLeft(ASendIndex: Integer): Integer;
+    function SendKnobX(ATrackIndex, ASendIndex: Integer): Integer;
+    function XToSendLevel(ASendIndex, X: Integer): Single;
+    function HitTestSendSlider(ATrackIndex, ASendIndex, X, Y: Integer): Boolean;
+    function SendRowTop(ASendIndex: Integer): Integer;
+    function SendRowMuteRect(ASendIndex: Integer): TRect;
+    function SendRowPreRect(ASendIndex: Integer): TRect;
+    function ReturnSliderLeft: Integer;
+    function ReturnKnobX(ASendIndex: Integer): Integer;
+    function XToReturnLevel(X: Integer): Single;
+    function HitTestReturnSlider(ASendIndex, X, Y: Integer): Boolean;
+    function SendRowIndexAtY(Y: Integer): Integer;
+    procedure DrawSendRows;
     function ClipOverlapsRange(const AClip: TClip; ARangeStart, ARangeEnd: Int64): Boolean;
     procedure BuildGroupDragItems(ARangeStart, ARangeEnd: Int64; AT1, AT2: Integer);
     procedure SelectClip(ATrack, AClip: Integer);
@@ -214,6 +251,9 @@ begin
   FLoopStart := -1;
   FLoopEnd := -1;
   FDraggingVolumeTrack := -1;
+  FDraggingSendTrack := -1;
+  FDraggingSendIndex := -1;
+  FDraggingReturnSend := -1;
   FGridDivision := 16;
   FRangeSelectActive := False;
   FRangeStartTrack := -1;
@@ -489,6 +529,140 @@ begin
     RightEdge + MonitorButtonSize, y + MuteButtonMargin + MonitorButtonSize);
 end;
 
+{ --- per-track send strip -------------------------------------------------
+  Each send gets a fixed-width group of (enable button, level slider) laid
+  out left to right on one line under the volume fader. The button is the
+  "is this track in the room" switch; the slider is how much of it. }
+
+function TArrangementView.SendButtonRect(ATrackIndex, ASendIndex: Integer): TRect;
+var
+  y, x: Integer;
+begin
+  y := RowTop(ATrackIndex) + SendRowY;
+  x := HeaderLeft + SendLeftMargin + ASendIndex * SendGroupWidth;
+  Result := Rect(x, y - SendButtonHeight div 2, x + SendButtonWidth,
+    y - SendButtonHeight div 2 + SendButtonHeight);
+end;
+
+function TArrangementView.SendSliderLeft(ASendIndex: Integer): Integer;
+begin
+  Result := HeaderLeft + SendLeftMargin + ASendIndex * SendGroupWidth +
+    SendButtonWidth + 6;
+end;
+
+function TArrangementView.SendKnobX(ATrackIndex, ASendIndex: Integer): Integer;
+var
+  Value: Single;
+begin
+  Value := Project.TrackSendLevel[ATrackIndex][ASendIndex];
+  if Value < 0 then Value := 0;
+  if Value > 1 then Value := 1;
+  Result := SendSliderLeft(ASendIndex) + Round(Value * SendSliderWidth);
+end;
+
+function TArrangementView.XToSendLevel(ASendIndex, X: Integer): Single;
+var
+  Frac: Single;
+begin
+  Frac := (X - SendSliderLeft(ASendIndex)) / SendSliderWidth;
+  if Frac < 0 then Frac := 0;
+  if Frac > 1 then Frac := 1;
+  Result := Frac;
+end;
+
+function TArrangementView.HitTestSendSlider(ATrackIndex, ASendIndex, X, Y: Integer): Boolean;
+var
+  SliderY, SliderX: Integer;
+begin
+  SliderY := RowTop(ATrackIndex) + SendRowY;
+  SliderX := SendSliderLeft(ASendIndex);
+  Result := (Abs(Y - SliderY) <= SendSliderGrabPixels) and
+    (X >= SliderX - SendSliderRadius) and
+    (X <= SliderX + SendSliderWidth + SendSliderRadius);
+end;
+
+{ --- pinned send-bus rows -------------------------------------------------
+  Stacked at the very bottom of the header column, S1 above S2, drawn after
+  (and therefore over) the scrolling track headers. }
+
+function TArrangementView.SendRowTop(ASendIndex: Integer): Integer;
+begin
+  Result := ContentHeight - (Project.SendCount - ASendIndex) * SendRowHeight;
+end;
+
+function TArrangementView.SendRowIndexAtY(Y: Integer): Integer;
+var
+  s: Integer;
+begin
+  Result := -1;
+  for s := 0 to Project.SendCount - 1 do
+    if (Y >= SendRowTop(s)) and (Y < SendRowTop(s) + SendRowHeight) then
+      Exit(s);
+end;
+
+function TArrangementView.SendRowMuteRect(ASendIndex: Integer): TRect;
+var
+  y: Integer;
+begin
+  y := SendRowTop(ASendIndex);
+  Result := Rect(Width - MuteButtonSize - MuteButtonMargin, y + MuteButtonMargin,
+    Width - MuteButtonMargin, y + MuteButtonMargin + MuteButtonSize);
+end;
+
+{ PRE/POST switch, immediately left of the bus mute - the one control on
+  these rows that isn't in Ableton and is on every 90s desk. }
+function TArrangementView.SendRowPreRect(ASendIndex: Integer): TRect;
+var
+  y, RightEdge: Integer;
+begin
+  y := SendRowTop(ASendIndex);
+  RightEdge := Width - MuteButtonSize - MuteButtonMargin * 2 - 34;
+  Result := Rect(RightEdge, y + MuteButtonMargin, RightEdge + 34,
+    y + MuteButtonMargin + MuteButtonSize);
+end;
+
+function TArrangementView.ReturnSliderLeft: Integer;
+begin
+  Result := HeaderLeft + 30;
+end;
+
+function TArrangementView.ReturnKnobX(ASendIndex: Integer): Integer;
+var
+  Value: Single;
+  Range: Integer;
+begin
+  Range := (Width - VolumeSliderMargin) - ReturnSliderLeft;
+  if Range < 1 then
+    Range := 1;
+  Value := Project.SendReturnLevel[ASendIndex] / TrackVolumeMax;
+  if Value < 0 then Value := 0;
+  if Value > 1 then Value := 1;
+  Result := ReturnSliderLeft + Round(Value * Range);
+end;
+
+function TArrangementView.XToReturnLevel(X: Integer): Single;
+var
+  Range: Integer;
+  Frac: Single;
+begin
+  Range := (Width - VolumeSliderMargin) - ReturnSliderLeft;
+  if Range <= 0 then
+    Exit(1.0);
+  Frac := (X - ReturnSliderLeft) / Range;
+  if Frac < 0 then Frac := 0;
+  if Frac > 1 then Frac := 1;
+  Result := Frac * TrackVolumeMax;
+end;
+
+function TArrangementView.HitTestReturnSlider(ASendIndex, X, Y: Integer): Boolean;
+var
+  SliderY: Integer;
+begin
+  SliderY := SendRowTop(ASendIndex) + SendRowHeight - 12;
+  Result := (Abs(Y - SliderY) <= VolumeSliderGrabPixels) and
+    (X >= ReturnSliderLeft - VolumeSliderRadius);
+end;
+
 procedure TArrangementView.SelectClip(ATrack, AClip: Integer);
 begin
   if (ATrack = FSelectedTrack) and (AClip = FSelectedClip) then
@@ -523,7 +697,11 @@ begin
     Items[i].Offset := Clip.Offset;
     Items[i].Length := Clip.Length;
     Items[i].Position := Clip.Position;
-    Items[i].Gain := Clip.Gain * Project.TrackVolume[ATrackIndex];
+    { clip gain only - the track fader is applied by AudioEngine.FillBlock
+      now, not baked in here, so there is a point in the chain a pre-fader
+      send can be tapped from (and so a volume drag no longer has to push
+      the whole clip array through the command ring to be heard) }
+    Items[i].Gain := Clip.Gain;
     Items[i].WarpMode := Clip.WarpMode;
     Items[i].DetuneSemitones := Clip.PitchSemitones;
 
@@ -762,8 +940,8 @@ end;
 
 procedure TArrangementView.DrawTrackHeaders;
 var
-  i, y, SliderY, kx: Integer;
-  MuteRect, MonitorRect: TRect;
+  i, y, s, SliderY, kx: Integer;
+  MuteRect, MonitorRect, SendRect: TRect;
 begin
   for i := 0 to Project.TrackCount - 1 do
   begin
@@ -820,6 +998,44 @@ begin
     Canvas.Pen.Color := clWindowFrame;
     Canvas.Ellipse(kx - VolumeSliderRadius, SliderY - VolumeSliderRadius,
       kx + VolumeSliderRadius, SliderY + VolumeSliderRadius);
+
+    { send strip: S1/S2 enable buttons, each with its own level slider.
+      The buttons darken when on rather than lighting up, matching the
+      clip warp-mode buttons elsewhere in the UI. }
+    for s := 0 to Project.SendCount - 1 do
+    begin
+      SendRect := SendButtonRect(i, s);
+      if Project.TrackSendEnabled[i][s] then
+        Canvas.Brush.Color := clBtnShadow
+      else
+        Canvas.Brush.Color := clBtnFace;
+      Canvas.Pen.Color := clBlack;
+      Canvas.Rectangle(SendRect);
+      Canvas.Brush.Style := bsClear;
+      if Project.TrackSendEnabled[i][s] then
+        Canvas.Font.Color := clWhite;
+      Canvas.TextOut(SendRect.Left + 3, SendRect.Top - 1, 'S' + IntToStr(s + 1));
+      Canvas.Font.Color := clWindowText;
+      Canvas.Brush.Style := bsSolid;
+
+      { the level slider stays visible but greys out while the send is off,
+        so the amount it's armed at is still readable at a glance }
+      SliderY := y + SendRowY;
+      if Project.TrackSendEnabled[i][s] then
+        Canvas.Pen.Color := clBtnShadow
+      else
+        Canvas.Pen.Color := clBtnFace;
+      Canvas.Line(SendSliderLeft(s), SliderY,
+        SendSliderLeft(s) + SendSliderWidth, SliderY);
+      kx := SendKnobX(i, s);
+      if Project.TrackSendEnabled[i][s] then
+        Canvas.Brush.Color := clHighlight
+      else
+        Canvas.Brush.Color := clBtnFace;
+      Canvas.Pen.Color := clWindowFrame;
+      Canvas.Ellipse(kx - SendSliderRadius, SliderY - SendSliderRadius,
+        kx + SendSliderRadius, SliderY + SendSliderRadius);
+    end;
   end;
 
   { master bus row, always the last row, below every real track - no clips,
@@ -839,6 +1055,82 @@ begin
     Canvas.TextOut(HeaderLeft + 8, y + 8, 'Master');
     Canvas.Font.Style := [];
     Canvas.Brush.Style := bsSolid;
+  end;
+end;
+
+{ The two send-bus rows, pinned to the bottom of the header column. Drawn
+  after the track headers so they sit over whichever rows happen to have
+  scrolled underneath, and confined to X >= HeaderLeft so they never reach
+  into the timeline. }
+procedure TArrangementView.DrawSendRows;
+var
+  s, y, kx, SliderY: Integer;
+  R: TRect;
+begin
+  for s := 0 to Project.SendCount - 1 do
+  begin
+    y := SendRowTop(s);
+    if y < RulerHeight then
+      Continue;
+
+    if FKeyboardTrack = Project.SendIndexToBus(s) then
+      Canvas.Brush.Color := clGray
+    else
+      Canvas.Brush.Color := clBtnFace;
+    Canvas.FillRect(Rect(HeaderLeft, y, Width, y + SendRowHeight));
+    Canvas.Pen.Color := clBtnShadow;
+    Canvas.Rectangle(HeaderLeft, y, Width, y + SendRowHeight);
+
+    Canvas.Brush.Style := bsClear;
+    Canvas.Font.Style := [fsBold];
+    Canvas.TextOut(HeaderLeft + 6, y + 3, 'S' + IntToStr(s + 1));
+    Canvas.Font.Style := [];
+    { effect count, so it's obvious at a glance whether a bus has anything
+      on it without having to select it }
+    Canvas.TextOut(HeaderLeft + 30, y + 3,
+      Format('%d fx', [Project.SendEffectCount[s]]));
+    Canvas.Brush.Style := bsSolid;
+
+    { bus mute - same lime/red language as a track's own mute }
+    R := SendRowMuteRect(s);
+    if Project.SendEnabled[s] then
+      Canvas.Brush.Color := clLime
+    else
+      Canvas.Brush.Color := clRed;
+    Canvas.Pen.Color := clBlack;
+    Canvas.Rectangle(R);
+
+    { PRE/POST fader-tap switch }
+    R := SendRowPreRect(s);
+    if Project.SendPreFader[s] then
+      Canvas.Brush.Color := clBtnShadow
+    else
+      Canvas.Brush.Color := clBtnFace;
+    Canvas.Pen.Color := clBlack;
+    Canvas.Rectangle(R);
+    Canvas.Brush.Style := bsClear;
+    if Project.SendPreFader[s] then
+    begin
+      Canvas.Font.Color := clWhite;
+      Canvas.TextOut(R.Left + 5, R.Top - 1, 'PRE');
+    end
+    else
+      Canvas.TextOut(R.Left + 3, R.Top - 1, 'POST');
+    Canvas.Font.Color := clWindowText;
+    Canvas.Brush.Style := bsSolid;
+
+    { return level - how much of the processed bus comes back to master }
+    SliderY := y + SendRowHeight - 12;
+    Canvas.Brush.Style := bsClear;
+    Canvas.TextOut(HeaderLeft + 4, SliderY - 8, 'Rtn');
+    Canvas.Brush.Style := bsSolid;
+    Canvas.Pen.Color := clBtnShadow;
+    Canvas.Line(ReturnSliderLeft, SliderY, Width - VolumeSliderMargin, SliderY);
+    kx := ReturnKnobX(s);
+    Canvas.Brush.Color := clHighlight;
+    Canvas.Pen.Color := clWindowFrame;
+    Canvas.Ellipse(kx - VolumeSliderRadius, SliderY - VolumeSliderRadius,
+      kx + VolumeSliderRadius, SliderY + VolumeSliderRadius);
   end;
 end;
 
@@ -987,6 +1279,9 @@ begin
   DrawRuler;
   DrawLoopMarkers;
   DrawTrackHeaders;
+  { last, so the pinned send rows sit over whichever track headers have
+    scrolled under them }
+  DrawSendRows;
 end;
 
 procedure TArrangementView.Resize;
@@ -1102,7 +1397,7 @@ end;
 procedure TArrangementView.MouseDown(Button: TMouseButton; Shift: TShiftState;
   X, Y: Integer);
 var
-  TrackIndex, ClipIndex: Integer;
+  TrackIndex, ClipIndex, SendIndex: Integer;
   Mode: TDragMode;
   Frame: Int64;
   t1, t2, g: Integer;
@@ -1152,12 +1447,52 @@ begin
   if Button <> mbLeft then
     Exit;
 
+  { pinned send-bus rows first - they're drawn over the scrolling track
+    headers, so they have to be hit-tested over them too }
+  if X >= HeaderLeft then
+  begin
+    SendIndex := SendRowIndexAtY(Y);
+    if SendIndex >= 0 then
+    begin
+      if PtInRect(SendRowMuteRect(SendIndex), Point(X, Y)) then
+      begin
+        Project.SendEnabled[SendIndex] := not Project.SendEnabled[SendIndex];
+        Invalidate;
+        Exit;
+      end;
+      if PtInRect(SendRowPreRect(SendIndex), Point(X, Y)) then
+      begin
+        Project.SendPreFader[SendIndex] := not Project.SendPreFader[SendIndex];
+        Invalidate;
+        Exit;
+      end;
+      if HitTestReturnSlider(SendIndex, X, Y) then
+      begin
+        FDraggingReturnSend := SendIndex;
+        Project.SendReturnLevel[SendIndex] := XToReturnLevel(X);
+        Invalidate;
+        Exit;
+      end;
+      { anywhere else on the row selects the bus, so the effects rack below
+        switches to that send's chain - same gesture as the Master row }
+      SelectClip(-1, -1);
+      if FKeyboardTrack <> Project.SendIndexToBus(SendIndex) then
+      begin
+        FKeyboardTrack := Project.SendIndexToBus(SendIndex);
+        if Assigned(FOnKeyboardTrackChanged) then
+          FOnKeyboardTrackChanged(Self);
+      end;
+      Invalidate;
+      Exit;
+    end;
+  end;
+
   if (X >= HeaderLeft) and (Y >= MasterRowTop) and (Y < MasterRowTop + TrackHeight) then
   begin
     SelectClip(-1, -1);
-    if FKeyboardTrack <> -2 then
+    if FKeyboardTrack <> Project.BusMaster then
     begin
-      FKeyboardTrack := -2;
+      FKeyboardTrack := Project.BusMaster;
       if Assigned(FOnKeyboardTrackChanged) then
         FOnKeyboardTrackChanged(Self);
     end;
@@ -1166,6 +1501,26 @@ begin
   end;
 
   TrackIndex := TrackIndexAtY(Y);
+
+  if (TrackIndex >= 0) and (X >= HeaderLeft) then
+    for SendIndex := 0 to Project.SendCount - 1 do
+    begin
+      if PtInRect(SendButtonRect(TrackIndex, SendIndex), Point(X, Y)) then
+      begin
+        Project.TrackSendEnabled[TrackIndex][SendIndex] :=
+          not Project.TrackSendEnabled[TrackIndex][SendIndex];
+        Invalidate;
+        Exit;
+      end;
+      if HitTestSendSlider(TrackIndex, SendIndex, X, Y) then
+      begin
+        FDraggingSendTrack := TrackIndex;
+        FDraggingSendIndex := SendIndex;
+        Project.TrackSendLevel[TrackIndex][SendIndex] := XToSendLevel(SendIndex, X);
+        Invalidate;
+        Exit;
+      end;
+    end;
 
   if (TrackIndex >= 0) and (X >= HeaderLeft) and
     PtInRect(MuteButtonRect(TrackIndex), Point(X, Y)) then
@@ -1186,8 +1541,10 @@ begin
   if (TrackIndex >= 0) and (X >= HeaderLeft) and HitTestVolumeSlider(TrackIndex, Y) then
   begin
     FDraggingVolumeTrack := TrackIndex;
+    { no PushTrackToEngine: FillBlock reads Project.TrackVolume directly
+      now, so dragging the fader no longer has to rebuild and re-push the
+      whole clip array through the command ring on every mouse move }
     Project.TrackVolume[TrackIndex] := XToVolume(X);
-    PushTrackToEngine(TrackIndex);
     Invalidate;
     Exit;
   end;
@@ -1321,7 +1678,21 @@ begin
   if FDraggingVolumeTrack >= 0 then
   begin
     Project.TrackVolume[FDraggingVolumeTrack] := XToVolume(X);
-    PushTrackToEngine(FDraggingVolumeTrack);
+    Invalidate;
+    Exit;
+  end;
+
+  if FDraggingSendTrack >= 0 then
+  begin
+    Project.TrackSendLevel[FDraggingSendTrack][FDraggingSendIndex] :=
+      XToSendLevel(FDraggingSendIndex, X);
+    Invalidate;
+    Exit;
+  end;
+
+  if FDraggingReturnSend >= 0 then
+  begin
+    Project.SendReturnLevel[FDraggingReturnSend] := XToReturnLevel(X);
     Invalidate;
     Exit;
   end;
@@ -1472,6 +1843,8 @@ begin
   inherited MouseUp(Button, Shift, X, Y);
 
   FDraggingVolumeTrack := -1;
+  FDraggingSendTrack := -1;
+  FDraggingReturnSend := -1;
 
   if not FDragActive then
     Exit;

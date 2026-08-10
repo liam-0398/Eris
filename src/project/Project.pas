@@ -13,6 +13,22 @@ const
   DefaultTempoBPM = 160.0;
   SamplerKeysPerOctave = 12;
 
+  { Send buses. Two of them, fixed - the point of a send is that one
+    expensive effect chain serves many tracks, and two is what a 90s desk
+    with a pair of aux buses gave you. Any track can feed either. }
+  SendCount = 2;
+
+  { Effect-chain targets. Every "which chain am I editing / adding to"
+    integer in this program uses this convention: >= 0 is a track index,
+    and these negatives are the buses. Predates the sends (the master bus
+    was already -2 by convention, spelled as a bare literal); named here so
+    the send rows could join it without adding a second scheme. }
+  BusMaster = -2;
+  BusSendFirst = -3;
+  { send bus index S (0-based) is target BusSendFirst - S, so S1 = -3 and
+    S2 = -4 - see BusToSendIndex/SendIndexToBus }
+  BusSendLast = BusSendFirst - (SendCount - 1);
+
 type
   TTrack = record
     Clips: TClipArray;
@@ -113,6 +129,45 @@ var
   MasterEffects: array[0..Effects.MaxEffectsPerTrack - 1] of Effects.TEffect;
   MasterEffectCount: Integer;
 
+  { --- Send buses (S1/S2) -------------------------------------------------
+    A send takes a copy of a track's signal, sums it with copies from every
+    other track feeding the same send, runs that ONE sum through ONE effect
+    chain, and returns the result to the master bus. Two things come out of
+    that which per-track inserts can't give you:
+
+    - every track on the send sits in the same space. A reverb fed from six
+      tracks is one room they are all in, not six rooms that happen to have
+      the same settings. For atmospheric jungle that IS the production
+      technique - the break, the pads and the stabs sharing one long dark
+      hall is what glues the record together.
+    - it costs one reverb instead of six. A QuadraVerb Reverb per track is
+      a real CPU bill; a QuadraVerb Reverb on a send is paid once however
+      many tracks feed it.
+
+    TrackSendLevel is how much of that track goes to the bus (0..1).
+    TrackSendEnabled is the S1/S2 button on the track header - the level
+    slider is ignored entirely while it's off, so a send can be armed at a
+    useful level and then switched in and out without losing the setting. }
+  TrackSendEnabled: array[0..MaxTracks - 1, 0..SendCount - 1] of Boolean;
+  TrackSendLevel: array[0..MaxTracks - 1, 0..SendCount - 1] of Single;
+
+  SendEffects: array[0..SendCount - 1, 0..Effects.MaxEffectsPerTrack - 1] of
+    Effects.TEffect;
+  SendEffectCount: array[0..SendCount - 1] of Integer;
+  { how much of the processed bus comes back into the master, same 0..2
+    linear range as TrackVolume so the two feel the same to drag }
+  SendReturnLevel: array[0..SendCount - 1] of Single;
+  { bus mute. Off means the bus is not mixed in AND its chain is skipped
+    entirely, so muting a send you aren't using also gets the CPU back. }
+  SendEnabled: array[0..SendCount - 1] of Boolean;
+  { Pre-fader takes the tap before the track's own volume fader, post-fader
+    after it. Post is the normal choice and the default. Pre is here because
+    it's the one that matters for this music: with a pre-fader send you can
+    pull a track's fader all the way down and its reverb tail keeps ringing
+    on the bus, which is how you get a break to dissolve into the wash
+    instead of just stopping. }
+  SendPreFader: array[0..SendCount - 1] of Boolean;
+
 function AddSampleToPool(const ASample: TSample; const AName, APath: string): Integer;
 procedure CommitClipToTrack(ATrackIndex: Integer; const ANewClip: TClip);
 procedure ReplaceTrackClips(ATrackIndex: Integer; const AClips: TClipArray);
@@ -122,6 +177,14 @@ function AddTrackEffect(ATrackIndex, AKind: Integer): Boolean;
 procedure RemoveTrackEffect(ATrackIndex, AEffectIndex: Integer);
 function AddMasterEffect(AKind: Integer): Boolean;
 procedure RemoveMasterEffect(AEffectIndex: Integer);
+function AddSendEffect(ASendIndex, AKind: Integer): Boolean;
+procedure RemoveSendEffect(ASendIndex, AEffectIndex: Integer);
+
+{ Bus target <-> send index. BusToSendIndex returns -1 for anything that
+  isn't a send target, so callers can use it as the "is this a send?" test
+  as well as the conversion. }
+function BusToSendIndex(ATarget: Integer): Integer;
+function SendIndexToBus(ASendIndex: Integer): Integer;
 
 procedure PushUndoSnapshot(ATrackIndex: Integer);
 function PopUndo(out ATrackIndex: Integer): Boolean;
@@ -164,6 +227,28 @@ begin
     TrackSamplerSlots[ATrackIndex][k].SampleID := -1;
     TrackSamplerSlots[ATrackIndex][k].StartFrame := 0;
     TrackSamplerSlots[ATrackIndex][k].EndFrame := 0;
+  end;
+end;
+
+procedure InitSendBuses;
+var
+  s, i: Integer;
+begin
+  for s := 0 to SendCount - 1 do
+  begin
+    SendEffectCount[s] := 0;
+    { unity return and unmuted, so dropping an effect on a send and turning
+      one track's S button on is audible immediately with nothing else set }
+    SendReturnLevel[s] := 1.0;
+    SendEnabled[s] := True;
+    SendPreFader[s] := False;
+    for i := 0 to MaxTracks - 1 do
+    begin
+      TrackSendEnabled[i][s] := False;
+      { armed at a useful amount so the button alone does something - the
+        slider is a trim on top, not a gate you have to find first }
+      TrackSendLevel[i][s] := 0.5;
+    end;
   end;
 end;
 
@@ -241,6 +326,47 @@ begin
     MasterEffects[j] := MasterEffects[j + 1];
   Dec(MasterEffectCount);
   MasterEffects[MasterEffectCount].Kind := Effects.ekNone;
+end;
+
+function BusToSendIndex(ATarget: Integer): Integer;
+begin
+  if (ATarget <= BusSendFirst) and (ATarget >= BusSendLast) then
+    Result := BusSendFirst - ATarget
+  else
+    Result := -1;
+end;
+
+function SendIndexToBus(ASendIndex: Integer): Integer;
+begin
+  Result := BusSendFirst - ASendIndex;
+end;
+
+function AddSendEffect(ASendIndex, AKind: Integer): Boolean;
+var
+  Slot: Integer;
+begin
+  if (ASendIndex < 0) or (ASendIndex >= SendCount) then
+    Exit(False);
+  if SendEffectCount[ASendIndex] >= Effects.MaxEffectsPerTrack then
+    Exit(False);
+  Slot := SendEffectCount[ASendIndex];
+  Effects.DefaultEffect(AKind, SendEffects[ASendIndex][Slot]);
+  Inc(SendEffectCount[ASendIndex]);
+  Result := True;
+end;
+
+procedure RemoveSendEffect(ASendIndex, AEffectIndex: Integer);
+var
+  j: Integer;
+begin
+  if (ASendIndex < 0) or (ASendIndex >= SendCount) then
+    Exit;
+  if (AEffectIndex < 0) or (AEffectIndex >= SendEffectCount[ASendIndex]) then
+    Exit;
+  for j := AEffectIndex to SendEffectCount[ASendIndex] - 2 do
+    SendEffects[ASendIndex][j] := SendEffects[ASendIndex][j + 1];
+  Dec(SendEffectCount[ASendIndex]);
+  SendEffects[ASendIndex][SendEffectCount[ASendIndex]].Kind := Effects.ekNone;
 end;
 
 function AddSampleToPool(const ASample: TSample; const AName, APath: string): Integer;
@@ -409,6 +535,8 @@ begin
     TrackIsSampler[t] := TrackIsSampler[t + 1];
     Move(TrackSamplerSlots[t + 1, 0], TrackSamplerSlots[t, 0], SizeOf(TrackSamplerSlots[t]));
     Move(TrackEffects[t + 1, 0], TrackEffects[t, 0], SizeOf(TrackEffects[t]));
+    Move(TrackSendEnabled[t + 1, 0], TrackSendEnabled[t, 0], SizeOf(TrackSendEnabled[t]));
+    Move(TrackSendLevel[t + 1, 0], TrackSendLevel[t, 0], SizeOf(TrackSendLevel[t]));
   end;
 
   Dec(TrackCount);
@@ -436,6 +564,7 @@ begin
   TrackCount := DefaultTrackCount;
   NextTrackID := DefaultTrackCount + 1;
   InitTrackInstruments;
+  InitSendBuses;
   MasterEffectCount := 0;
   TempoBPM := DefaultTempoBPM;
 end;
@@ -487,5 +616,6 @@ end;
 
 initialization
   InitTrackInstruments;
+  InitSendBuses;
 
 end.

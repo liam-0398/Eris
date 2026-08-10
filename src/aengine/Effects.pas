@@ -5,7 +5,7 @@ unit Effects;
 interface
 
 uses
-  Math, BiquadFilters;
+  Math, BiquadFilters, Quadraverb;
 
 const
   MaxEffectsPerTrack = 4;
@@ -23,6 +23,10 @@ const
   ekDrowning = 9;
   ekHighpass = 10;
   ekBandpass = 11;
+  ekTuner = 12;
+  ekOverdrive = 13;
+  ekQuadraverbReverb = 14;
+  ekQuadraverbDelay = 15;
 
   { classic vintage-style chorus (think Ableton Live 1/2's Chorus, or a
     tracker's chorus command) - just a short modulated delay line per
@@ -77,6 +81,75 @@ const
     expressed relative to a 44.1kHz reference like the tunings above }
   ReverbStereoSpreadSamples44k = 23;
 
+  { "Tuner" (Utility category): a completely passive pitch readout - it never
+    touches the audio, it only listens to whatever reaches its slot in the
+    chain and reports the note being played.
+
+    Detection runs on a heavily decimated mono copy of the signal. A tuner
+    needs nothing above ~1.5kHz, and the cost of the difference function in
+    TunerDetect is quadratic in the window length, so decimating to ~8kHz
+    first is what makes this cheap enough to sit in a realtime chain at all.
+    The algorithm is YIN's cumulative-mean-normalised difference function
+    rather than plain autocorrelation: plain autocorrelation octave-errors
+    badly on anything with a strong second harmonic, which is most of what
+    ends up on a DAW track. }
+  TunerTargetRateHz = 8000;
+  TunerWindowSamples = 1024; { ~116ms of analysis at 8.8kHz }
+  TunerHopSamples = 512;     { detection re-runs this often, ~17x a second }
+  { lag search bounds, in analysis samples. The ceiling is the window's own
+    half-length (TunerWindowSamples div 2), which at 8.8kHz reaches down to
+    ~17Hz - well below anything TunerMinHz will accept. }
+  TunerMinLag = 6;
+  TunerYinThreshold = 0.15;  { YIN's absolute threshold, its paper's value }
+  { above this, the best dip found isn't convincing enough to call a pitch -
+    noise, a drum hit, or a chord all land here }
+  TunerMaxCmnd = 0.55;
+  TunerGateRms = 0.0025;     { ~-52 dBFS; below it there is nothing to read }
+  { consecutive no-reading hops before the display blanks. ~1.5s, long enough
+    that the readout holds through the gap between two notes instead of
+    flickering off between every one. }
+  TunerHopsToClear = 26;
+  TunerMinHz = 25.0;
+  TunerMaxHz = 2000.0;
+  TunerA4Hz = 440.0;
+  { cents thresholds for the 1st, 2nd and 3rd off-pitch dot - see
+    TunerDotCount. Under the first one the note reads as in tune and no dots
+    light at all. }
+  TunerDot1Cents = 5.0;
+  TunerDot2Cents = 20.0;
+  TunerDot3Cents = 35.0;
+  TunerNoteNames: array[0..11] of string =
+    ('C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B');
+
+  { "Overdrive" (Distortion category): a general-purpose saturator - loudness
+    maximiser, 808 destroyer, or a bit of crunch, depending on where the
+    controls sit.
+
+    The Frequency/Q pair is a pre-emphasis peaking boost in front of the
+    waveshaper, followed by the exact inverse peaking cut behind it (an RBJ
+    peaking filter at -G is the reciprocal magnitude of the same filter at
+    +G, so the two cancel). That makes Frequency/Q read as "where the grit
+    is" rather than as a plain tone control: the emphasised band is the
+    first thing to reach the shaper's knee and so distorts hardest, but
+    whatever the shaper left linear gets its boost taken straight back out,
+    so the overall balance stays roughly flat instead of leaving an EQ bump
+    behind. Same trick a Tube Screamer's mid hump plays, minus the hump.
+
+    Because the shaper saturates to +/-1 and the only thing after it is a
+    CUT, the wet path can never leave this effect above full scale however
+    hard it's driven. }
+  OverdrivePreEmphasisDb = 9.0;
+  OverdriveMaxDriveDb = 36.0;
+  { deliberate asymmetry, faded out as Color goes hard: an offset waveform
+    clips unevenly and so generates even harmonics, which is most of what
+    separates a warm tube-ish overdrive from a buzzy symmetric one }
+  OverdriveAsymBias = 0.08;
+  { DC blocker pole. Deliberately way down at ~3.5Hz rather than the usual
+    ~30Hz: the offset it has to remove is pure DC and doesn't care, while
+    an 808's fundamental sits at 40-60Hz and a 30Hz one-pole would audibly
+    thin exactly the material this effect exists to mangle. }
+  OverdriveDcBlockCoeff = 0.9995;
+
 type
   { plain flat record with fields used depending on Kind, matching the
     project's existing tagged-record style (see AudioEngine.TCommand) rather
@@ -119,6 +192,32 @@ type
     DrowningSizePercent: Single;
     DrowningDecayPercent: Single;
     DrowningMixPercent: Single;
+    { ekTuner has no parameters at all - it only reads. Its result lives in
+      TEffectState below (TunerFreqHz), not here, because it's produced by
+      the audio thread rather than set by the user, and TEffect is what gets
+      serialised into the project file. }
+    OverdriveFreqHz: Single;
+    OverdriveQ: Single;
+    OverdriveDrivePercent: Single;
+    OverdriveColorPercent: Single;
+    OverdriveMixPercent: Single;
+    { QuadraVerb. Names and ranges are the original front panel's - see
+      Quadraverb.pas, which owns all the DSP and the range constants. }
+    QVReverbType: Integer;
+    QVReverbPredelayMs: Single;
+    QVReverbPredelayMix: Single;
+    QVReverbDecay: Single;
+    QVReverbDiffusion: Single;
+    QVReverbDensity: Single;
+    QVReverbLowDecay: Single;
+    QVReverbHighDecay: Single;
+    QVReverbMixPercent: Single;
+    QVDelayType: Integer;
+    QVDelayTimeLMs: Single;
+    QVDelayTimeRMs: Single;
+    QVDelayFeedbackL: Single;
+    QVDelayFeedbackR: Single;
+    QVDelayMixPercent: Single;
   end;
 
   TEffectChannelState = record
@@ -192,6 +291,42 @@ type
       sized off a continuous Size slider rather than ekReverb's preset list }
     DrowningLastSizePercent: Single;
     DrowningLastSampleRate: Integer;
+    { Tuner. TunerBuf/TunerDiff are lazily sized on first use like
+      ChorusBufL/FlangerBufL above rather than being fixed-size arrays for a
+      specific reason: TEffectState is held in a MaxTracks x
+      MaxEffectsPerTrack array, and ProjectFile.RenderProjectToWav declares
+      one of those as a LOCAL - 6KB of scratch per state would put most of a
+      megabyte on that function's stack. The tuner also reuses
+      Channels[0].LowpassBq/LowpassCoeffs for its anti-alias filter, same
+      state-sharing convention as ekDrowning. }
+    TunerBuf: array of Single;   { the analysis window, decimated mono }
+    TunerDiff: array of Single;  { the CMND function, one entry per lag }
+    TunerFill: Integer;
+    TunerDecimPos: Integer;
+    TunerDecimAccum: Single;
+    TunerDecimFactor: Integer;
+    TunerLastSampleRate: Integer;
+    TunerQuietHops: Integer;
+    { The actual cross-thread readout: written here by the audio thread,
+      read by the rack widget's refresh timer on the UI thread via
+      TunerReadoutHz. A plain unsynchronized Single, same tolerance as
+      Project.TrackVolume - a display one block stale is invisible. }
+    TunerFreqHz: Single;
+    { Overdrive. Reuses Channels[].EQBq[0]/[1] and EQCoeffs[0]/[1] for its
+      pre-emphasis/post-de-emphasis filter pair - only one Kind is ever live
+      in a slot, the same sharing convention Lowpass/EQ4/Drowning already
+      use - so only these caches are Overdrive-specific. }
+    LastOverdriveFreq: Single;
+    LastOverdriveQ: Single;
+    LastOverdriveDrivePercent: Single;
+    OverdriveDriveGain: Single;
+    OverdriveDcX1: array[0..1] of Single;
+    OverdriveDcY1: array[0..1] of Single;
+    { QuadraVerb. Both carry their own host-rate/31.25kHz converter, so
+      neither shares any of the state above - the two are genuinely
+      separate machines and a slot only ever runs one of them. }
+    QVReverb: TQVReverbState;
+    QVDelay: TQVDelayState;
   end;
 
 procedure EffectStateReset(var AState: TEffectState);
@@ -205,6 +340,29 @@ procedure DefaultEffect(AKind: Integer; out AEffect: TEffect);
   caller (AudioEngine), since this unit has no idea Project/tracks exist. }
 procedure ProcessEffect(var AState: TEffectState; const AEffect: TEffect;
   var L, R: Single; ASampleRate: Integer; ASidechainLevel: Single);
+
+{ The pitch an ekTuner slot last heard, in Hz, or 0 for "nothing to read".
+  Written by ProcessEffect on the audio thread; this is the accessor the UI
+  reads it back through - see TunerFreqHz's declaration for why an
+  unsynchronized read is fine. }
+function TunerReadoutHz(const AState: TEffectState): Single;
+
+{ Nearest equal-tempered semitone to a detected frequency, as a MIDI note
+  number, plus how far off that note the frequency actually is in cents
+  (-50..+50). False for anything outside TunerMinHz..TunerMaxHz, i.e. for a
+  frequency not worth naming. Note NAME is up to the caller - TunerNoteNames
+  above is indexed by AMidiNote mod 12, and the octave is AMidiNote div 12 - 1
+  (the MIDI convention where note 60 is C4). }
+function TunerNoteFromFreq(AFreqHz: Single; out AMidiNote: Integer;
+  out ACents: Single): Boolean;
+
+{ How many of the three off-pitch dots to light for a cents deviation:
+  0 (in tune) to 3 (nearly a quarter-tone out). The SIGN of ACents picks
+  which side of the note they're drawn on, flat or sharp. Because
+  TunerNoteFromFreq always names the NEAREST note, drifting past 50 cents
+  flips the displayed note by a semitone and the dots reappear from the
+  opposite side on their own - no special case needed for "far off". }
+function TunerDotCount(ACents: Single): Integer;
 
 implementation
 
@@ -230,6 +388,13 @@ begin
   AState.LastSidechainThresholdDb := NaN;
   AState.LastSidechainAttackMs := NaN;
   AState.LastSidechainReleaseMs := NaN;
+  AState.LastOverdriveFreq := NaN;
+  AState.LastOverdriveQ := NaN;
+  AState.LastOverdriveDrivePercent := NaN;
+  { these do their own FillChar plus their own NaN/-1 "not built yet"
+    sentinels, same reasoning as above }
+  QVReverbReset(AState.QVReverb);
+  QVDelayReset(AState.QVDelay);
 end;
 
 procedure DefaultEffect(AKind: Integer; out AEffect: TEffect);
@@ -302,6 +467,49 @@ begin
         AEffect.DrowningDecayPercent := 70;
         AEffect.DrowningMixPercent := 45;
       end;
+    ekOverdrive:
+      begin
+        { a usable "add some crunch" starting point rather than a null one:
+          focused on the low mids where most weight lives, driven enough to
+          be audibly doing something, mostly soft-knee, fully wet }
+        AEffect.OverdriveFreqHz := 800;
+        AEffect.OverdriveQ := 0.7;
+        AEffect.OverdriveDrivePercent := 40;
+        AEffect.OverdriveColorPercent := 30;
+        AEffect.OverdriveMixPercent := 100;
+      end;
+    ekQuadraverbReverb:
+      begin
+        { straight to the atmospheric-jungle setting rather than a neutral
+          one: a big hall, most of the way to full decay, predelayed enough
+          that a break stays defined in front of it, diffusion up so it's a
+          wash rather than a set of echoes, and a hard high-frequency decay
+          cut so the tail goes dark as it falls away instead of hissing on
+          top of the mix. This is the Good Looking sound's home position. }
+        AEffect.QVReverbType := QVReverbHall;
+        AEffect.QVReverbPredelayMs := 65;
+        AEffect.QVReverbPredelayMix := 70;
+        AEffect.QVReverbDecay := 82;
+        AEffect.QVReverbDiffusion := 8;
+        AEffect.QVReverbDensity := 6;
+        AEffect.QVReverbLowDecay := -10;
+        AEffect.QVReverbHighDecay := -62;
+        AEffect.QVReverbMixPercent := 35;
+      end;
+    ekQuadraverbDelay:
+      begin
+        { ping-pong near the top of QuadMode's 400ms ceiling, which at
+          165-175bpm is roughly a dotted 1/16 - the bouncing stab/vocal
+          delay the genre runs on - with enough feedback for the repeats to
+          smear into whatever reverb follows }
+        AEffect.QVDelayType := QVDelayPingPong;
+        AEffect.QVDelayTimeLMs := 375;
+        AEffect.QVDelayTimeRMs := 375;
+        AEffect.QVDelayFeedbackL := 45;
+        AEffect.QVDelayFeedbackR := 45;
+        AEffect.QVDelayMixPercent := 30;
+      end;
+    { ekTuner has no parameters - FillChar above is the whole setup }
   end;
 end;
 
@@ -446,6 +654,193 @@ begin
     Result := ASampleRate * 0.49;
 end;
 
+{ One YIN pass over the tuner's now-full analysis window, updating
+  AState.TunerFreqHz. Runs once every TunerHopSamples ANALYSIS samples
+  (~17 times a second), never per output frame - see the ekTuner branch of
+  ProcessEffect for the decimation and windowing that feed it. }
+procedure TunerDetect(var AState: TEffectState; AAnalysisRate: Double);
+var
+  HalfW, Tau, j, BestTau: Integer;
+  Diff, Delta, RunningSum, Cmnd, BestCmnd: Double;
+  Rms, dPrev, dHere, dNext, Denom, Shift, Period, Freq, Ratio: Double;
+  Found: Boolean;
+begin
+  HalfW := TunerWindowSamples div 2;
+
+  Rms := 0;
+  for j := 0 to TunerWindowSamples - 1 do
+    Rms := Rms + AState.TunerBuf[j] * AState.TunerBuf[j];
+  Rms := Sqrt(Rms / TunerWindowSamples);
+  if Rms < TunerGateRms then
+  begin
+    Inc(AState.TunerQuietHops);
+    if AState.TunerQuietHops >= TunerHopsToClear then
+      AState.TunerFreqHz := 0;
+    Exit;
+  end;
+
+  { squared-difference function per lag, normalised on the fly by the running
+    mean of every difference so far (YIN's cumulative mean normalisation).
+    That normalisation is the whole trick: it kills the trivial d(0) = 0
+    minimum and heavily penalises the sub-octave lags that a raw
+    autocorrelation happily picks instead of the real period. }
+  AState.TunerDiff[0] := 1;
+  RunningSum := 0;
+  BestTau := 0;
+  BestCmnd := 1e30;
+  Found := False;
+  for Tau := 1 to HalfW do
+  begin
+    Diff := 0;
+    for j := 0 to HalfW - 1 do
+    begin
+      Delta := AState.TunerBuf[j] - AState.TunerBuf[j + Tau];
+      Diff := Diff + Delta * Delta;
+    end;
+    RunningSum := RunningSum + Diff;
+    if RunningSum <= 0 then
+      Cmnd := 1
+    else
+      Cmnd := Diff * Tau / RunningSum;
+    AState.TunerDiff[Tau] := Cmnd;
+
+    { YIN's absolute threshold: take the FIRST dip that goes below the
+      threshold and has bottomed out (the next lag is no lower), not the
+      global minimum - the global minimum is very often one octave down }
+    if (Tau > TunerMinLag) and (AState.TunerDiff[Tau - 1] < TunerYinThreshold) and
+      (Cmnd >= AState.TunerDiff[Tau - 1]) then
+    begin
+      BestTau := Tau - 1;
+      Found := True;
+      Break;
+    end;
+    if (Tau >= TunerMinLag) and (Cmnd < BestCmnd) then
+    begin
+      BestCmnd := Cmnd;
+      BestTau := Tau;
+    end;
+  end;
+
+  { nothing dipped under the threshold, so fall back to the best dip there
+    was - but only if it's convincing. Noise, a drum hit and a chord all fail
+    here, which is exactly right: a tuner should say nothing rather than
+    invent a note. }
+  if (BestTau < TunerMinLag) or ((not Found) and (BestCmnd > TunerMaxCmnd)) then
+  begin
+    Inc(AState.TunerQuietHops);
+    if AState.TunerQuietHops >= TunerHopsToClear then
+      AState.TunerFreqHz := 0;
+    Exit;
+  end;
+
+  { parabolic interpolation through the three points around the dip - without
+    it the reading quantises to whole analysis samples, which at 8.8kHz is
+    tens of cents wide up in the treble and would make the dots meaningless }
+  Period := BestTau;
+  if (BestTau > 1) and (BestTau < HalfW) then
+  begin
+    dPrev := AState.TunerDiff[BestTau - 1];
+    dHere := AState.TunerDiff[BestTau];
+    dNext := AState.TunerDiff[BestTau + 1];
+    Denom := dPrev - 2 * dHere + dNext;
+    if Denom <> 0 then
+    begin
+      Shift := 0.5 * (dPrev - dNext) / Denom;
+      if Shift > 0.5 then Shift := 0.5;
+      if Shift < -0.5 then Shift := -0.5;
+      Period := Period + Shift;
+    end;
+  end;
+  if Period <= 0 then
+    Exit;
+
+  Freq := AAnalysisRate / Period;
+  if (Freq < TunerMinHz) or (Freq > TunerMaxHz) then
+  begin
+    Inc(AState.TunerQuietHops);
+    if AState.TunerQuietHops >= TunerHopsToClear then
+      AState.TunerFreqHz := 0;
+    Exit;
+  end;
+
+  { light smoothing, but only between readings that are already within about
+    a tone of each other - a real note change has to land instantly, while
+    the few-cent jitter of consecutive hops on one held note should not make
+    the dots twitch }
+  if AState.TunerFreqHz > 0 then
+  begin
+    Ratio := Freq / AState.TunerFreqHz;
+    if (Ratio > 0.917) and (Ratio < 1.09) then
+      Freq := AState.TunerFreqHz * 0.55 + Freq * 0.45;
+  end;
+  AState.TunerFreqHz := Freq;
+  AState.TunerQuietHops := 0;
+end;
+
+function TunerReadoutHz(const AState: TEffectState): Single;
+begin
+  Result := AState.TunerFreqHz;
+end;
+
+function TunerNoteFromFreq(AFreqHz: Single; out AMidiNote: Integer;
+  out ACents: Single): Boolean;
+var
+  MidiExact: Double;
+begin
+  AMidiNote := 0;
+  ACents := 0;
+  Result := False;
+  if (AFreqHz < TunerMinHz) or (AFreqHz > TunerMaxHz) then
+    Exit;
+  MidiExact := 69 + 12 * Log2(AFreqHz / TunerA4Hz);
+  AMidiNote := Round(MidiExact);
+  if (AMidiNote < 0) or (AMidiNote > 127) then
+    Exit;
+  ACents := (MidiExact - AMidiNote) * 100;
+  Result := True;
+end;
+
+function TunerDotCount(ACents: Single): Integer;
+begin
+  ACents := Abs(ACents);
+  if ACents < TunerDot1Cents then
+    Result := 0
+  else if ACents < TunerDot2Cents then
+    Result := 1
+  else if ACents < TunerDot3Cents then
+    Result := 2
+  else
+    Result := 3;
+end;
+
+{ Overdrive's waveshaper: a morph from tanh at Color 0 (soft knee - warm,
+  compressing, tube-ish) to a hard clip at Color 1 (abrupt knee - buzzy,
+  dense, transistor crunch). Both saturate to +/-1, so no Drive setting can
+  ever push the wet path past full scale no matter what goes in. }
+function OverdriveShape(AInput, AColor: Single): Single;
+var
+  Soft, Hard: Single;
+begin
+  Soft := Math.Tanh(AInput);
+  if AInput > 1 then
+    Hard := 1
+  else if AInput < -1 then
+    Hard := -1
+  else
+    Hard := AInput;
+  Result := Soft * (1 - AColor) + Hard * AColor;
+end;
+
+{ Standard one-pole DC blocker. OverdriveAsymBias deliberately shifts the
+  waveform off zero on its way into the shaper to generate even harmonics,
+  and that offset has to come back off before this reaches the mix bus. }
+function OverdriveDcBlock(var AX1, AY1: Single; AInput: Single): Single;
+begin
+  Result := AInput - AX1 + OverdriveDcBlockCoeff * AY1;
+  AX1 := AInput;
+  AY1 := Result;
+end;
+
 procedure ProcessEffect(var AState: TEffectState; const AEffect: TEffect;
   var L, R: Single; ASampleRate: Integer; ASidechainLevel: Single);
 var
@@ -462,6 +857,8 @@ var
   PhFreqL, PhFreqR, PhFeedbackFrac, PhInL, PhInR, PhOutL, PhOutR: Single;
   ScAttackMs, ScAttackCoeff, ScStrengthFrac: Single;
   ToneL, ToneR: Single;
+  TunerMono: Single;
+  OdQ, OdColorFrac, OdBias, OdDryL, OdDryR, OdL, OdR: Single;
 begin
   case AEffect.Kind of
     ekLowpass:
@@ -873,6 +1270,121 @@ begin
         L := L * (1 - MixFrac) + RvWetL * MixFrac;
         R := R * (1 - MixFrac) + RvWetR * MixFrac;
       end;
+    ekTuner:
+      begin
+        { L and R are never written in this branch - the tuner is a pure tap.
+          Everything below only feeds the analysis window. }
+        if AState.TunerBuf = nil then
+        begin
+          SetLength(AState.TunerBuf, TunerWindowSamples);
+          SetLength(AState.TunerDiff, TunerWindowSamples div 2 + 1);
+        end;
+        if AState.TunerLastSampleRate <> ASampleRate then
+        begin
+          AState.TunerDecimFactor := ASampleRate div TunerTargetRateHz;
+          if AState.TunerDecimFactor < 1 then
+            AState.TunerDecimFactor := 1;
+          { anti-alias just under the decimated Nyquist before throwing
+            samples away, otherwise everything above it folds back down into
+            the search range and the detector chases ghosts }
+          ComputeLowpassBiquad(0.45 * ASampleRate / AState.TunerDecimFactor,
+            ASampleRate, LowpassQ, AState.LowpassCoeffs);
+          AState.TunerLastSampleRate := ASampleRate;
+          AState.TunerDecimPos := 0;
+          AState.TunerDecimAccum := 0;
+          AState.TunerFill := 0;
+        end;
+
+        TunerMono := ProcessBiquad(AState.Channels[0].LowpassBq,
+          AState.LowpassCoeffs, (L + R) * 0.5);
+        AState.TunerDecimAccum := AState.TunerDecimAccum + TunerMono;
+        Inc(AState.TunerDecimPos);
+        if AState.TunerDecimPos >= AState.TunerDecimFactor then
+        begin
+          { boxcar average across the decimation group on top of the biquad -
+            a free extra octave of alias rejection, and it costs one divide
+            per analysis sample rather than anything per frame }
+          TunerMono := AState.TunerDecimAccum / AState.TunerDecimFactor;
+          AState.TunerDecimAccum := 0;
+          AState.TunerDecimPos := 0;
+
+          AState.TunerBuf[AState.TunerFill] := TunerMono;
+          Inc(AState.TunerFill);
+          if AState.TunerFill >= TunerWindowSamples then
+          begin
+            TunerDetect(AState, ASampleRate / AState.TunerDecimFactor);
+            { slide the window on by one hop, keeping the newest samples, so
+              detection re-runs every TunerHopSamples instead of only on
+              back-to-back non-overlapping windows }
+            Move(AState.TunerBuf[TunerHopSamples], AState.TunerBuf[0],
+              (TunerWindowSamples - TunerHopSamples) * SizeOf(Single));
+            AState.TunerFill := TunerWindowSamples - TunerHopSamples;
+          end;
+        end;
+      end;
+    ekOverdrive:
+      begin
+        Freq := ClampFreq(AEffect.OverdriveFreqHz, ASampleRate);
+        OdQ := AEffect.OverdriveQ;
+        if OdQ < 0.1 then
+          OdQ := 0.1;
+        if (ASampleRate <> AState.LastSampleRate) or
+          (Freq <> AState.LastOverdriveFreq) or (OdQ <> AState.LastOverdriveQ) then
+        begin
+          ComputePeakingBiquad(Freq, ASampleRate, OdQ, OverdrivePreEmphasisDb,
+            AState.EQCoeffs[0]);
+          ComputePeakingBiquad(Freq, ASampleRate, OdQ, -OverdrivePreEmphasisDb,
+            AState.EQCoeffs[1]);
+          AState.LastOverdriveFreq := Freq;
+          AState.LastOverdriveQ := OdQ;
+          AState.LastSampleRate := ASampleRate;
+        end;
+        if AEffect.OverdriveDrivePercent <> AState.LastOverdriveDrivePercent then
+        begin
+          AState.OverdriveDriveGain := Power(10,
+            (AEffect.OverdriveDrivePercent / 100) * OverdriveMaxDriveDb / 20);
+          AState.LastOverdriveDrivePercent := AEffect.OverdriveDrivePercent;
+        end;
+
+        OdColorFrac := AEffect.OverdriveColorPercent / 100;
+        if OdColorFrac > 1 then OdColorFrac := 1;
+        if OdColorFrac < 0 then OdColorFrac := 0;
+        OdBias := OverdriveAsymBias * (1 - OdColorFrac);
+
+        OdDryL := L;
+        OdDryR := R;
+
+        OdL := ProcessBiquad(AState.Channels[0].EQBq[0], AState.EQCoeffs[0], L);
+        OdR := ProcessBiquad(AState.Channels[1].EQBq[0], AState.EQCoeffs[0], R);
+
+        OdL := OverdriveShape(OdL * AState.OverdriveDriveGain + OdBias, OdColorFrac);
+        OdR := OverdriveShape(OdR * AState.OverdriveDriveGain + OdBias, OdColorFrac);
+
+        OdL := OverdriveDcBlock(AState.OverdriveDcX1[0], AState.OverdriveDcY1[0], OdL);
+        OdR := OverdriveDcBlock(AState.OverdriveDcX1[1], AState.OverdriveDcY1[1], OdR);
+
+        OdL := ProcessBiquad(AState.Channels[0].EQBq[1], AState.EQCoeffs[1], OdL);
+        OdR := ProcessBiquad(AState.Channels[1].EQBq[1], AState.EQCoeffs[1], OdR);
+
+        { no makeup gain: the shaper already pins the wet path's peaks near
+          full scale however quiet the input was, which IS the "make it
+          louder" behaviour - a compensating trim would just undo it }
+        MixFrac := AEffect.OverdriveMixPercent / 100;
+        L := OdDryL * (1 - MixFrac) + OdL * MixFrac;
+        R := OdDryR * (1 - MixFrac) + OdR * MixFrac;
+      end;
+    ekQuadraverbReverb:
+      QVReverbProcess(AState.QVReverb, L, R, ASampleRate,
+        AEffect.QVReverbType, AEffect.QVReverbPredelayMs,
+        AEffect.QVReverbPredelayMix, AEffect.QVReverbDecay,
+        AEffect.QVReverbDiffusion, AEffect.QVReverbDensity,
+        AEffect.QVReverbLowDecay, AEffect.QVReverbHighDecay,
+        AEffect.QVReverbMixPercent);
+    ekQuadraverbDelay:
+      QVDelayProcess(AState.QVDelay, L, R, ASampleRate,
+        AEffect.QVDelayType, AEffect.QVDelayTimeLMs, AEffect.QVDelayTimeRMs,
+        AEffect.QVDelayFeedbackL, AEffect.QVDelayFeedbackR,
+        AEffect.QVDelayMixPercent);
   end;
 end;
 

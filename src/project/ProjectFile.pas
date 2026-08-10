@@ -91,7 +91,8 @@ implementation
 
 uses
   SysUtils, IniFiles, FileUtil, SampleTypes, Project, WavDecoder,
-  AudioEngine, Resample, Waveform, SP1200, TarArchive, Effects, ThreadUtil;
+  AudioEngine, Resample, Waveform, SP1200, TarArchive, Effects, Quadraverb,
+  ThreadUtil;
 
 constructor TProjectLoadThread.Create(const APath: string; AOnTerminate: TNotifyEvent);
 begin
@@ -195,6 +196,27 @@ begin
   Ini.WriteFloat(ASection, APrefix + 'DrowningSizePercent', AEffect.DrowningSizePercent);
   Ini.WriteFloat(ASection, APrefix + 'DrowningDecayPercent', AEffect.DrowningDecayPercent);
   Ini.WriteFloat(ASection, APrefix + 'DrowningMixPercent', AEffect.DrowningMixPercent);
+  { ekTuner has no parameters of its own - its Kind above is the whole of it }
+  Ini.WriteFloat(ASection, APrefix + 'OverdriveFreqHz', AEffect.OverdriveFreqHz);
+  Ini.WriteFloat(ASection, APrefix + 'OverdriveQ', AEffect.OverdriveQ);
+  Ini.WriteFloat(ASection, APrefix + 'OverdriveDrivePercent', AEffect.OverdriveDrivePercent);
+  Ini.WriteFloat(ASection, APrefix + 'OverdriveColorPercent', AEffect.OverdriveColorPercent);
+  Ini.WriteFloat(ASection, APrefix + 'OverdriveMixPercent', AEffect.OverdriveMixPercent);
+  Ini.WriteInteger(ASection, APrefix + 'QVReverbType', AEffect.QVReverbType);
+  Ini.WriteFloat(ASection, APrefix + 'QVReverbPredelayMs', AEffect.QVReverbPredelayMs);
+  Ini.WriteFloat(ASection, APrefix + 'QVReverbPredelayMix', AEffect.QVReverbPredelayMix);
+  Ini.WriteFloat(ASection, APrefix + 'QVReverbDecay', AEffect.QVReverbDecay);
+  Ini.WriteFloat(ASection, APrefix + 'QVReverbDiffusion', AEffect.QVReverbDiffusion);
+  Ini.WriteFloat(ASection, APrefix + 'QVReverbDensity', AEffect.QVReverbDensity);
+  Ini.WriteFloat(ASection, APrefix + 'QVReverbLowDecay', AEffect.QVReverbLowDecay);
+  Ini.WriteFloat(ASection, APrefix + 'QVReverbHighDecay', AEffect.QVReverbHighDecay);
+  Ini.WriteFloat(ASection, APrefix + 'QVReverbMixPercent', AEffect.QVReverbMixPercent);
+  Ini.WriteInteger(ASection, APrefix + 'QVDelayType', AEffect.QVDelayType);
+  Ini.WriteFloat(ASection, APrefix + 'QVDelayTimeLMs', AEffect.QVDelayTimeLMs);
+  Ini.WriteFloat(ASection, APrefix + 'QVDelayTimeRMs', AEffect.QVDelayTimeRMs);
+  Ini.WriteFloat(ASection, APrefix + 'QVDelayFeedbackL', AEffect.QVDelayFeedbackL);
+  Ini.WriteFloat(ASection, APrefix + 'QVDelayFeedbackR', AEffect.QVDelayFeedbackR);
+  Ini.WriteFloat(ASection, APrefix + 'QVDelayMixPercent', AEffect.QVDelayMixPercent);
 end;
 
 function LoadEffect(Ini: TIniFile; const ASection, APrefix: string): Effects.TEffect;
@@ -240,6 +262,26 @@ begin
   Result.DrowningSizePercent := Ini.ReadFloat(ASection, APrefix + 'DrowningSizePercent', 65);
   Result.DrowningDecayPercent := Ini.ReadFloat(ASection, APrefix + 'DrowningDecayPercent', 70);
   Result.DrowningMixPercent := Ini.ReadFloat(ASection, APrefix + 'DrowningMixPercent', 45);
+  Result.OverdriveFreqHz := Ini.ReadFloat(ASection, APrefix + 'OverdriveFreqHz', 800);
+  Result.OverdriveQ := Ini.ReadFloat(ASection, APrefix + 'OverdriveQ', 0.7);
+  Result.OverdriveDrivePercent := Ini.ReadFloat(ASection, APrefix + 'OverdriveDrivePercent', 40);
+  Result.OverdriveColorPercent := Ini.ReadFloat(ASection, APrefix + 'OverdriveColorPercent', 30);
+  Result.OverdriveMixPercent := Ini.ReadFloat(ASection, APrefix + 'OverdriveMixPercent', 100);
+  Result.QVReverbType := Ini.ReadInteger(ASection, APrefix + 'QVReverbType', Quadraverb.QVReverbHall);
+  Result.QVReverbPredelayMs := Ini.ReadFloat(ASection, APrefix + 'QVReverbPredelayMs', 65);
+  Result.QVReverbPredelayMix := Ini.ReadFloat(ASection, APrefix + 'QVReverbPredelayMix', 70);
+  Result.QVReverbDecay := Ini.ReadFloat(ASection, APrefix + 'QVReverbDecay', 82);
+  Result.QVReverbDiffusion := Ini.ReadFloat(ASection, APrefix + 'QVReverbDiffusion', 8);
+  Result.QVReverbDensity := Ini.ReadFloat(ASection, APrefix + 'QVReverbDensity', 6);
+  Result.QVReverbLowDecay := Ini.ReadFloat(ASection, APrefix + 'QVReverbLowDecay', -10);
+  Result.QVReverbHighDecay := Ini.ReadFloat(ASection, APrefix + 'QVReverbHighDecay', -62);
+  Result.QVReverbMixPercent := Ini.ReadFloat(ASection, APrefix + 'QVReverbMixPercent', 35);
+  Result.QVDelayType := Ini.ReadInteger(ASection, APrefix + 'QVDelayType', Quadraverb.QVDelayPingPong);
+  Result.QVDelayTimeLMs := Ini.ReadFloat(ASection, APrefix + 'QVDelayTimeLMs', 375);
+  Result.QVDelayTimeRMs := Ini.ReadFloat(ASection, APrefix + 'QVDelayTimeRMs', 375);
+  Result.QVDelayFeedbackL := Ini.ReadFloat(ASection, APrefix + 'QVDelayFeedbackL', 45);
+  Result.QVDelayFeedbackR := Ini.ReadFloat(ASection, APrefix + 'QVDelayFeedbackR', 45);
+  Result.QVDelayMixPercent := Ini.ReadFloat(ASection, APrefix + 'QVDelayMixPercent', 30);
 end;
 
 type
@@ -417,6 +459,20 @@ begin
     for e := 0 to Project.MasterEffectCount - 1 do
       SaveEffect(Ini, 'Master', 'Effect' + IntToStr(e) + '.', Project.MasterEffects[e]);
 
+    { one [SendN] section per send bus, same shape as [Master] plus the
+      bus-level controls; the per-track enable/level halves live with their
+      own track below }
+    for i := 0 to Project.SendCount - 1 do
+    begin
+      Section := 'Send' + IntToStr(i);
+      Ini.WriteFloat(Section, 'ReturnLevel', Project.SendReturnLevel[i]);
+      Ini.WriteBool(Section, 'Enabled', Project.SendEnabled[i]);
+      Ini.WriteBool(Section, 'PreFader', Project.SendPreFader[i]);
+      Ini.WriteInteger(Section, 'EffectCount', Project.SendEffectCount[i]);
+      for e := 0 to Project.SendEffectCount[i] - 1 do
+        SaveEffect(Ini, Section, 'Effect' + IntToStr(e) + '.', Project.SendEffects[i][e]);
+    end;
+
     Ini.WriteInteger('Samples', 'Count', Length(Project.SamplePool));
     for i := 0 to High(Project.SamplePool) do
     begin
@@ -478,6 +534,14 @@ begin
       Ini.WriteInteger(Section, 'EffectCount', Project.TrackEffectCount[t]);
       for e := 0 to Project.TrackEffectCount[t] - 1 do
         SaveEffect(Ini, Section, 'Effect' + IntToStr(e) + '.', Project.TrackEffects[t][e]);
+
+      for i := 0 to Project.SendCount - 1 do
+      begin
+        Ini.WriteBool(Section, 'Send' + IntToStr(i) + 'On',
+          Project.TrackSendEnabled[t][i]);
+        Ini.WriteFloat(Section, 'Send' + IntToStr(i) + 'Level',
+          Project.TrackSendLevel[t][i]);
+      end;
 
       { see PackClips' comment - one key holds every clip (and all their warp
         markers) for the track, instead of ~9 keys per clip that made saving
@@ -678,6 +742,22 @@ begin
     for e := 0 to Project.MasterEffectCount - 1 do
       Project.MasterEffects[e] := LoadEffect(Ini, 'Master', 'Effect' + IntToStr(e) + '.');
 
+    { defaults here mirror Project.InitSendBuses, so a project saved before
+      sends existed loads with two empty, unity, unmuted buses rather than
+      with muted ones at zero return }
+    for i := 0 to Project.SendCount - 1 do
+    begin
+      Section := 'Send' + IntToStr(i);
+      Project.SendReturnLevel[i] := Ini.ReadFloat(Section, 'ReturnLevel', 1.0);
+      Project.SendEnabled[i] := Ini.ReadBool(Section, 'Enabled', True);
+      Project.SendPreFader[i] := Ini.ReadBool(Section, 'PreFader', False);
+      Project.SendEffectCount[i] := Ini.ReadInteger(Section, 'EffectCount', 0);
+      if Project.SendEffectCount[i] > Effects.MaxEffectsPerTrack then
+        Project.SendEffectCount[i] := Effects.MaxEffectsPerTrack;
+      for e := 0 to Project.SendEffectCount[i] - 1 do
+        Project.SendEffects[i][e] := LoadEffect(Ini, Section, 'Effect' + IntToStr(e) + '.');
+    end;
+
     SampleCount := Ini.ReadInteger('Samples', 'Count', 0);
 
     { The outgoing project's audio is raw GetMem'd blocks hanging off
@@ -765,6 +845,14 @@ begin
       for e := 0 to Project.TrackEffectCount[t] - 1 do
         Project.TrackEffects[t][e] := LoadEffect(Ini, Section, 'Effect' + IntToStr(e) + '.');
 
+      for i := 0 to Project.SendCount - 1 do
+      begin
+        Project.TrackSendEnabled[t][i] :=
+          Ini.ReadBool(Section, 'Send' + IntToStr(i) + 'On', False);
+        Project.TrackSendLevel[t][i] :=
+          Ini.ReadFloat(Section, 'Send' + IntToStr(i) + 'Level', 0.5);
+      end;
+
       if Ini.ValueExists(Section, 'ClipsPacked') then
         { current format - see PackClips/SaveProject }
         UnpackClips(Ini.ReadString(Section, 'ClipsPacked', ''), t, Project.Tracks[t].Clips)
@@ -831,8 +919,16 @@ var
   SP1200St: TSP1200State;
   MasterEffectState: array[0..Effects.MaxEffectsPerTrack - 1] of Effects.TEffectState;
   L, R: Single;
-  e: Integer;
+  e, sIdx: Integer;
   RenderBeatFrames, SwungPos: Int64;
+  { send buses, mirroring AudioEngine.FillBlock's SendL/SendR accumulators -
+    one whole-timeline scratch buffer per bus, since this render is
+    track-major and the buses can only be processed once every track has
+    contributed to them }
+  SendBuffers: array[0..Project.SendCount - 1] of PSingle;
+  SendEffectState: array[0..Project.SendCount - 1, 0..Effects.MaxEffectsPerTrack - 1] of
+    Effects.TEffectState;
+  SendAmount, PreFaderL, PreFaderR, TrackVol: Single;
 
   { Offline equivalent of AudioEngine.FillBlock's SidechainLevelFor - reads
     straight off the source track's raw (pre-FX) buffer at the current
@@ -878,8 +974,15 @@ begin
 
   GetMem(Buffer, ProjectLengthFrames * OutChannels * SizeOf(Single));
   FillChar(TrackBuffers, SizeOf(TrackBuffers), 0);
+  FillChar(SendBuffers, SizeOf(SendBuffers), 0);
   try
     FillChar(Buffer^, ProjectLengthFrames * OutChannels * SizeOf(Single), 0);
+    for sIdx := 0 to Project.SendCount - 1 do
+      if Project.SendEnabled[sIdx] then
+      begin
+        GetMem(SendBuffers[sIdx], ProjectLengthFrames * OutChannels * SizeOf(Single));
+        FillChar(SendBuffers[sIdx]^, ProjectLengthFrames * OutChannels * SizeOf(Single), 0);
+      end;
 
     { each enabled track renders into its OWN scratch buffer first - needed
       so its insert-FX chain (below) can run on just that track's signal,
@@ -946,7 +1049,8 @@ begin
     end;
 
     { per-track insert effects (mirrors the master-effect loop below, just
-      per-track), then sum into the master buffer }
+      per-track), then the fader, the send taps, and the sum into master -
+      the same order FillBlock uses, so a bounce matches what was heard }
     for t := 0 to Project.TrackCount - 1 do
     begin
       if not Project.TrackEnabled[t] then
@@ -970,8 +1074,68 @@ begin
         end;
       end;
 
+      { The track fader, and the pre/post-fader send taps around it. Note
+        that the fader is applied HERE and not at clip level: this render
+        used to ignore Project.TrackVolume entirely (it only ever multiplied
+        by the clip's own Gain), so a bounce came out with every track at
+        unity however the faders were set. Applying it here fixes that and
+        keeps the ordering identical to FillBlock's. }
+      TrackVol := Project.TrackVolume[t];
+      for Frame := 0 to ProjectLengthFrames - 1 do
+      begin
+        OutIdx := Frame * OutChannels;
+        PreFaderL := TrackBuffers[t][OutIdx];
+        PreFaderR := TrackBuffers[t][OutIdx + 1];
+        L := PreFaderL * TrackVol;
+        R := PreFaderR * TrackVol;
+        TrackBuffers[t][OutIdx] := L;
+        TrackBuffers[t][OutIdx + 1] := R;
+
+        for sIdx := 0 to Project.SendCount - 1 do
+          if Project.SendEnabled[sIdx] and Project.TrackSendEnabled[t][sIdx] then
+          begin
+            SendAmount := Project.TrackSendLevel[t][sIdx];
+            if Project.SendPreFader[sIdx] then
+            begin
+              SendBuffers[sIdx][OutIdx] := SendBuffers[sIdx][OutIdx] + PreFaderL * SendAmount;
+              SendBuffers[sIdx][OutIdx + 1] := SendBuffers[sIdx][OutIdx + 1] + PreFaderR * SendAmount;
+            end
+            else
+            begin
+              SendBuffers[sIdx][OutIdx] := SendBuffers[sIdx][OutIdx] + L * SendAmount;
+              SendBuffers[sIdx][OutIdx + 1] := SendBuffers[sIdx][OutIdx + 1] + R * SendAmount;
+            end;
+          end;
+      end;
+
       for SampleIdx := 0 to ProjectLengthFrames * OutChannels - 1 do
         Buffer[SampleIdx] := Buffer[SampleIdx] + TrackBuffers[t][SampleIdx];
+    end;
+
+    { send buses: one chain per bus over the summed contributions, returned
+      into the master buffer at the bus's own return level. Runs for the
+      whole timeline including stretches where nothing fed the bus, so a
+      reverb tail on a send decays past the last thing that fed it rather
+      than being cut off - same reasoning as FillBlock's version. }
+    for sIdx := 0 to Project.SendCount - 1 do
+    begin
+      if (not Project.SendEnabled[sIdx]) or (SendBuffers[sIdx] = nil) then
+        Continue;
+      for e := 0 to Effects.MaxEffectsPerTrack - 1 do
+        Effects.EffectStateReset(SendEffectState[sIdx][e]);
+      for Frame := 0 to ProjectLengthFrames - 1 do
+      begin
+        OutIdx := Frame * OutChannels;
+        L := SendBuffers[sIdx][OutIdx];
+        R := SendBuffers[sIdx][OutIdx + 1];
+        for e := 0 to Project.SendEffectCount[sIdx] - 1 do
+          if Project.SendEffects[sIdx][e].Kind <> Effects.ekNone then
+            Effects.ProcessEffect(SendEffectState[sIdx][e], Project.SendEffects[sIdx][e],
+              L, R, ProjectSampleRate,
+              SidechainLevelFor(Project.SendEffects[sIdx][e].SidechainSourceTrack));
+        Buffer[OutIdx] := Buffer[OutIdx] + L * Project.SendReturnLevel[sIdx];
+        Buffer[OutIdx + 1] := Buffer[OutIdx + 1] + R * Project.SendReturnLevel[sIdx];
+      end;
     end;
 
     if Project.MasterEffectCount > 0 then
@@ -1008,6 +1172,9 @@ begin
     for t := 0 to Project.MaxTracks - 1 do
       if TrackBuffers[t] <> nil then
         FreeMem(TrackBuffers[t]);
+    for sIdx := 0 to Project.SendCount - 1 do
+      if SendBuffers[sIdx] <> nil then
+        FreeMem(SendBuffers[sIdx]);
     FreeMem(Buffer);
   end;
 end;

@@ -75,6 +75,18 @@ function AudioEngineGetSP1200Enabled: Boolean;
 procedure AudioEngineSetMetronomeEnabled(AEnabled: Boolean);
 function AudioEngineGetMetronomeEnabled: Boolean;
 
+{ Latest pitch (in Hz) heard by the Effects.ekTuner sitting in a given insert
+  slot, or 0 for "nothing tonal there right now". ATarget is a track index or
+  one of Project's Bus* constants, the same convention the effects rack uses.
+  Meaningless (always 0) for a slot holding any other Kind, since nothing
+  else ever writes it.
+
+  The value is produced on the audio thread and read here from the main one
+  with no synchronization, deliberately - see Effects.TEffectState's
+  TunerFreqHz. Cross-thread accessor only because TrackEffectState/
+  MasterEffectState/SendEffectState are implementation-private to this unit. }
+function AudioEngineTunerPitchHz(ATarget, AEffectIndex: Integer): Single;
+
 { Buffer size (frames per callback). Changing it stops the realtime thread,
   closes the backend, reopens it at the new size, and restarts the thread -
   fully serialized on the calling (main) thread, per CLAUDE.md's rule for
@@ -282,6 +294,10 @@ var
   TrackEffectState: array[0..MaxTracks - 1, 0..Effects.MaxEffectsPerTrack - 1] of
     Effects.TEffectState;
   MasterEffectState: array[0..Effects.MaxEffectsPerTrack - 1] of Effects.TEffectState;
+  { one chain's worth of state per send bus - the whole point of a send is
+    that this is ONE chain however many tracks feed it }
+  SendEffectState: array[0..Project.SendCount - 1, 0..Effects.MaxEffectsPerTrack - 1] of
+    Effects.TEffectState;
 
   { Each track's final (post-own-inserts) peak level for the CURRENT block's
     frame being processed by FillBlock's "for t" loop below - written once
@@ -431,6 +447,21 @@ begin
     if Project.TrackIsInput[t] and Project.TrackMonitorEnabled[t] and
       Project.TrackEnabled[t] then
       Exit(True);
+end;
+
+{ Whether the realtime thread is currently producing audio at all, i.e. the
+  exact condition TPlaybackThread.Execute gates FillBlock on. Note that it
+  includes input monitoring, not just transport/notes - a monitored line-in
+  runs the full effect chain with the transport stopped.
+
+  Deliberately NOT the same thing as AudioEngineIsBusy, which answers the
+  narrower "could the engine still be reading sample memory I'm about to
+  free" question and so ignores monitoring (which reads captured input, not
+  the sample pool). }
+function EngineProcessingActive: Boolean;
+begin
+  Result := Playing or AnyLiveNoteActive or (RecordState <> RecordStateIdle) or
+    AnyTrackMonitoring;
 end;
 
 procedure DrainCommands;
@@ -1483,10 +1514,12 @@ procedure FillBlock;
   end;
 
 var
-  Frame, t, i, e: Integer;
+  Frame, t, i, e, s: Integer;
   GlobalFrame, ClipRelFrame, SwungPos: Int64;
   Clip: PPlaybackClip;
   L, R, TrackL, TrackR, RecL, RecR, ClickVal, CapL, CapR: Single;
+  PreFaderL, PreFaderR, SendTapL, SendTapR, SendAmount: Single;
+  SendL, SendR: array[0..Project.SendCount - 1] of Single;
   BeatFrames: Int64;
 begin
   FillChar(MixBuffer^, BlockFrames * OutputChannels * SizeOf(Single), 0);
@@ -1499,6 +1532,11 @@ begin
     R := 0;
     RecL := 0;
     RecR := 0;
+    for s := 0 to Project.SendCount - 1 do
+    begin
+      SendL[s] := 0;
+      SendR[s] := 0;
+    end;
     { popped once per frame (not once per track) so every monitoring track
       hears the identical live sample this frame, instead of each track
       draining its own share of the ring - see PopCaptureFrame }
@@ -1586,9 +1624,43 @@ begin
             TrackL, TrackR, ProjectSampleRate,
             SidechainLevelFor(Project.TrackEffects[t][e].SidechainSourceTrack));
 
-      { this track's final, post-insert-FX level for the frame - see
-        TrackTapLevel's declaration for why a source track processed later
-        in this same "for t" pass reads one frame stale here, not zero. }
+      { Pre-fader send tap: taken here, after the inserts but before the
+        fader below. That ordering is the whole reason pre-fader exists -
+        pull a track's fader to nothing and its contribution to the bus
+        (and so the reverb tail it is feeding) carries on regardless, which
+        is how a break dissolves into the wash instead of just stopping. }
+      PreFaderL := TrackL;
+      PreFaderR := TrackR;
+
+      { The track fader. This used to be pre-multiplied into every clip's
+        Gain by ArrangementView.PushTrackToEngine and into note gains by
+        MainForm, i.e. applied before the engine ever saw the audio - which
+        left no point in the chain where a pre-fader anything could be
+        tapped, and quietly meant a "recorded dry" take was in fact
+        recorded through the fader. It is applied here now instead. }
+      TrackL := TrackL * Project.TrackVolume[t];
+      TrackR := TrackR * Project.TrackVolume[t];
+
+      for s := 0 to Project.SendCount - 1 do
+        if Project.SendEnabled[s] and Project.TrackSendEnabled[t][s] then
+        begin
+          SendAmount := Project.TrackSendLevel[t][s];
+          if Project.SendPreFader[s] then
+          begin
+            SendL[s] := SendL[s] + PreFaderL * SendAmount;
+            SendR[s] := SendR[s] + PreFaderR * SendAmount;
+          end
+          else
+          begin
+            SendL[s] := SendL[s] + TrackL * SendAmount;
+            SendR[s] := SendR[s] + TrackR * SendAmount;
+          end;
+        end;
+
+      { this track's final, post-insert-FX, post-fader level for the frame -
+        see TrackTapLevel's declaration for why a source track processed
+        later in this same "for t" pass reads one frame stale here, not
+        zero. }
       if Abs(TrackL) > Abs(TrackR) then
         TrackTapLevel[t] := Abs(TrackL)
       else
@@ -1596,6 +1668,32 @@ begin
 
       L := L + TrackL;
       R := R + TrackR;
+    end;
+
+    { Send-bus returns. Each bus runs its chain ONCE on the sum of every
+      track feeding it, then returns at its own level - so six tracks into
+      one reverb is one shared room and one reverb's worth of CPU, not six
+      of each.
+
+      Note the chain runs every frame for as long as the bus is unmuted,
+      including frames where nothing is feeding it. That is deliberate: a
+      reverb or delay on a send has to keep ringing after the tracks
+      feeding it have gone quiet, and skipping the chain on silence would
+      freeze the tail mid-decay. Muting the bus does skip it, which is also
+      how you get the CPU back from a send you aren't using. }
+    for s := 0 to Project.SendCount - 1 do
+    begin
+      if not Project.SendEnabled[s] then
+        Continue;
+      SendTapL := SendL[s];
+      SendTapR := SendR[s];
+      for e := 0 to Project.SendEffectCount[s] - 1 do
+        if Project.SendEffects[s][e].Kind <> Effects.ekNone then
+          Effects.ProcessEffect(SendEffectState[s][e], Project.SendEffects[s][e],
+            SendTapL, SendTapR, ProjectSampleRate,
+            SidechainLevelFor(Project.SendEffects[s][e].SidechainSourceTrack));
+      L := L + SendTapL * Project.SendReturnLevel[s];
+      R := R + SendTapR * Project.SendReturnLevel[s];
     end;
 
     { metronome count-in: 4 clicks spaced one beat apart (at the current
@@ -1690,8 +1788,7 @@ begin
   while not Terminated do
   begin
     DrainCommands;
-    if Playing or AnyLiveNoteActive or (RecordState <> RecordStateIdle) or
-      AnyTrackMonitoring then
+    if EngineProcessingActive then
     begin
       FillBlock;
       if SP1200Enabled then
@@ -1808,6 +1905,9 @@ begin
   end;
   for e := 0 to Effects.MaxEffectsPerTrack - 1 do
     Effects.EffectStateReset(MasterEffectState[e]);
+  for i := 0 to Project.SendCount - 1 do
+    for e := 0 to Effects.MaxEffectsPerTrack - 1 do
+      Effects.EffectStateReset(SendEffectState[i][e]);
 
   BlockFrames := DefaultBlockFrames;
   GetMem(MixBuffer, BlockFrames * OutputChannels * SizeOf(Single));
@@ -2014,6 +2114,29 @@ end;
 function AudioEngineGetMetronomeEnabled: Boolean;
 begin
   Result := MetronomeEnabled;
+end;
+
+function AudioEngineTunerPitchHz(ATarget, AEffectIndex: Integer): Single;
+var
+  SendIndex: Integer;
+begin
+  Result := 0;
+  if (AEffectIndex < 0) or (AEffectIndex >= Effects.MaxEffectsPerTrack) then
+    Exit;
+  { With the realtime thread idle, nothing is updating TunerFreqHz and the
+    last reading is stale - report nothing rather than leave a note frozen
+    on the display after the transport stops. EngineProcessingActive rather
+    than Playing, because it also covers a monitored line-in with the
+    transport stopped, which is exactly when a tuner is most useful. }
+  if not EngineProcessingActive then
+    Exit;
+  SendIndex := Project.BusToSendIndex(ATarget);
+  if SendIndex >= 0 then
+    Result := Effects.TunerReadoutHz(SendEffectState[SendIndex][AEffectIndex])
+  else if ATarget = Project.BusMaster then
+    Result := Effects.TunerReadoutHz(MasterEffectState[AEffectIndex])
+  else if (ATarget >= 0) and (ATarget < MaxTracks) then
+    Result := Effects.TunerReadoutHz(TrackEffectState[ATarget][AEffectIndex]);
 end;
 
 function AudioEngineGetBufferSize: Integer;

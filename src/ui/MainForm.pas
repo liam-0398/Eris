@@ -187,6 +187,10 @@ type
     procedure AddPhaserEffectClick(Sender: TObject);
     procedure AddSidechainEffectClick(Sender: TObject);
     procedure AddDrowningEffectClick(Sender: TObject);
+    procedure AddTunerEffectClick(Sender: TObject);
+    procedure AddOverdriveEffectClick(Sender: TObject);
+    procedure AddQuadraverbReverbEffectClick(Sender: TObject);
+    procedure AddQuadraverbDelayEffectClick(Sender: TObject);
     procedure BuildEffectsMenu;
     procedure DevicePanelMouseDown(Sender: TObject; Button: TMouseButton;
       Shift: TShiftState; X, Y: Integer);
@@ -226,7 +230,7 @@ constructor TForm1.Create(AOwner: TComponent);
 begin
   inherited Create(AOwner);
   Caption := 'Eris';
-  FLastEffectsRackTrack := -2;
+  FLastEffectsRackTrack := Project.BusMaster;
   BuildMenu;
   BuildEffectsMenu;
   BuildLayout;
@@ -1946,28 +1950,30 @@ end;
 
 procedure TForm1.RebuildEffectWidgets;
 var
-  i, Track: Integer;
+  i, Target, SendIndex, Count: Integer;
 begin
   for i := 0 to High(FEffectWidgets) do
     FEffectWidgets[i].Free;
   FEffectWidgets := nil;
 
-  Track := FArrangementView.KeyboardTrack;
-  FLastEffectsRackTrack := Track;
-  if Track = -2 then
-  begin
-    SetLength(FEffectWidgets, Project.MasterEffectCount);
-    for i := 0 to High(FEffectWidgets) do
-      FEffectWidgets[i] := TEffectWidget.CreateFor(Self, FDevicePanel, -1, i,
-        @EffectRackChanged, True);
-  end
-  else if Track >= 0 then
-  begin
-    SetLength(FEffectWidgets, Project.TrackEffectCount[Track]);
-    for i := 0 to High(FEffectWidgets) do
-      FEffectWidgets[i] := TEffectWidget.CreateFor(Self, FDevicePanel, Track, i,
-        @EffectRackChanged);
-  end;
+  { Target is a track index or one of Project's Bus* constants; the widgets
+    take it verbatim and resolve their own chain from it }
+  Target := FArrangementView.KeyboardTrack;
+  FLastEffectsRackTrack := Target;
+  SendIndex := Project.BusToSendIndex(Target);
+  if SendIndex >= 0 then
+    Count := Project.SendEffectCount[SendIndex]
+  else if Target = Project.BusMaster then
+    Count := Project.MasterEffectCount
+  else if Target >= 0 then
+    Count := Project.TrackEffectCount[Target]
+  else
+    Count := 0;
+
+  SetLength(FEffectWidgets, Count);
+  for i := 0 to High(FEffectWidgets) do
+    FEffectWidgets[i] := TEffectWidget.CreateFor(Self, FDevicePanel, Target, i,
+      @EffectRackChanged);
 
   UpdateDevicePanelScroll;
 end;
@@ -1994,17 +2000,20 @@ end;
 
 procedure TForm1.AddEffectToCurrentTrack(AKind: Integer);
 var
-  Track: Integer;
+  Target, SendIndex: Integer;
   Added: Boolean;
 begin
-  Track := FArrangementView.KeyboardTrack;
-  if Track = -2 then
+  Target := FArrangementView.KeyboardTrack;
+  SendIndex := Project.BusToSendIndex(Target);
+  if SendIndex >= 0 then
+    Added := Project.AddSendEffect(SendIndex, AKind)
+  else if Target = Project.BusMaster then
     Added := Project.AddMasterEffect(AKind)
-  else if Track >= 0 then
-    Added := Project.AddTrackEffect(Track, AKind)
+  else if Target >= 0 then
+    Added := Project.AddTrackEffect(Target, AKind)
   else
   begin
-    ShowMessage('Select a track first.');
+    ShowMessage('Select a track, the Master row, or a send row first.');
     Exit;
   end;
   if not Added then
@@ -2070,6 +2079,26 @@ begin
   AddEffectToCurrentTrack(Effects.ekDrowning);
 end;
 
+procedure TForm1.AddTunerEffectClick(Sender: TObject);
+begin
+  AddEffectToCurrentTrack(Effects.ekTuner);
+end;
+
+procedure TForm1.AddOverdriveEffectClick(Sender: TObject);
+begin
+  AddEffectToCurrentTrack(Effects.ekOverdrive);
+end;
+
+procedure TForm1.AddQuadraverbReverbEffectClick(Sender: TObject);
+begin
+  AddEffectToCurrentTrack(Effects.ekQuadraverbReverb);
+end;
+
+procedure TForm1.AddQuadraverbDelayEffectClick(Sender: TObject);
+begin
+  AddEffectToCurrentTrack(Effects.ekQuadraverbDelay);
+end;
+
 procedure TForm1.BuildEffectsMenu;
 
   function AddCategory(const ACaption: string): TMenuItem;
@@ -2089,8 +2118,8 @@ procedure TForm1.BuildEffectsMenu;
   end;
 
 var
-  FiltersItem, EQItem, ModulationItem, ReverbItem, UtilityItem, MasteringItem,
-  ExperimentalItem: TMenuItem;
+  FiltersItem, EQItem, ModulationItem, DistortionItem, ReverbItem, DelayItem,
+  UtilityItem, MasteringItem, ExperimentalItem: TMenuItem;
 begin
   FEffectsMenu := TPopupMenu.Create(Self);
 
@@ -2107,11 +2136,19 @@ begin
   AddEffectItem(ModulationItem, 'Flanger', @AddFlangerEffectClick);
   AddEffectItem(ModulationItem, 'Phaser', @AddPhaserEffectClick);
 
+  DistortionItem := AddCategory('Distortion');
+  AddEffectItem(DistortionItem, 'Overdrive', @AddOverdriveEffectClick);
+
   ReverbItem := AddCategory('Reverb');
   AddEffectItem(ReverbItem, 'Basic Reverb', @AddReverbEffectClick);
+  AddEffectItem(ReverbItem, 'QuadraVerb Reverb', @AddQuadraverbReverbEffectClick);
+
+  DelayItem := AddCategory('Delay');
+  AddEffectItem(DelayItem, 'QuadraVerb Delay', @AddQuadraverbDelayEffectClick);
 
   UtilityItem := AddCategory('Utility');
   AddEffectItem(UtilityItem, 'Sidechain', @AddSidechainEffectClick);
+  AddEffectItem(UtilityItem, 'Tuner', @AddTunerEffectClick);
 
   MasteringItem := AddCategory('Mastering');
   AddEffectItem(MasteringItem, 'Limiter', @AddLimiterEffectClick);
@@ -2352,12 +2389,34 @@ end;
 
 procedure TForm1.UpdateDevicePanel;
 var
-  Track, SampleID: Integer;
+  Track, SampleID, SendIndex: Integer;
 begin
   Track := FArrangementView.KeyboardTrack;
   UpdateSwingControls;
 
-  if Track = -2 then
+  { a send bus, like the Master row, has no instrument and no clip to warp -
+    the whole bottom bar for it is just its effect chain, which is the point
+    of clicking the S row in the first place }
+  SendIndex := Project.BusToSendIndex(Track);
+  if SendIndex >= 0 then
+  begin
+    FTrackWidgetLabel.Caption := Format('Send S%d', [SendIndex + 1]);
+    FInstrumentWidget.Visible := False;
+    FInstrumentEditorWidget.Visible := False;
+    FSamplerWidget.Visible := False;
+    FSamplerEditorWidget.Visible := False;
+    FWarpWidget.Visible := False;
+    FDropHintLabel.Caption := Format(
+      'Send bus S%d - right-click here to add effects every track on this send shares',
+      [SendIndex + 1]);
+    FDropHintLabel.Visible := True;
+    if FLastEffectsRackTrack <> Track then
+      RebuildEffectWidgets;
+    UpdateDevicePanelScroll;
+    Exit;
+  end;
+
+  if Track = Project.BusMaster then
   begin
     FTrackWidgetLabel.Caption := 'Master';
     FInstrumentWidget.Visible := False;
@@ -2506,10 +2565,11 @@ begin
     Exit;
 
   TotalOffset := ASemitoneOffset + Project.TrackOctave[Track] * 12;
-  { instrument gain trim rides on top of the track fader - see
-    Project.TrackInstrumentGainDb }
+  { instrument gain trim only - the track fader itself is applied by
+    AudioEngine.FillBlock now rather than being baked into the note's gain
+    here, so that notes and clips both pass through one fader in one place }
   AudioEngineTriggerNote(Track, @Sample.Data[StartFrame * Sample.Channels],
-    TrimmedCount, Sample.Channels, TotalOffset, Project.TrackVolume[Track] *
+    TrimmedCount, Sample.Channels, TotalOffset,
     Power(10, Project.TrackInstrumentGainDb[Track] / 20));
 end;
 
@@ -2561,10 +2621,11 @@ begin
     Exit;
 
   TotalOffset := (Project.TrackOctave[Track] + AOctaveDelta) * 12;
-  { instrument gain trim rides on top of the track fader - see
-    Project.TrackInstrumentGainDb }
+  { instrument gain trim only - the track fader itself is applied by
+    AudioEngine.FillBlock now rather than being baked into the note's gain
+    here, so that notes and clips both pass through one fader in one place }
   AudioEngineTriggerNote(Track, @Sample.Data[StartFrame * Sample.Channels],
-    TrimmedCount, Sample.Channels, TotalOffset, Project.TrackVolume[Track] *
+    TrimmedCount, Sample.Channels, TotalOffset,
     Power(10, Project.TrackInstrumentGainDb[Track] / 20));
 end;
 

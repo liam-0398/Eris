@@ -6,21 +6,48 @@ interface
 
 uses
   Classes, SysUtils, Controls, StdCtrls, ComCtrls, ExtCtrls, Graphics, Effects,
-  Project, UIScale;
+  Quadraverb, Project, UIScale;
 
 type
   PEffect = ^Effects.TEffect;
 
   TEffectRackChangedEvent = procedure(Sender: TObject) of object;
 
+  { The Tuner's readout face. Custom-painted rather than assembled out of
+    TLabels for two reasons: the three dots per side have to hold fixed
+    positions as the reading moves (a text label reflows and jitters, which
+    is exactly what you don't want to be watching while tuning), and a dark
+    LED-style face reads at a glance the way a tuner has to.
+
+    It owns its own poll timer and pulls the latest detected pitch straight
+    off the audio thread via AudioEngineTunerPitchHz - there is no push from
+    the engine and nothing to unsubscribe, so the whole thing dies cleanly
+    with the TEffectWidget that owns it. }
+  TTunerDisplay = class(TCustomControl)
+  private
+    FTarget: Integer;
+    FEffectIndex: Integer;
+    FTimer: TTimer;
+    FFreqHz: Single;
+    procedure PollTimerTimer(Sender: TObject);
+    procedure DrawDots(ACount, ADirection, ACenterX, ACenterY: Integer;
+      AColor: TColor);
+  protected
+    procedure Paint; override;
+  public
+    constructor CreateFor(AOwner: TComponent; AParent: TWinControl;
+      ATarget, AEffectIndex: Integer);
+  end;
+
   { one effect's widget box - a plain TPanel populated with whichever native
     controls its Kind needs, wired directly to Project.TrackEffects, or to
     Project.MasterEffects when AIsMaster is set }
   TEffectWidget = class(TPanel)
   private
-    FTrackIndex: Integer;
+    { which chain this widget edits: >= 0 is a track index, otherwise one of
+      Project's Bus* constants (master or a send) }
+    FTarget: Integer;
     FEffectIndex: Integer;
-    FIsMaster: Boolean;
     FOnRackChanged: TEffectRackChangedEvent;
     FLPSlider: TTrackBar;
     FLPValueLabel: TLabel;
@@ -58,6 +85,24 @@ type
       FDrowningSizeSlider, FDrowningDecaySlider, FDrowningMixSlider: TTrackBar;
     FDrowningToneValueLabel, FDrowningWarbleRateValueLabel, FDrowningWarbleDepthValueLabel,
       FDrowningSizeValueLabel, FDrowningDecayValueLabel, FDrowningMixValueLabel: TLabel;
+    FTunerDisplay: TTunerDisplay;
+    FOverdriveFreqSlider, FOverdriveQSlider, FOverdriveDriveSlider,
+      FOverdriveColorSlider, FOverdriveMixSlider: TTrackBar;
+    FOverdriveFreqValueLabel, FOverdriveQValueLabel, FOverdriveDriveValueLabel,
+      FOverdriveColorValueLabel, FOverdriveMixValueLabel: TLabel;
+    FQVRTypeCombo: TComboBox;
+    FQVRDecayCaption: TLabel;
+    FQVRPredelaySlider, FQVRPredelayMixSlider, FQVRDecaySlider,
+      FQVRDiffusionSlider, FQVRDensitySlider, FQVRLowDecaySlider,
+      FQVRHighDecaySlider, FQVRMixSlider: TTrackBar;
+    FQVRPredelayValueLabel, FQVRPredelayMixValueLabel, FQVRDecayValueLabel,
+      FQVRDiffusionValueLabel, FQVRDensityValueLabel, FQVRLowDecayValueLabel,
+      FQVRHighDecayValueLabel, FQVRMixValueLabel: TLabel;
+    FQVDTypeCombo: TComboBox;
+    FQVDTimeLEdit, FQVDTimeREdit: TEdit;
+    FQVDTimeRCaption: TLabel;
+    FQVDFeedbackLSlider, FQVDFeedbackRSlider, FQVDMixSlider: TTrackBar;
+    FQVDFeedbackLValueLabel, FQVDFeedbackRValueLabel, FQVDMixValueLabel: TLabel;
     function EffectPtr: PEffect;
     procedure DeleteClick(Sender: TObject);
     procedure LPSliderChange(Sender: TObject);
@@ -91,6 +136,30 @@ type
     procedure DrowningSizeSliderChange(Sender: TObject);
     procedure DrowningDecaySliderChange(Sender: TObject);
     procedure DrowningMixSliderChange(Sender: TObject);
+    procedure OverdriveFreqSliderChange(Sender: TObject);
+    procedure OverdriveQSliderChange(Sender: TObject);
+    procedure OverdriveDriveSliderChange(Sender: TObject);
+    procedure OverdriveColorSliderChange(Sender: TObject);
+    procedure OverdriveMixSliderChange(Sender: TObject);
+    procedure QVRTypeChange(Sender: TObject);
+    procedure QVRPredelaySliderChange(Sender: TObject);
+    procedure QVRPredelayMixSliderChange(Sender: TObject);
+    procedure QVRDecaySliderChange(Sender: TObject);
+    procedure QVRDiffusionSliderChange(Sender: TObject);
+    procedure QVRDensitySliderChange(Sender: TObject);
+    procedure QVRLowDecaySliderChange(Sender: TObject);
+    procedure QVRHighDecaySliderChange(Sender: TObject);
+    procedure QVRMixSliderChange(Sender: TObject);
+    procedure QVRUpdateTypeDependentLabels;
+    procedure QVDTypeChange(Sender: TObject);
+    procedure QVDTimeEditDone(Sender: TObject);
+    procedure QVDFeedbackLSliderChange(Sender: TObject);
+    procedure QVDFeedbackRSliderChange(Sender: TObject);
+    procedure QVDMixSliderChange(Sender: TObject);
+    procedure QVDUpdateTypeDependentControls;
+    function QVAddColumn(ALeft: Integer; const ACaption: string;
+      AMin, AMax, APosition: Integer; AOnChange: TNotifyEvent;
+      const AHint: string; out AValueLabel: TLabel): TTrackBar;
     procedure BuildLowpass;
     procedure BuildHighpass;
     procedure BuildBandpass;
@@ -102,10 +171,13 @@ type
     procedure BuildPhaser;
     procedure BuildSidechain;
     procedure BuildDrowning;
+    procedure BuildTuner;
+    procedure BuildOverdrive;
+    procedure BuildQuadraverbReverb;
+    procedure BuildQuadraverbDelay;
   public
     constructor CreateFor(AOwner: TComponent; AParent: TWinControl;
-      ATrackIndex, AEffectIndex: Integer; AOnRackChanged: TEffectRackChangedEvent;
-      AIsMaster: Boolean = False);
+      ATarget, AEffectIndex: Integer; AOnRackChanged: TEffectRackChangedEvent);
   end;
 
 const
@@ -193,8 +265,65 @@ const
   PhaserColWidth = 54;
   PhaserColGap = 6;
   PhaserLeftMargin = 8;
+  { Tuner: one standard-width box holding nothing but a readout face, so the
+    only sizes here are the face's own inset and internals }
+  TunerWidgetWidth = 220;
+  TunerFaceTop = 34;
+  TunerFaceMargin = 8;
+  TunerFaceBottomGap = 26; { room for the pass-through caption below the face }
+  TunerNoteFontHeight = 26;
+  TunerDotRadius = 4;
+  TunerDotSpacing = 16;
+  { distance from the centre of the face out to the FIRST dot. Has to clear
+    the widest note name the readout can ever show - "C#-1", four characters
+    at TunerNoteFontHeight bold - because the dots sit at fixed offsets
+    rather than being measured off each individual reading (see Paint) }
+  TunerDotInset = 48;
+  { $00BBGGRR, like every other TColor literal in this codebase }
+  TunerFaceColor = $001A1512;      { near-black, very slightly warm }
+  TunerInTuneColor = $0050FF50;    { green - dead on the note }
+  TunerOffPitchColor = $0000AAFF;  { amber - drifting }
+  TunerDimColor = $00555555;       { unlit dots and the idle readout }
+  TunerCentsColor = $00909090;
+  { Overdrive: EQ4-style narrow columns for Freq / Q / Drive / Color / Mix }
+  OverdriveColCount = 5;
+  OverdriveColWidth = 54;
+  OverdriveColGap = 6;
+  OverdriveLeftMargin = 8;
+  { Q reuses Bandpass's slider convention (position / 20), floored at the
+    same 0.1 the DSP clamps to rather than at a Q of 0 the filter can't use }
+  OverdriveMinQx20 = 2;
+  OverdriveMaxQx20 = 100;
+  OverdriveMinDrivePercent = 0;
+  OverdriveMaxDrivePercent = 100;
+  OverdriveMinColorPercent = 0;
+  OverdriveMaxColorPercent = 100;
+  OverdriveMinMixPercent = 0;
+  OverdriveMaxMixPercent = 100;
+  { QuadraVerb Reverb: one wide column for the reverb-type dropdown, then
+    eight standard slider columns - one per remaining front-panel page.
+    Every range comes from Quadraverb.pas rather than being restated here,
+    so the UI can't drift from what the DSP actually accepts. }
+  QVRTypeColWidth = 96;
+  QVRColCount = 8;
+  QVRColWidth = 54;
+  QVRColGap = 6;
+  QVRLeftMargin = 8;
+  { QuadraVerb Delay: wide first column stacking the type dropdown over the
+    two delay-time entries. Times are typed rather than dragged - a slider
+    spanning 1-800ms across one widget's worth of travel can't resolve a
+    single millisecond, and delay times are the one thing on this box you
+    genuinely want to dial exactly. }
+  QVDTypeColWidth = 96;
+  QVDColCount = 3;
+  QVDColWidth = 54;
+  QVDColGap = 6;
+  QVDLeftMargin = 8;
 
 implementation
+
+uses
+  AudioEngine;
 
 function FreqToLogSlider(AFreqHz: Single): Integer;
 begin
@@ -208,26 +337,173 @@ begin
   Result := LPMinHz * Exp((APos / 100) * Ln(LPMaxHz / LPMinHz));
 end;
 
-function TEffectWidget.EffectPtr: PEffect;
+constructor TTunerDisplay.CreateFor(AOwner: TComponent; AParent: TWinControl;
+  ATarget, AEffectIndex: Integer);
 begin
-  if FIsMaster then
+  inherited Create(AOwner);
+  FTarget := ATarget;
+  FEffectIndex := AEffectIndex;
+  FFreqHz := 0;
+  Parent := AParent;
+  { this repaints several times a second forever, so it has to be
+    double-buffered - an undrawn FillRect flash at that rate is very visible
+    on X11. Color matches the face so a resize/erase can't flash grey either. }
+  DoubleBuffered := True;
+  Color := TunerFaceColor;
+
+  { owned by Self, not by the form - so it dies with this control when
+    MainForm.RebuildEffectWidgets frees the widget tree, rather than
+    outliving it and firing at a freed canvas }
+  FTimer := TTimer.Create(Self);
+  FTimer.Interval := 80; { ~12 refreshes a second; the detector itself only
+    produces a new reading about 17 times a second, so there is nothing to
+    gain from polling faster }
+  FTimer.OnTimer := @PollTimerTimer;
+  FTimer.Enabled := True;
+end;
+
+procedure TTunerDisplay.PollTimerTimer(Sender: TObject);
+var
+  NewFreq: Single;
+begin
+  NewFreq := AudioEngineTunerPitchHz(FTarget, FEffectIndex);
+  { only repaint on a real change - a held note settles to a steady reading
+    and there is no reason to keep redrawing it }
+  if Abs(NewFreq - FFreqHz) < 0.01 then
+    Exit;
+  FFreqHz := NewFreq;
+  Invalidate;
+end;
+
+{ Draws up to three dots marching away from the note, ADirection -1 for the
+  flat side and +1 for the sharp side. The lit ones are always the INNERMOST
+  ones, so the trail grows outward from the note as the pitch drifts further
+  off; the unlit remainder stays drawn but dim, to keep the face from
+  changing shape every reading. }
+procedure TTunerDisplay.DrawDots(ACount, ADirection, ACenterX, ACenterY: Integer;
+  AColor: TColor);
+var
+  i, x, r: Integer;
+begin
+  r := Px(TunerDotRadius);
+  Canvas.Pen.Style := psClear;
+  for i := 0 to 2 do
+  begin
+    x := ACenterX + ADirection * Px(TunerDotInset + i * TunerDotSpacing);
+    if i < ACount then
+      Canvas.Brush.Color := AColor
+    else
+      Canvas.Brush.Color := TunerDimColor;
+    Canvas.Ellipse(x - r, ACenterY - r, x + r, ACenterY + r);
+  end;
+  Canvas.Pen.Style := psSolid;
+end;
+
+procedure TTunerDisplay.Paint;
+var
+  MidiNote, Dots, FlatDots, SharpDots, CenterX, CenterY, TextW: Integer;
+  Cents: Single;
+  NoteText, CentsText: string;
+  NoteColor: TColor;
+  HaveNote: Boolean;
+begin
+  Canvas.Brush.Color := TunerFaceColor;
+  Canvas.Brush.Style := bsSolid;
+  Canvas.FillRect(Rect(0, 0, Width, Height));
+  Canvas.Pen.Color := clBlack;
+  Canvas.Brush.Style := bsClear;
+  Canvas.Rectangle(0, 0, Width, Height);
+  Canvas.Brush.Style := bsSolid;
+
+  HaveNote := Effects.TunerNoteFromFreq(FFreqHz, MidiNote, Cents);
+  CenterX := Width div 2;
+  CenterY := Height div 2 - Px(6);
+
+  if not HaveNote then
+  begin
+    { idle face: the dots stay put, dim, so the readout doesn't visibly
+      rearrange itself the moment a note arrives }
+    NoteText := '--';
+    NoteColor := TunerDimColor;
+    Dots := 0;
+    Cents := 0;
+  end
+  else
+  begin
+    NoteText := Effects.TunerNoteNames[MidiNote mod 12] +
+      IntToStr(MidiNote div 12 - 1);
+    Dots := Effects.TunerDotCount(Cents);
+    if Dots = 0 then
+      NoteColor := TunerInTuneColor
+    else
+      NoteColor := TunerOffPitchColor;
+  end;
+
+  Canvas.Font.Height := -Px(TunerNoteFontHeight);
+  Canvas.Font.Style := [fsBold];
+  Canvas.Font.Color := NoteColor;
+  Canvas.Brush.Style := bsClear;
+  TextW := Canvas.TextWidth(NoteText);
+  Canvas.TextOut(CenterX - TextW div 2,
+    CenterY - Canvas.TextHeight(NoteText) div 2, NoteText);
+  Canvas.Brush.Style := bsSolid;
+
+  { the dots only light on the side the pitch has drifted TOWARDS: flat
+    (below the note) reads left, sharp reads right. Both sides are always
+    drawn, unlit ones dim, so the face keeps a fixed shape. }
+  if Cents < 0 then
+    FlatDots := Dots
+  else
+    FlatDots := 0;
+  if Cents > 0 then
+    SharpDots := Dots
+  else
+    SharpDots := 0;
+  { the dots hang off fixed offsets from the centre of the face rather than
+    off this particular reading's text width, so they don't slide in and out
+    as the note name changes between three and four characters }
+  DrawDots(FlatDots, -1, CenterX, CenterY, NoteColor);
+  DrawDots(SharpDots, 1, CenterX, CenterY, NoteColor);
+
+  Canvas.Font.Height := -Px(11);
+  Canvas.Font.Style := [];
+  Canvas.Font.Color := TunerCentsColor;
+  Canvas.Brush.Style := bsClear;
+  if not HaveNote then
+    CentsText := 'no pitch'
+  else if Round(Cents) > 0 then
+    { explicit sign, so the number agrees with the side the dots lit on }
+    CentsText := Format('+%d cents   %.1f Hz', [Round(Cents), FFreqHz])
+  else
+    CentsText := Format('%d cents   %.1f Hz', [Round(Cents), FFreqHz]);
+  TextW := Canvas.TextWidth(CentsText);
+  Canvas.TextOut(CenterX - TextW div 2, Height - Px(18), CentsText);
+  Canvas.Brush.Style := bsSolid;
+end;
+
+function TEffectWidget.EffectPtr: PEffect;
+var
+  SendIndex: Integer;
+begin
+  SendIndex := Project.BusToSendIndex(FTarget);
+  if SendIndex >= 0 then
+    Result := @Project.SendEffects[SendIndex][FEffectIndex]
+  else if FTarget = Project.BusMaster then
     Result := @Project.MasterEffects[FEffectIndex]
   else
-    Result := @Project.TrackEffects[FTrackIndex][FEffectIndex];
+    Result := @Project.TrackEffects[FTarget][FEffectIndex];
 end;
 
 constructor TEffectWidget.CreateFor(AOwner: TComponent; AParent: TWinControl;
-  ATrackIndex, AEffectIndex: Integer; AOnRackChanged: TEffectRackChangedEvent;
-  AIsMaster: Boolean = False);
+  ATarget, AEffectIndex: Integer; AOnRackChanged: TEffectRackChangedEvent);
 var
   DeleteButton: TButton;
   TitleLabel: TLabel;
   Kind: Integer;
 begin
   inherited Create(AOwner);
-  FTrackIndex := ATrackIndex;
+  FTarget := ATarget;
   FEffectIndex := AEffectIndex;
-  FIsMaster := AIsMaster;
   FOnRackChanged := AOnRackChanged;
   Parent := AParent;
   BevelOuter := bvRaised;
@@ -252,6 +528,10 @@ begin
     Effects.ekPhaser: TitleLabel.Caption := 'Phaser';
     Effects.ekSidechain: TitleLabel.Caption := 'Sidechain';
     Effects.ekDrowning: TitleLabel.Caption := 'Drowning';
+    Effects.ekTuner: TitleLabel.Caption := 'Tuner';
+    Effects.ekOverdrive: TitleLabel.Caption := 'Overdrive';
+    Effects.ekQuadraverbReverb: TitleLabel.Caption := 'QuadraVerb Reverb';
+    Effects.ekQuadraverbDelay: TitleLabel.Caption := 'QuadraVerb Delay';
   end;
 
   DeleteButton := TButton.Create(AOwner);
@@ -338,6 +618,32 @@ begin
         Width := Px(DrowningLeftMargin + DrowningColCount * (DrowningColWidth + DrowningColGap) + DrowningLeftMargin);
         DeleteButton.Left := Width - Px(28);
         BuildDrowning;
+      end;
+    Effects.ekTuner:
+      begin
+        Width := Px(TunerWidgetWidth);
+        DeleteButton.Left := Width - Px(28);
+        BuildTuner;
+      end;
+    Effects.ekOverdrive:
+      begin
+        Width := Px(OverdriveLeftMargin + OverdriveColCount * (OverdriveColWidth + OverdriveColGap) + OverdriveLeftMargin);
+        DeleteButton.Left := Width - Px(28);
+        BuildOverdrive;
+      end;
+    Effects.ekQuadraverbReverb:
+      begin
+        Width := Px(QVRLeftMargin + QVRTypeColWidth + QVRColGap +
+          QVRColCount * (QVRColWidth + QVRColGap) + QVRLeftMargin);
+        DeleteButton.Left := Width - Px(28);
+        BuildQuadraverbReverb;
+      end;
+    Effects.ekQuadraverbDelay:
+      begin
+        Width := Px(QVDLeftMargin + QVDTypeColWidth + QVDColGap +
+          QVDColCount * (QVDColWidth + QVDColGap) + QVDLeftMargin);
+        DeleteButton.Left := Width - Px(28);
+        BuildQuadraverbDelay;
       end;
   end;
 end;
@@ -1191,12 +1497,417 @@ begin
   FDrowningMixValueLabel.Caption := Format('%d%%', [Round(EffectPtr^.DrowningMixPercent)]);
 end;
 
-procedure TEffectWidget.DeleteClick(Sender: TObject);
+procedure TEffectWidget.BuildTuner;
+var
+  Lbl: TLabel;
 begin
-  if FIsMaster then
+  { no controls at all - a tuner has nothing to set. The whole box is the
+    readout face plus one line saying what it does (and doesn't) do. }
+  FTunerDisplay := TTunerDisplay.CreateFor(Self, Self, FTarget, FEffectIndex);
+  FTunerDisplay.Left := Px(TunerFaceMargin);
+  FTunerDisplay.Top := Px(TunerFaceTop);
+  FTunerDisplay.Width := Width - 2 * Px(TunerFaceMargin);
+  FTunerDisplay.Height := Px(WidgetHeight - TunerFaceTop - TunerFaceBottomGap);
+
+  Lbl := TLabel.Create(Owner);
+  Lbl.Parent := Self;
+  Lbl.Left := Px(TunerFaceMargin);
+  Lbl.Top := Px(WidgetHeight - 20);
+  Lbl.Caption := 'Listens only - audio unchanged';
+end;
+
+procedure TEffectWidget.BuildOverdrive;
+var
+  Lbl1, Lbl2, Lbl3, Lbl4, Lbl5: TLabel;
+  Col1, Col2, Col3, Col4, Col5: Integer;
+begin
+  { horizontal, EQ4-style column layout - see BuildFlanger's comment, same
+    idea, 5 columns }
+  Col1 := OverdriveLeftMargin;
+  Col2 := Col1 + OverdriveColWidth + OverdriveColGap;
+  Col3 := Col2 + OverdriveColWidth + OverdriveColGap;
+  Col4 := Col3 + OverdriveColWidth + OverdriveColGap;
+  Col5 := Col4 + OverdriveColWidth + OverdriveColGap;
+
+  Lbl1 := TLabel.Create(Owner);
+  Lbl1.Parent := Self;
+  Lbl1.Left := Px(Col1);
+  Lbl1.Top := Px(30);
+  Lbl1.Caption := 'Freq';
+
+  FOverdriveFreqSlider := TTrackBar.Create(Owner);
+  FOverdriveFreqSlider.Parent := Self;
+  FOverdriveFreqSlider.Orientation := trVertical;
+  FOverdriveFreqSlider.Left := Px(Col1);
+  FOverdriveFreqSlider.Top := Px(48);
+  FOverdriveFreqSlider.Width := Px(OverdriveColWidth);
+  FOverdriveFreqSlider.Height := Px(WidgetHeight - 48 - 24);
+  FOverdriveFreqSlider.Reversed := True;
+  FOverdriveFreqSlider.Min := 0;
+  FOverdriveFreqSlider.Max := 100;
+  FOverdriveFreqSlider.Position := FreqToLogSlider(EffectPtr^.OverdriveFreqHz);
+  FOverdriveFreqSlider.ShowHint := True;
+  FOverdriveFreqSlider.Hint := 'Which band gets driven hardest';
+  FOverdriveFreqSlider.OnChange := @OverdriveFreqSliderChange;
+
+  FOverdriveFreqValueLabel := TLabel.Create(Owner);
+  FOverdriveFreqValueLabel.Parent := Self;
+  FOverdriveFreqValueLabel.Left := Px(Col1);
+  FOverdriveFreqValueLabel.Top := Px(WidgetHeight - 22);
+  FOverdriveFreqValueLabel.Caption := Format('%dHz', [Round(EffectPtr^.OverdriveFreqHz)]);
+
+  Lbl2 := TLabel.Create(Owner);
+  Lbl2.Parent := Self;
+  Lbl2.Left := Px(Col2);
+  Lbl2.Top := Px(30);
+  Lbl2.Caption := 'Q';
+
+  FOverdriveQSlider := TTrackBar.Create(Owner);
+  FOverdriveQSlider.Parent := Self;
+  FOverdriveQSlider.Orientation := trVertical;
+  FOverdriveQSlider.Left := Px(Col2);
+  FOverdriveQSlider.Top := Px(48);
+  FOverdriveQSlider.Width := Px(OverdriveColWidth);
+  FOverdriveQSlider.Height := Px(WidgetHeight - 48 - 24);
+  FOverdriveQSlider.Reversed := True;
+  FOverdriveQSlider.Min := OverdriveMinQx20;
+  FOverdriveQSlider.Max := OverdriveMaxQx20;
+  FOverdriveQSlider.Position := Round(EffectPtr^.OverdriveQ * 20);
+  FOverdriveQSlider.ShowHint := True;
+  FOverdriveQSlider.Hint := 'How narrow that band is';
+  FOverdriveQSlider.OnChange := @OverdriveQSliderChange;
+
+  FOverdriveQValueLabel := TLabel.Create(Owner);
+  FOverdriveQValueLabel.Parent := Self;
+  FOverdriveQValueLabel.Left := Px(Col2);
+  FOverdriveQValueLabel.Top := Px(WidgetHeight - 22);
+  FOverdriveQValueLabel.Caption := Format('%.2f', [EffectPtr^.OverdriveQ]);
+
+  Lbl3 := TLabel.Create(Owner);
+  Lbl3.Parent := Self;
+  Lbl3.Left := Px(Col3);
+  Lbl3.Top := Px(30);
+  Lbl3.Caption := 'Drive';
+
+  FOverdriveDriveSlider := TTrackBar.Create(Owner);
+  FOverdriveDriveSlider.Parent := Self;
+  FOverdriveDriveSlider.Orientation := trVertical;
+  FOverdriveDriveSlider.Left := Px(Col3);
+  FOverdriveDriveSlider.Top := Px(48);
+  FOverdriveDriveSlider.Width := Px(OverdriveColWidth);
+  FOverdriveDriveSlider.Height := Px(WidgetHeight - 48 - 24);
+  FOverdriveDriveSlider.Reversed := True;
+  FOverdriveDriveSlider.Min := OverdriveMinDrivePercent;
+  FOverdriveDriveSlider.Max := OverdriveMaxDrivePercent;
+  FOverdriveDriveSlider.Position := Round(EffectPtr^.OverdriveDrivePercent);
+  FOverdriveDriveSlider.OnChange := @OverdriveDriveSliderChange;
+
+  FOverdriveDriveValueLabel := TLabel.Create(Owner);
+  FOverdriveDriveValueLabel.Parent := Self;
+  FOverdriveDriveValueLabel.Left := Px(Col3);
+  FOverdriveDriveValueLabel.Top := Px(WidgetHeight - 22);
+  FOverdriveDriveValueLabel.Caption := Format('%d%%', [Round(EffectPtr^.OverdriveDrivePercent)]);
+
+  Lbl4 := TLabel.Create(Owner);
+  Lbl4.Parent := Self;
+  Lbl4.Left := Px(Col4);
+  Lbl4.Top := Px(30);
+  Lbl4.Caption := 'Color';
+
+  FOverdriveColorSlider := TTrackBar.Create(Owner);
+  FOverdriveColorSlider.Parent := Self;
+  FOverdriveColorSlider.Orientation := trVertical;
+  FOverdriveColorSlider.Left := Px(Col4);
+  FOverdriveColorSlider.Top := Px(48);
+  FOverdriveColorSlider.Width := Px(OverdriveColWidth);
+  FOverdriveColorSlider.Height := Px(WidgetHeight - 48 - 24);
+  FOverdriveColorSlider.Reversed := True;
+  FOverdriveColorSlider.Min := OverdriveMinColorPercent;
+  FOverdriveColorSlider.Max := OverdriveMaxColorPercent;
+  FOverdriveColorSlider.Position := Round(EffectPtr^.OverdriveColorPercent);
+  FOverdriveColorSlider.ShowHint := True;
+  FOverdriveColorSlider.Hint := '0% = warm soft knee, 100% = hard crunch';
+  FOverdriveColorSlider.OnChange := @OverdriveColorSliderChange;
+
+  FOverdriveColorValueLabel := TLabel.Create(Owner);
+  FOverdriveColorValueLabel.Parent := Self;
+  FOverdriveColorValueLabel.Left := Px(Col4);
+  FOverdriveColorValueLabel.Top := Px(WidgetHeight - 22);
+  FOverdriveColorValueLabel.Caption := Format('%d%%', [Round(EffectPtr^.OverdriveColorPercent)]);
+
+  Lbl5 := TLabel.Create(Owner);
+  Lbl5.Parent := Self;
+  Lbl5.Left := Px(Col5);
+  Lbl5.Top := Px(30);
+  Lbl5.Caption := 'Mix';
+
+  FOverdriveMixSlider := TTrackBar.Create(Owner);
+  FOverdriveMixSlider.Parent := Self;
+  FOverdriveMixSlider.Orientation := trVertical;
+  FOverdriveMixSlider.Left := Px(Col5);
+  FOverdriveMixSlider.Top := Px(48);
+  FOverdriveMixSlider.Width := Px(OverdriveColWidth);
+  FOverdriveMixSlider.Height := Px(WidgetHeight - 48 - 24);
+  FOverdriveMixSlider.Reversed := True;
+  FOverdriveMixSlider.Min := OverdriveMinMixPercent;
+  FOverdriveMixSlider.Max := OverdriveMaxMixPercent;
+  FOverdriveMixSlider.Position := Round(EffectPtr^.OverdriveMixPercent);
+  FOverdriveMixSlider.OnChange := @OverdriveMixSliderChange;
+
+  FOverdriveMixValueLabel := TLabel.Create(Owner);
+  FOverdriveMixValueLabel.Parent := Self;
+  FOverdriveMixValueLabel.Left := Px(Col5);
+  FOverdriveMixValueLabel.Top := Px(WidgetHeight - 22);
+  FOverdriveMixValueLabel.Caption := Format('%d%%', [Round(EffectPtr^.OverdriveMixPercent)]);
+end;
+
+{ Shared shape for every QuadraVerb slider column: caption on top, vertical
+  slider filling the middle, live value readout at the bottom - the same
+  EQ4-style column the rest of the rack uses, just built once here instead
+  of copied eight times. }
+function TEffectWidget.QVAddColumn(ALeft: Integer; const ACaption: string;
+  AMin, AMax, APosition: Integer; AOnChange: TNotifyEvent;
+  const AHint: string; out AValueLabel: TLabel): TTrackBar;
+var
+  Lbl: TLabel;
+begin
+  Lbl := TLabel.Create(Owner);
+  Lbl.Parent := Self;
+  Lbl.Left := Px(ALeft);
+  Lbl.Top := Px(30);
+  Lbl.Caption := ACaption;
+
+  Result := TTrackBar.Create(Owner);
+  Result.Parent := Self;
+  Result.Orientation := trVertical;
+  Result.Left := Px(ALeft);
+  Result.Top := Px(48);
+  Result.Width := Px(QVRColWidth);
+  Result.Height := Px(WidgetHeight - 48 - 24);
+  Result.Reversed := True;
+  Result.Min := AMin;
+  Result.Max := AMax;
+  if APosition < AMin then APosition := AMin;
+  if APosition > AMax then APosition := AMax;
+  Result.Position := APosition;
+  if AHint <> '' then
+  begin
+    Result.ShowHint := True;
+    Result.Hint := AHint;
+  end;
+  Result.OnChange := AOnChange;
+
+  AValueLabel := TLabel.Create(Owner);
+  AValueLabel.Parent := Self;
+  AValueLabel.Left := Px(ALeft);
+  AValueLabel.Top := Px(WidgetHeight - 22);
+end;
+
+{ "PRE 40" / "00" / "PST 70", matching how the original's own Predelay Mix
+  page reads (PRE <-99 ... 00 ... 99-> POST). }
+function QVPredelayMixText(AValue: Integer): string;
+begin
+  if AValue < 0 then
+    Result := Format('PRE%d', [-AValue])
+  else if AValue > 0 then
+    Result := Format('PST%d', [AValue])
+  else
+    Result := '00';
+end;
+
+procedure TEffectWidget.BuildQuadraverbReverb;
+var
+  Lbl: TLabel;
+  t, Col, ColStep: Integer;
+begin
+  ColStep := QVRColWidth + QVRColGap;
+
+  Lbl := TLabel.Create(Owner);
+  Lbl.Parent := Self;
+  Lbl.Left := Px(QVRLeftMargin);
+  Lbl.Top := Px(30);
+  Lbl.Caption := 'Reverb type';
+
+  FQVRTypeCombo := TComboBox.Create(Owner);
+  FQVRTypeCombo.Parent := Self;
+  FQVRTypeCombo.Style := csDropDownList;
+  FQVRTypeCombo.Left := Px(QVRLeftMargin);
+  FQVRTypeCombo.Top := Px(48);
+  FQVRTypeCombo.Width := Px(QVRTypeColWidth);
+  for t := 0 to Quadraverb.QVReverbTypeCount - 1 do
+    FQVRTypeCombo.Items.Add(Quadraverb.QVReverbTypeNames[t]);
+  if (EffectPtr^.QVReverbType >= 0) and
+    (EffectPtr^.QVReverbType < Quadraverb.QVReverbTypeCount) then
+    FQVRTypeCombo.ItemIndex := EffectPtr^.QVReverbType
+  else
+    FQVRTypeCombo.ItemIndex := Quadraverb.QVReverbHall;
+  FQVRTypeCombo.OnChange := @QVRTypeChange;
+
+  { the two pages whose meaning depends on the type get a note under the
+    dropdown rather than being silently different - the real unit relabels
+    Decay to Reverse Time and drops the Density page on Hall }
+  FQVRDecayCaption := TLabel.Create(Owner);
+  FQVRDecayCaption.Parent := Self;
+  FQVRDecayCaption.Left := Px(QVRLeftMargin);
+  FQVRDecayCaption.Top := Px(84);
+  FQVRDecayCaption.Width := Px(QVRTypeColWidth);
+  FQVRDecayCaption.WordWrap := True;
+  FQVRDecayCaption.AutoSize := False;
+  FQVRDecayCaption.Height := Px(WidgetHeight - 84 - 6);
+
+  Col := QVRLeftMargin + QVRTypeColWidth + QVRColGap;
+  FQVRPredelaySlider := QVAddColumn(Col, 'Predly',
+    Quadraverb.QVPredelayMinMs, Quadraverb.QVPredelayMaxMs,
+    Round(EffectPtr^.QVReverbPredelayMs), @QVRPredelaySliderChange,
+    'Time before the first reflections (1-140ms)', FQVRPredelayValueLabel);
+  FQVRPredelayValueLabel.Caption := Format('%dms', [Round(EffectPtr^.QVReverbPredelayMs)]);
+
+  Inc(Col, ColStep);
+  FQVRPredelayMixSlider := QVAddColumn(Col, 'Pre/Pst',
+    Quadraverb.QVPredelayMixMin, Quadraverb.QVPredelayMixMax,
+    Round(EffectPtr^.QVReverbPredelayMix), @QVRPredelayMixSliderChange,
+    'How much un-predelayed signal also feeds the tank', FQVRPredelayMixValueLabel);
+  FQVRPredelayMixValueLabel.Caption := QVPredelayMixText(Round(EffectPtr^.QVReverbPredelayMix));
+
+  Inc(Col, ColStep);
+  FQVRDecaySlider := QVAddColumn(Col, 'Decay',
+    Quadraverb.QVDecayMin, Quadraverb.QVDecayMax,
+    Round(EffectPtr^.QVReverbDecay), @QVRDecaySliderChange,
+    'Length of the tail (Reverse Time when type is Reverse)', FQVRDecayValueLabel);
+  FQVRDecayValueLabel.Caption := Format('%d', [Round(EffectPtr^.QVReverbDecay)]);
+
+  Inc(Col, ColStep);
+  FQVRDiffusionSlider := QVAddColumn(Col, 'Diff',
+    Quadraverb.QVDiffusionMin, Quadraverb.QVDiffusionMax,
+    Round(EffectPtr^.QVReverbDiffusion), @QVRDiffusionSliderChange,
+    'Low = discrete echoes, high = smeared into a wash', FQVRDiffusionValueLabel);
+  FQVRDiffusionValueLabel.Caption := Format('%d', [Round(EffectPtr^.QVReverbDiffusion)]);
+
+  Inc(Col, ColStep);
+  FQVRDensitySlider := QVAddColumn(Col, 'Dens',
+    Quadraverb.QVDensityMin, Quadraverb.QVDensityMax,
+    Round(EffectPtr^.QVReverbDensity), @QVRDensitySliderChange,
+    'Gap between the first reflection and the body (no effect on Hall)',
+    FQVRDensityValueLabel);
+  FQVRDensityValueLabel.Caption := Format('%d', [Round(EffectPtr^.QVReverbDensity)]);
+
+  Inc(Col, ColStep);
+  FQVRLowDecaySlider := QVAddColumn(Col, 'LoDcy',
+    Quadraverb.QVBandDecayMin, Quadraverb.QVBandDecayMax,
+    Round(EffectPtr^.QVReverbLowDecay), @QVRLowDecaySliderChange,
+    'Shortens the low end of the tail only (0 = full length)',
+    FQVRLowDecayValueLabel);
+  FQVRLowDecayValueLabel.Caption := Format('%d', [Round(EffectPtr^.QVReverbLowDecay)]);
+
+  Inc(Col, ColStep);
+  FQVRHighDecaySlider := QVAddColumn(Col, 'HiDcy',
+    Quadraverb.QVBandDecayMin, Quadraverb.QVBandDecayMax,
+    Round(EffectPtr^.QVReverbHighDecay), @QVRHighDecaySliderChange,
+    'Shortens the top of the tail only - pull it down for a dark wash',
+    FQVRHighDecayValueLabel);
+  FQVRHighDecayValueLabel.Caption := Format('%d', [Round(EffectPtr^.QVReverbHighDecay)]);
+
+  Inc(Col, ColStep);
+  FQVRMixSlider := QVAddColumn(Col, 'Mix', 0, 100,
+    Round(EffectPtr^.QVReverbMixPercent), @QVRMixSliderChange, '',
+    FQVRMixValueLabel);
+  FQVRMixValueLabel.Caption := Format('%d%%', [Round(EffectPtr^.QVReverbMixPercent)]);
+
+  QVRUpdateTypeDependentLabels;
+end;
+
+procedure TEffectWidget.BuildQuadraverbDelay;
+var
+  Lbl: TLabel;
+  t, Col, ColStep: Integer;
+begin
+  ColStep := QVDColWidth + QVDColGap;
+
+  Lbl := TLabel.Create(Owner);
+  Lbl.Parent := Self;
+  Lbl.Left := Px(QVDLeftMargin);
+  Lbl.Top := Px(30);
+  Lbl.Caption := 'Delay type';
+
+  FQVDTypeCombo := TComboBox.Create(Owner);
+  FQVDTypeCombo.Parent := Self;
+  FQVDTypeCombo.Style := csDropDownList;
+  FQVDTypeCombo.Left := Px(QVDLeftMargin);
+  FQVDTypeCombo.Top := Px(48);
+  FQVDTypeCombo.Width := Px(QVDTypeColWidth);
+  for t := 0 to Quadraverb.QVDelayTypeCount - 1 do
+    FQVDTypeCombo.Items.Add(Quadraverb.QVDelayTypeNames[t]);
+  if (EffectPtr^.QVDelayType >= 0) and
+    (EffectPtr^.QVDelayType < Quadraverb.QVDelayTypeCount) then
+    FQVDTypeCombo.ItemIndex := EffectPtr^.QVDelayType
+  else
+    FQVDTypeCombo.ItemIndex := Quadraverb.QVDelayPingPong;
+  FQVDTypeCombo.OnChange := @QVDTypeChange;
+
+  Lbl := TLabel.Create(Owner);
+  Lbl.Parent := Self;
+  Lbl.Left := Px(QVDLeftMargin);
+  Lbl.Top := Px(86);
+  Lbl.Caption := 'Time L (ms)';
+
+  FQVDTimeLEdit := TEdit.Create(Owner);
+  FQVDTimeLEdit.Parent := Self;
+  FQVDTimeLEdit.Left := Px(QVDLeftMargin);
+  FQVDTimeLEdit.Top := Px(104);
+  FQVDTimeLEdit.Width := Px(QVDTypeColWidth);
+  FQVDTimeLEdit.Height := Px(26);
+  FQVDTimeLEdit.Tag := 0;
+  FQVDTimeLEdit.Text := IntToStr(Round(EffectPtr^.QVDelayTimeLMs));
+  FQVDTimeLEdit.OnEditingDone := @QVDTimeEditDone;
+
+  FQVDTimeRCaption := TLabel.Create(Owner);
+  FQVDTimeRCaption.Parent := Self;
+  FQVDTimeRCaption.Left := Px(QVDLeftMargin);
+  FQVDTimeRCaption.Top := Px(132);
+  FQVDTimeRCaption.Caption := 'Time R (ms)';
+
+  FQVDTimeREdit := TEdit.Create(Owner);
+  FQVDTimeREdit.Parent := Self;
+  FQVDTimeREdit.Left := Px(QVDLeftMargin);
+  FQVDTimeREdit.Top := Px(150);
+  FQVDTimeREdit.Width := Px(QVDTypeColWidth);
+  FQVDTimeREdit.Height := Px(26);
+  FQVDTimeREdit.Tag := 1;
+  FQVDTimeREdit.Text := IntToStr(Round(EffectPtr^.QVDelayTimeRMs));
+  FQVDTimeREdit.OnEditingDone := @QVDTimeEditDone;
+
+  Col := QVDLeftMargin + QVDTypeColWidth + QVDColGap;
+  FQVDFeedbackLSlider := QVAddColumn(Col, 'Fdbk L', 0,
+    Quadraverb.QVDelayFeedbackMax, Round(EffectPtr^.QVDelayFeedbackL),
+    @QVDFeedbackLSliderChange, '', FQVDFeedbackLValueLabel);
+  FQVDFeedbackLValueLabel.Caption := Format('%d%%', [Round(EffectPtr^.QVDelayFeedbackL)]);
+
+  Inc(Col, ColStep);
+  FQVDFeedbackRSlider := QVAddColumn(Col, 'Fdbk R', 0,
+    Quadraverb.QVDelayFeedbackMax, Round(EffectPtr^.QVDelayFeedbackR),
+    @QVDFeedbackRSliderChange, 'Stereo type only', FQVDFeedbackRValueLabel);
+  FQVDFeedbackRValueLabel.Caption := Format('%d%%', [Round(EffectPtr^.QVDelayFeedbackR)]);
+
+  Inc(Col, ColStep);
+  FQVDMixSlider := QVAddColumn(Col, 'Mix', 0, 100,
+    Round(EffectPtr^.QVDelayMixPercent), @QVDMixSliderChange, '',
+    FQVDMixValueLabel);
+  FQVDMixValueLabel.Caption := Format('%d%%', [Round(EffectPtr^.QVDelayMixPercent)]);
+
+  QVDUpdateTypeDependentControls;
+end;
+
+procedure TEffectWidget.DeleteClick(Sender: TObject);
+var
+  SendIndex: Integer;
+begin
+  SendIndex := Project.BusToSendIndex(FTarget);
+  if SendIndex >= 0 then
+    Project.RemoveSendEffect(SendIndex, FEffectIndex)
+  else if FTarget = Project.BusMaster then
     Project.RemoveMasterEffect(FEffectIndex)
   else
-    Project.RemoveTrackEffect(FTrackIndex, FEffectIndex);
+    Project.RemoveTrackEffect(FTarget, FEffectIndex);
   if Assigned(FOnRackChanged) then
     FOnRackChanged(Self);
 end;
@@ -1420,6 +2131,191 @@ procedure TEffectWidget.DrowningMixSliderChange(Sender: TObject);
 begin
   EffectPtr^.DrowningMixPercent := FDrowningMixSlider.Position;
   FDrowningMixValueLabel.Caption := Format('%d%% wet', [FDrowningMixSlider.Position]);
+end;
+
+procedure TEffectWidget.OverdriveFreqSliderChange(Sender: TObject);
+var
+  Freq: Single;
+begin
+  Freq := LogSliderToFreq(FOverdriveFreqSlider.Position);
+  EffectPtr^.OverdriveFreqHz := Freq;
+  FOverdriveFreqValueLabel.Caption := Format('%dHz', [Round(Freq)]);
+end;
+
+procedure TEffectWidget.OverdriveQSliderChange(Sender: TObject);
+var
+  Q: Single;
+begin
+  Q := FOverdriveQSlider.Position / 20;
+  EffectPtr^.OverdriveQ := Q;
+  FOverdriveQValueLabel.Caption := Format('%.2f', [Q]);
+end;
+
+procedure TEffectWidget.OverdriveDriveSliderChange(Sender: TObject);
+begin
+  EffectPtr^.OverdriveDrivePercent := FOverdriveDriveSlider.Position;
+  FOverdriveDriveValueLabel.Caption := Format('%d%%', [FOverdriveDriveSlider.Position]);
+end;
+
+procedure TEffectWidget.OverdriveColorSliderChange(Sender: TObject);
+begin
+  EffectPtr^.OverdriveColorPercent := FOverdriveColorSlider.Position;
+  FOverdriveColorValueLabel.Caption := Format('%d%%', [FOverdriveColorSlider.Position]);
+end;
+
+procedure TEffectWidget.OverdriveMixSliderChange(Sender: TObject);
+begin
+  EffectPtr^.OverdriveMixPercent := FOverdriveMixSlider.Position;
+  FOverdriveMixValueLabel.Caption := Format('%d%% wet', [FOverdriveMixSlider.Position]);
+end;
+
+{ Keeps the note under the type dropdown honest about the two pages whose
+  meaning the type changes, rather than leaving a control that silently
+  means something else or silently does nothing. }
+procedure TEffectWidget.QVRUpdateTypeDependentLabels;
+begin
+  case EffectPtr^.QVReverbType of
+    Quadraverb.QVReverbReverse:
+      FQVRDecayCaption.Caption := 'Decay sets Reverse Time: the swell ramps ' +
+        'up over it, then cuts off.';
+    Quadraverb.QVReverbHall:
+      FQVRDecayCaption.Caption := 'Hall has no Density page on the original, ' +
+        'so Dens does nothing here.';
+  else
+    FQVRDecayCaption.Caption := '';
+  end;
+end;
+
+procedure TEffectWidget.QVRTypeChange(Sender: TObject);
+begin
+  EffectPtr^.QVReverbType := FQVRTypeCombo.ItemIndex;
+  QVRUpdateTypeDependentLabels;
+end;
+
+procedure TEffectWidget.QVRPredelaySliderChange(Sender: TObject);
+begin
+  EffectPtr^.QVReverbPredelayMs := FQVRPredelaySlider.Position;
+  FQVRPredelayValueLabel.Caption := Format('%dms', [FQVRPredelaySlider.Position]);
+end;
+
+procedure TEffectWidget.QVRPredelayMixSliderChange(Sender: TObject);
+begin
+  EffectPtr^.QVReverbPredelayMix := FQVRPredelayMixSlider.Position;
+  FQVRPredelayMixValueLabel.Caption := QVPredelayMixText(FQVRPredelayMixSlider.Position);
+end;
+
+procedure TEffectWidget.QVRDecaySliderChange(Sender: TObject);
+begin
+  EffectPtr^.QVReverbDecay := FQVRDecaySlider.Position;
+  FQVRDecayValueLabel.Caption := Format('%d', [FQVRDecaySlider.Position]);
+end;
+
+procedure TEffectWidget.QVRDiffusionSliderChange(Sender: TObject);
+begin
+  EffectPtr^.QVReverbDiffusion := FQVRDiffusionSlider.Position;
+  FQVRDiffusionValueLabel.Caption := Format('%d', [FQVRDiffusionSlider.Position]);
+end;
+
+procedure TEffectWidget.QVRDensitySliderChange(Sender: TObject);
+begin
+  EffectPtr^.QVReverbDensity := FQVRDensitySlider.Position;
+  FQVRDensityValueLabel.Caption := Format('%d', [FQVRDensitySlider.Position]);
+end;
+
+procedure TEffectWidget.QVRLowDecaySliderChange(Sender: TObject);
+begin
+  EffectPtr^.QVReverbLowDecay := FQVRLowDecaySlider.Position;
+  FQVRLowDecayValueLabel.Caption := Format('%d', [FQVRLowDecaySlider.Position]);
+end;
+
+procedure TEffectWidget.QVRHighDecaySliderChange(Sender: TObject);
+begin
+  EffectPtr^.QVReverbHighDecay := FQVRHighDecaySlider.Position;
+  FQVRHighDecayValueLabel.Caption := Format('%d', [FQVRHighDecaySlider.Position]);
+end;
+
+procedure TEffectWidget.QVRMixSliderChange(Sender: TObject);
+begin
+  EffectPtr^.QVReverbMixPercent := FQVRMixSlider.Position;
+  FQVRMixValueLabel.Caption := Format('%d%% wet', [FQVRMixSlider.Position]);
+end;
+
+{ The right-hand Time and Feedback pages only exist in Stereo on the real
+  unit, and the time ceiling halves outside Mono because Stereo/Ping-Pong
+  have to fit two lines in the same memory. Both are reflected here. }
+procedure TEffectWidget.QVDUpdateTypeDependentControls;
+var
+  Stereo: Boolean;
+  MaxMs: Integer;
+begin
+  Stereo := EffectPtr^.QVDelayType = Quadraverb.QVDelayStereo;
+  FQVDTimeRCaption.Enabled := Stereo;
+  FQVDTimeREdit.Enabled := Stereo;
+  FQVDFeedbackRSlider.Enabled := Stereo;
+  FQVDFeedbackRValueLabel.Enabled := Stereo;
+
+  MaxMs := Quadraverb.QVDelayMaxMs(EffectPtr^.QVDelayType);
+  FQVDTimeLEdit.Hint := Format('1-%d ms', [MaxMs]);
+  FQVDTimeLEdit.ShowHint := True;
+  FQVDTimeREdit.Hint := FQVDTimeLEdit.Hint;
+  FQVDTimeREdit.ShowHint := True;
+  if EffectPtr^.QVDelayTimeLMs > MaxMs then
+  begin
+    EffectPtr^.QVDelayTimeLMs := MaxMs;
+    FQVDTimeLEdit.Text := IntToStr(MaxMs);
+  end;
+  if EffectPtr^.QVDelayTimeRMs > MaxMs then
+  begin
+    EffectPtr^.QVDelayTimeRMs := MaxMs;
+    FQVDTimeREdit.Text := IntToStr(MaxMs);
+  end;
+end;
+
+procedure TEffectWidget.QVDTypeChange(Sender: TObject);
+begin
+  EffectPtr^.QVDelayType := FQVDTypeCombo.ItemIndex;
+  QVDUpdateTypeDependentControls;
+end;
+
+procedure TEffectWidget.QVDTimeEditDone(Sender: TObject);
+var
+  Edit: TEdit;
+  Value, MaxMs: Integer;
+begin
+  Edit := Sender as TEdit;
+  MaxMs := Quadraverb.QVDelayMaxMs(EffectPtr^.QVDelayType);
+  if not TryStrToInt(Trim(Edit.Text), Value) then
+  begin
+    if Edit.Tag = 0 then
+      Value := Round(EffectPtr^.QVDelayTimeLMs)
+    else
+      Value := Round(EffectPtr^.QVDelayTimeRMs);
+  end;
+  if Value < 1 then Value := 1;
+  if Value > MaxMs then Value := MaxMs;
+  Edit.Text := IntToStr(Value);
+  if Edit.Tag = 0 then
+    EffectPtr^.QVDelayTimeLMs := Value
+  else
+    EffectPtr^.QVDelayTimeRMs := Value;
+end;
+
+procedure TEffectWidget.QVDFeedbackLSliderChange(Sender: TObject);
+begin
+  EffectPtr^.QVDelayFeedbackL := FQVDFeedbackLSlider.Position;
+  FQVDFeedbackLValueLabel.Caption := Format('%d%%', [FQVDFeedbackLSlider.Position]);
+end;
+
+procedure TEffectWidget.QVDFeedbackRSliderChange(Sender: TObject);
+begin
+  EffectPtr^.QVDelayFeedbackR := FQVDFeedbackRSlider.Position;
+  FQVDFeedbackRValueLabel.Caption := Format('%d%%', [FQVDFeedbackRSlider.Position]);
+end;
+
+procedure TEffectWidget.QVDMixSliderChange(Sender: TObject);
+begin
+  EffectPtr^.QVDelayMixPercent := FQVDMixSlider.Position;
+  FQVDMixValueLabel.Caption := Format('%d%% wet', [FQVDMixSlider.Position]);
 end;
 
 end.

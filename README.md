@@ -71,11 +71,28 @@ DISCLAIMER: HEAVY LLM usage. I know decent Pascal but do not know about audio en
   at the cursor on the selected track.
 - **Tempo-aware metronome**, independent of count-in, toggled on/off live.
 - **Effects**: per-track and master-bus insert chains — Lowpass, Highpass and
-  Bandpass filters, 4-band EQ, Limiter, Chorus, Flanger, Phaser, Sidechain
-  (ducking keyed off another track's level), Basic Reverb, and an
-  experimental Drowning (vocal-wash) effect (see
+  Bandpass filters, 4-band EQ, Limiter, Chorus, Flanger, Phaser, Overdrive
+  (band-focused saturation for loudness, 808 mangling or plain crunch),
+  Sidechain (ducking keyed off another track's level), Tuner (a passive
+  note/cents readout that listens to the track without touching it), Basic
+  Reverb, and an experimental Drowning (vocal-wash) effect (see
   `documentation/usage.md` for every parameter), plus a dedicated **Master**
   track/bus row for global effects.
+- **QuadraVerb emulation**: the Alesis QuadraVerb's reverb and delay
+  sections, with every page of the original's front panel (reverb type,
+  predelay + predelay mix, decay/reverse time, diffusion, density, separate
+  low- and high-frequency decay; mono/stereo/ping-pong delay at the
+  original's own 800/400ms QuadMode ceilings). The wet path runs at the
+  original's 31.25kHz internal rate through 16-bit delay memory, and the dry
+  path is never digitised at all — the band limit and the compounding
+  quantisation grain are the point, not an accident. Aimed squarely at the
+  Good Looking / atmospheric-jungle use of the box.
+- **Send buses**: two sends (S1/S2) pinned to the bottom of the track pane,
+  with a per-track enable button and send-level slider on every track
+  header, and per-bus return level, pre/post-fader tap and mute. One effect
+  chain serves every track feeding it — so a reverb shared across the break,
+  the pads and the stabs is one room they are all in, at one reverb's worth
+  of CPU rather than one per track.
 - **SP-1200 emulation**: a separate, always-available master-bus lo-fi
   decimation mode (sample-and-hold to ~26kHz/12-bit, no anti-aliasing), baked
   identically into live playback and rendered/exported audio so they can

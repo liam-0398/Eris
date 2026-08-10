@@ -232,6 +232,59 @@ be deleted. The Master row is not deletable.
   of the lane area) and a **vertical** one (down the right of the lanes) once
   there are more tracks than fit on screen.
 
+### Sends (S1 / S2)
+
+Two send buses, **S1** and **S2**, pinned to the bottom of the track pane —
+they stay put while the track list scrolls, and they only occupy the header
+column, never the timeline.
+
+A send takes a copy of a track's signal, sums it with the copies from every
+other track feeding the same send, runs that **one** sum through **one**
+effect chain, and returns it to the master. Two things follow from that:
+
+- **Everything on the send is in the same room.** A reverb fed from the
+  break, the pads and the stabs is one space they're all in, not three
+  copies of a reverb that happen to match. That shared space is most of what
+  makes an atmospheric jungle record sound like one record rather than a
+  stack of parts, and it's the reason to reach for a send over a per-track
+  insert even when CPU isn't a concern.
+- **It costs one effect, not one per track.** A QuadraVerb Reverb on six
+  tracks is six reverbs' worth of CPU; the same reverb on a send is paid
+  once no matter how many tracks feed it.
+
+On each **track header**, under the volume fader:
+
+- **S1** and **S2** buttons — off by default, darkening when on. This is
+  just the on/off for feeding that bus.
+- A **level slider** next to each — how much of this track goes to that bus.
+  It's ignored entirely while the button is off and greys out to show it, so
+  you can leave a send set at a useful amount and switch it in and out
+  without losing the setting. New tracks start armed at half.
+
+On each **S1 / S2 row**:
+
+- **Click anywhere on the row** to select the bus. The bottom device panel
+  switches to that send's (initially empty) effect chain — right-click the
+  panel and add effects exactly as you would for a track or the Master row.
+  The row shows how many effects the bus is carrying.
+- **Rtn** slider — return level, how much of the processed bus comes back
+  into the master. Same 0–2× range as a track fader.
+- **PRE / POST** button — where each feeding track is tapped.
+  **POST** (default) taps after that track's fader, so pulling the fader
+  down takes its send down with it, like Ableton. **PRE** taps before the
+  fader, so you can pull a track's fader all the way to nothing and its
+  contribution to the bus keeps going — which is how you get a break to
+  dissolve into the wash instead of just stopping. It's the one control here
+  that isn't in Ableton and was on every 90s desk.
+- The small square in the corner — bus mute (lime = on, red = off). Muting a
+  bus also skips its chain entirely, so it's how you get the CPU back from a
+  send you aren't using.
+
+Muting a *track* stops it feeding the sends too, pre-fader included.
+
+Sends are saved with the project and are applied identically in playback and
+in an exported/bounced WAV.
+
 ### Input tracks
 
 An Input Track (Track > Add Input Track, or `Ctrl+Shift+N`) records the live
@@ -376,7 +429,7 @@ vari-speed one's is not.
 **Right-click empty space in the bottom device panel** to open the "add
 effect" menu. Whatever is currently selected — a track, or the Master row —
 is what the effect gets added to. Categories: Filters, EQ, Modulation,
-Reverb, Utility, Mastering, Experimental.
+Distortion, Reverb, Utility, Mastering, Experimental.
 
 Each effect widget has an **X** button in its corner to remove it. Master
 effects run after every track's own inserts, and before the SP-1200
@@ -409,12 +462,97 @@ emulation.
 - **Phaser** — **Rate** (0.05–5 Hz), **Depth** (0–100%), **Fdbk** (0–95%),
   **Mix** (0–100% wet). Defaults 0.4 Hz / 70% / 30% / 50%.
 
+### Distortion
+
+- **Overdrive** — general-purpose saturator: use it to make something
+  louder, to wreck an 808, or just to add a bit of crunch. Five controls:
+  - **Freq** (log, 20 Hz–20 kHz) and **Q** (0.10–5.00) pick *which band
+    distorts first*, not how the output is EQ'd. The band is boosted going
+    into the waveshaper and cut by the same amount coming out, so it reaches
+    the shaper's knee ahead of everything else while the overall tone stays
+    roughly flat. Sweep Freq with Drive up and you're moving the grit
+    around, not moving a tone control.
+  - **Drive** (0–100% = 0…+36 dB into the shaper). Because the shaper
+    saturates rather than clips arithmetically, cranking Drive pins the
+    output near full scale however quiet the input was — that's the "make it
+    louder" use.
+  - **Color** (0–100%) morphs the shape from a soft knee (0% — warm,
+    compressing, slightly asymmetric so it generates even harmonics) to a
+    hard clip (100% — buzzy, dense, symmetric crunch).
+  - **Mix** (0–100% wet) for parallel/New-York-style drive.
+
+  Defaults: 800 Hz, Q 0.70, 40% drive, 30% color, 100% wet. The wet path can
+  never leave the effect above full scale no matter how hard it's driven.
+
 ### Reverb
 
 - **Basic Reverb** — pick a room type (Small, Room, Club, Hall, Plate) from
   the dropdown and set the Dry/Wet balance (0–100%). Nothing else to
   configure — the room type controls size/decay/tone together. Defaults to
   Room at 30% wet.
+- **QuadraVerb Reverb** — an emulation of the Alesis QuadraVerb (1989), the
+  box the atmospheric side of jungle was largely made on. Every page of the
+  original's reverb section is here, with its own ranges:
+  - **Reverb type**: Plate, Room, Chamber, Hall, Reverse. Type sets the size
+    and spacing of the space; Decay separately sets how long it rings, so
+    changing type at a fixed Decay changes the character without changing
+    the length of the tail.
+  - **Predly** — predelay, 1–140 ms. How long before the first reflections
+    arrive. Push it up to keep a break defined in front of a big tail.
+  - **Pre/Pst** — predelay mix, PRE 99 … 00 … PST 99. How much
+    *un*-predelayed signal also feeds the tank, so you can have some reverb
+    arrive immediately and the rest bloom in after the predelay.
+  - **Decay** — 0–99. With type set to Reverse this page becomes Reverse
+    Time instead, exactly as it does on the real unit.
+  - **Diff** — diffusion, 1–9. Low lets you hear the individual echoes;
+    high blends them into a wash.
+  - **Dens** — density, 1–9. The gap between the first reflection and the
+    body of the reverb. At 9 the reverb "explodes" with no separate first
+    echo. Hall has no Density page on the original, so it does nothing
+    there — the widget says so.
+  - **LoDcy** / **HiDcy** — low and high frequency decay, 0 to −99. Always
+    negative: they *shorten* that band relative to the master Decay. HiDcy
+    is the important one here — pull it well down and the tail goes dark as
+    it falls away instead of hissing on top of the mix.
+  - **Mix** — the original's Reverb Output Level, as an insert dry/wet.
+
+  Defaults are the Good Looking home position: Hall, 65 ms predelay, Decay
+  82, Diffusion 8, Density 6, LoDcy −10, HiDcy −62, 35% wet.
+
+  Three things are modelled because they *are* the sound, not as garnish:
+  the wet path runs at the original's **31.25 kHz** internal rate (so
+  nothing above ~15.6 kHz exists in it and every delay length is quantised
+  to 32 µs steps), its delay memory is **16-bit** so a long tail
+  re-quantises hundreds of times and dirties as it decays, and the **dry
+  path is never digitised at all** — on the real unit it ran through analog
+  VCAs around the converters, so here it is neither band-limited nor
+  quantised.
+
+  Not implemented, because the atmospheric-jungle side of this box never
+  used them: the reverb gate and its hold/release/gated-level pages (an 80s
+  drum sound), the multi-tap delay, and the internal 4-module routing and
+  input-mix matrix (meaningless when each effect is its own insert).
+
+### Delay
+
+- **QuadraVerb Delay** — the delay section of the same box, same 31.25 kHz
+  band-limited, 16-bit delay memory. There is deliberately no damping
+  control, because the original doesn't have one: the repeats get darker
+  and grainier on their own as they circulate through the band limit and
+  the 16-bit round trip, which is the QuadraVerb delay sound.
+  - **Delay type**: Mono, Stereo, Ping-Pong.
+  - **Time L / Time R** — typed in ms, not dragged; a slider can't resolve
+    single milliseconds across that range. The ceilings are the original's
+    own QuadMode limits: **800 ms** in Mono (one delay line, so twice the
+    time) and **400 ms** per side in Stereo and Ping-Pong. Change type and
+    an over-long time is clamped for you.
+  - **Fdbk L / Fdbk R** — 0–99%. Ping-Pong bounces the repeat L→R→L, so one
+    trip round its loop is two delay times.
+  - **Mix** — the original's Delay Output Level, as an insert dry/wet.
+
+  Time R and Fdbk R only exist in Stereo on the real unit, so they grey out
+  in the other two types. Defaults: Ping-Pong at 375 ms, 45% feedback, 30%
+  wet — at 165–175 bpm that's roughly a dotted 1/16.
 
 ### Utility
 
@@ -422,6 +560,30 @@ emulation.
   a dropdown of tracks; then **Thresh** (−60…0 dB), **Attack** (1–200 ms),
   **Release** (10–1000 ms) and **Strength** (0–100%, how much gain reduction
   full ducking applies). Defaults: track 1, −20 dB, 5 ms, 150 ms, 70%.
+- **Tuner** — a pitch readout for whatever reaches its slot in the chain. It
+  has no controls and never touches the audio; drop it on a track, play, and
+  read the note off the display.
+
+  The big character is the nearest note (`C`, `C#`, …) with its octave, green
+  when you're on it and amber when you're not. Either side of it are three
+  dots, and they light on the side the pitch has drifted **towards** — dots
+  to the left means flat, dots to the right means sharp. **Fewer dots means
+  closer**: one dot is a few cents out, three is nearly a quarter-tone out.
+  Drift far enough and the display simply names the next note along, with
+  three dots now lit on the opposite side — which is the same reading from
+  the other direction. Underneath, the exact deviation in cents and the raw
+  frequency.
+
+  It reads a single sustained pitch, so it works on bass, 808s, leads and
+  vocals; chords, drums and noise read as `-- / no pitch` rather than as a
+  made-up note. It holds the last note for about a second and a half after
+  the sound stops, so it doesn't blink off between notes, and blanks
+  entirely once the engine goes idle rather than leaving a stale note
+  frozen on screen.
+
+  It works with the transport stopped as long as the engine is running, so
+  an Input track with its **M** monitor on gives you a live tuner for
+  whatever is plugged into the line-in.
 
 ### Mastering
 
