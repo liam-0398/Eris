@@ -118,6 +118,7 @@ type
     procedure ViewZoomInClick(Sender: TObject);
     procedure ViewZoomOutClick(Sender: TObject);
     procedure TrackAddClick(Sender: TObject);
+    procedure TrackAddInputClick(Sender: TObject);
     procedure TrackDeleteClick(Sender: TObject);
     procedure HelpAboutClick(Sender: TObject);
     procedure StopClick(Sender: TObject);
@@ -130,6 +131,7 @@ type
     procedure GridTrackBarChange(Sender: TObject);
     procedure ArrangementViewFileDrop(Sender: TObject; ATrackIndex: Integer;
       AFramePosition: Int64; const AFilePath: string);
+    procedure ArrangementViewClipActivate(Sender: TObject; ASampleID: Integer);
     procedure ArrangementViewSeek(Sender: TObject; AFrameOffset: Int64);
     procedure ArrangementViewKeyboardTrackChanged(Sender: TObject);
     procedure ArrangementViewClipSelectionChanged(Sender: TObject);
@@ -180,6 +182,8 @@ type
     procedure DevicePanelDragDrop(Sender, Source: TObject; X, Y: Integer);
     procedure FileBrowserFileActivate(Sender: TObject; const AFilePath: string);
     procedure LoadInstrumentForKeyboardTrack(const APath: string);
+    procedure AssignSampleAsKeyboardInstrumentFor(ATrack, ASampleID: Integer);
+    procedure AssignSampleAsKeyboardInstrument(ASampleID: Integer);
     procedure UpdateDevicePanel;
     procedure InstrumentDeleteClick(Sender: TObject);
     procedure OctaveMinusClick(Sender: TObject);
@@ -250,7 +254,7 @@ var
   FileMenu, EditMenu, ViewMenu, TrackMenu, HelpMenu, UndoItem,
   ZoomInItem, ZoomOutItem, CopyItem, PasteItem, DuplicateItem, SplitItem,
   DeleteItem, ConsolidateItem,
-  AddTrackItem, DeleteTrackItem: TMenuItem;
+  AddTrackItem, AddInputTrackItem, DeleteTrackItem: TMenuItem;
 begin
   FMainMenu := TMainMenu.Create(Self);
   Menu := FMainMenu;
@@ -298,6 +302,8 @@ begin
   FTrackMenu := TrackMenu;
   AddTrackItem := AddItem(TrackMenu, '&Add Track', @TrackAddClick);
   AddTrackItem.ShortCut := Menus.ShortCut(Ord('N'), [ssCtrl]);
+  AddInputTrackItem := AddItem(TrackMenu, 'Add &Input Track', @TrackAddInputClick);
+  AddInputTrackItem.ShortCut := Menus.ShortCut(Ord('N'), [ssCtrl, ssShift]);
   DeleteTrackItem := AddItem(TrackMenu, '&Delete Track', @TrackDeleteClick);
   DeleteTrackItem.ShortCut := Menus.ShortCut(Ord('D'), [ssCtrl]);
 
@@ -730,6 +736,7 @@ begin
   FArrangementView.Parent := Self;
   FArrangementView.Align := alClient;
   FArrangementView.OnFileDrop := @ArrangementViewFileDrop;
+  FArrangementView.OnClipActivate := @ArrangementViewClipActivate;
   FArrangementView.OnSeek := @ArrangementViewSeek;
   FArrangementView.OnKeyboardTrackChanged := @ArrangementViewKeyboardTrackChanged;
   FArrangementView.OnClipSelectionChanged := @ArrangementViewClipSelectionChanged;
@@ -1073,6 +1080,14 @@ begin
     ShowMessage(Format('Maximum of %d tracks reached.', [Project.MaxTracks]));
 end;
 
+procedure TForm1.TrackAddInputClick(Sender: TObject);
+begin
+  if Project.AddInputTrack then
+    FArrangementView.Invalidate
+  else
+    ShowMessage(Format('Maximum of %d tracks reached.', [Project.MaxTracks]));
+end;
+
 procedure TForm1.TrackDeleteClick(Sender: TObject);
 begin
   if FArrangementView.SelectedTrack < 0 then
@@ -1133,15 +1148,27 @@ begin
     ShowMessage('Select a track first.');
     Exit;
   end;
-  if Project.TrackInstrument[FArrangementView.KeyboardTrack] < 0 then
+
+  FRecordTrackIndex := FArrangementView.KeyboardTrack;
+  FRecordStartFrame := FArrangementView.CursorFrame;
+  AudioEngineSeek(FRecordStartFrame);
+
+  if Project.TrackIsInput[FRecordTrackIndex] then
+  begin
+    { line-in take: no keyboard instrument to check for, no count-in - the
+      playhead just starts moving and recording immediately, same as the
+      count-in's own final beat does for a normal track }
+    AudioEngineStartRecording(FRecordTrackIndex);
+    FRecordButton.Caption := 'Recording... (click to stop)';
+    Exit;
+  end;
+
+  if Project.TrackInstrument[FRecordTrackIndex] < 0 then
   begin
     ShowMessage('Load an instrument for this track first.');
     Exit;
   end;
 
-  FRecordTrackIndex := FArrangementView.KeyboardTrack;
-  FRecordStartFrame := FArrangementView.CursorFrame;
-  AudioEngineSeek(FRecordStartFrame);
   AudioEngineStartCountIn(FRecordTrackIndex);
   FRecordButton.Caption := 'Counting in...';
 end;
@@ -1974,11 +2001,35 @@ begin
     Exit;
   end;
 
-  Project.TrackInstrument[FPendingImportTrack] := ImportThread.SampleID;
-  Project.TrackInstrumentStart[FPendingImportTrack] := 0;
-  Project.TrackInstrumentEnd[FPendingImportTrack] :=
-    Project.SamplePool[ImportThread.SampleID].FrameCount;
+  { FPendingImportTrack, not FArrangementView.KeyboardTrack - the keyboard
+    track could have changed while the import thread was running }
+  AssignSampleAsKeyboardInstrumentFor(FPendingImportTrack, ImportThread.SampleID);
+end;
+
+{ Shared by the import-thread completion above and by activating an
+  already-resident sample (a timeline clip double-clicked or dragged onto
+  the device panel - see ArrangementViewClipActivate) - the latter has
+  nothing to decode/import, the sample's already in Project.SamplePool. }
+procedure TForm1.AssignSampleAsKeyboardInstrumentFor(ATrack, ASampleID: Integer);
+begin
+  if (ATrack < 0) or (ASampleID < 0) or (ASampleID > High(Project.SamplePool)) then
+    Exit;
+  Project.TrackInstrument[ATrack] := ASampleID;
+  Project.TrackInstrumentStart[ATrack] := 0;
+  Project.TrackInstrumentEnd[ATrack] := Project.SamplePool[ASampleID].FrameCount;
   UpdateDevicePanel;
+end;
+
+procedure TForm1.AssignSampleAsKeyboardInstrument(ASampleID: Integer);
+begin
+  AssignSampleAsKeyboardInstrumentFor(FArrangementView.KeyboardTrack, ASampleID);
+end;
+
+procedure TForm1.ArrangementViewClipActivate(Sender: TObject; ASampleID: Integer);
+begin
+  if FBackgroundBusy then
+    Exit;
+  AssignSampleAsKeyboardInstrument(ASampleID);
 end;
 
 procedure TForm1.UpdateDevicePanel;

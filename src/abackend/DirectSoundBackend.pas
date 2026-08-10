@@ -175,6 +175,25 @@ end;
 
 {$ENDIF}
 
+{ Line-in capture stub - not implemented yet on Windows. Always returning
+  False (never nil) means AudioEngine's capture thread can call CaptureOpen/
+  CaptureRead unconditionally, exactly like on the ALSA side, and just never
+  gets audio: CaptureOpen fails, so AudioEngine's CaptureAvailable stays
+  False and the capture thread idles instead of ever calling CaptureRead. }
+function DirectSoundCaptureOpenStub(ASampleRate, AChannels, ABufferFrames: Integer): Boolean;
+begin
+  Result := False;
+end;
+
+function DirectSoundCaptureReadStub(ABuffer: PSingle; AFrameCount: Integer): Boolean;
+begin
+  Result := False;
+end;
+
+procedure DirectSoundCaptureCloseStub;
+begin
+end;
+
 function CreateDirectSoundBackend: TAudioBackend;
 begin
   {$IFDEF WINDOWS}
@@ -186,6 +205,9 @@ begin
   Result.WriteBlock := nil;
   Result.Close := nil;
   {$ENDIF}
+  Result.CaptureOpen := @DirectSoundCaptureOpenStub;
+  Result.CaptureRead := @DirectSoundCaptureReadStub;
+  Result.CaptureClose := @DirectSoundCaptureCloseStub;
 end;
 
 end.

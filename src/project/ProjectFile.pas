@@ -451,6 +451,8 @@ begin
       Ini.WriteInt64(Section, 'InstrumentEnd', Project.TrackInstrumentEnd[t]);
       Ini.WriteFloat(Section, 'SwingPercent', Project.TrackSwingPercent[t]);
       Ini.WriteInteger(Section, 'SwingDivision', Project.TrackSwingDivision[t]);
+      Ini.WriteBool(Section, 'IsInput', Project.TrackIsInput[t]);
+      Ini.WriteBool(Section, 'MonitorEnabled', Project.TrackMonitorEnabled[t]);
 
       Ini.WriteInteger(Section, 'EffectCount', Project.TrackEffectCount[t]);
       for e := 0 to Project.TrackEffectCount[t] - 1 do
@@ -693,6 +695,8 @@ begin
       Project.TrackEnabled[t] := Ini.ReadBool(Section, 'Enabled', True);
       Project.TrackSwingPercent[t] := Ini.ReadFloat(Section, 'SwingPercent', 50);
       Project.TrackSwingDivision[t] := Ini.ReadInteger(Section, 'SwingDivision', 16);
+      Project.TrackIsInput[t] := Ini.ReadBool(Section, 'IsInput', False);
+      Project.TrackMonitorEnabled[t] := Ini.ReadBool(Section, 'MonitorEnabled', False);
 
       Project.TrackInstrumentStart[t] := Ini.ReadInt64(Section, 'InstrumentStart', 0);
       if (Project.TrackInstrument[t] >= 0) and

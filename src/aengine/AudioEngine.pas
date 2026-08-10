@@ -93,9 +93,31 @@ const
   RecordStateRecording = 2;
 
 procedure AudioEngineStartCountIn(ATrackIndex: Integer);
+{ Input Track recording: identical RecordState machinery as the count-in
+  path above, minus the count-in - the record button just goes straight to
+  RecordStateRecording, matching the "playhead moves and starts recording
+  immediately, no count-in" behavior line-in recording needs vs. a
+  keyboard/instrument take. }
+procedure AudioEngineStartRecording(ATrackIndex: Integer);
 procedure AudioEngineStopRecording;
 function AudioEngineRecordState: Integer;
 function AudioEngineTakeRecordedAudio(out AData: PSingle; out AFrameCount: Integer): Boolean;
+
+{ Line-in capture buffer size (frames per capture read), independent of the
+  output AudioEngineGetBufferSize/SetBufferSize pair above - stops/restarts
+  only the capture thread and its ALSA capture stream, same
+  stop-close-reopen-restart shape, still must not be called from either
+  realtime thread. }
+function AudioEngineGetInputBufferSize: Integer;
+procedure AudioEngineSetInputBufferSize(ANewBufferSize: Integer);
+
+{ Line-in input gain trim, applied to every captured sample before it's
+  mixed into a monitoring track or tapped into a recording - a plain
+  unsynchronized Single, same cross-thread tolerance as Project.TrackVolume
+  (see FillBlock's per-track mix): the audio thread reading a value one
+  block stale mid-drag is inaudible. }
+function AudioEngineGetInputGainDb: Single;
+procedure AudioEngineSetInputGainDb(ADb: Single);
 
 implementation
 
@@ -119,11 +141,18 @@ const
   MaxRecordSeconds = 180;
   ClickDurationMs = 50;
   ClickFreqHz = 1000;
+  DefaultInputBufferFrames = 1024;
+  { capture ring capacity = InputBufferFrames * this - headroom so the
+    capture thread's own blocking-read cadence (a separate ALSA device
+    clock from the output stream) can drift a bit against the consumer
+    (FillBlock, draining exactly one frame per output sample) without
+    underrunning on every tiny hiccup }
+  CaptureRingBlocks = 8;
 
 type
   TCommandKind = (ckSetTrackClips, ckPlay, ckStop, ckSeek, ckTriggerNote,
-    ckStartCountIn, ckStopRecording, ckSetLoop, ckClearLoop, ckSetSP1200Enabled,
-    ckSetMetronomeEnabled);
+    ckStartCountIn, ckStartRecording, ckStopRecording, ckSetLoop, ckClearLoop,
+    ckSetSP1200Enabled, ckSetMetronomeEnabled);
 
   TCommand = record
     Kind: TCommandKind;
@@ -161,11 +190,37 @@ type
     procedure Execute; override;
   end;
 
+  { Runs a blocking Backend.CaptureRead loop independent of the output
+    thread's own blocking-write loop above - the two are separate ALSA PCM
+    streams (independent device clocks), so they're paced independently and
+    only meet through the SPSC ring buffer (CaptureRingBuffer/PushCaptureFrames/
+    PopCaptureFrame) below, exactly like the command ring already decouples
+    the main thread from TPlaybackThread. }
+  TCaptureThread = class(TThread)
+  protected
+    procedure Execute; override;
+  end;
+
 var
   Backend: TAudioBackend;
   BlockFrames: Integer;
   PlaybackThread: TPlaybackThread;
   MixBuffer: PSingle;
+
+  InputBufferFrames: Integer;
+  CaptureThread: TCaptureThread;
+  CaptureAvailable: Boolean;
+  { SPSC ring buffer, interleaved stereo floats: single producer (CaptureThread),
+    single consumer (FillBlock, on TPlaybackThread) - see PushCaptureFrames/
+    PopCaptureFrame. CaptureWriteCount/CaptureReadCount are free-running frame
+    counters (never wrapped themselves - only their mod-capacity index into
+    the physical buffer is), same shape as RingHead/RingTail's producer/
+    consumer split above, just counting frames instead of command slots. }
+  CaptureRingBuffer: PSingle;
+  CaptureRingCapacityFrames: Int64;
+  CaptureWriteCount: Int64;
+  CaptureReadCount: Int64;
+  InputGainLinear: Single;
 
   RingBuffer: array[0..RingBufferCapacity - 1] of TCommand;
   RingHead: Integer;
@@ -289,6 +344,48 @@ begin
   PendingFreeHead := NextHead;
 end;
 
+{ Capture-thread-only producer for the capture ring - see its declaration.
+  A chunk that doesn't fit is dropped whole (never a partial/torn write) so
+  a transient stall never desyncs the ring's frame accounting; the consumer
+  side just reads silence for whatever it was going to hand over, an
+  inaudible one-block glitch rather than a corrupted stream. }
+procedure PushCaptureFrames(ASrc: PSingle; AFrameCount: Integer);
+var
+  Space: Int64;
+  i, Idx: Int64;
+begin
+  Space := CaptureRingCapacityFrames - (CaptureWriteCount - CaptureReadCount);
+  if Space < AFrameCount then
+    Exit;
+  for i := 0 to AFrameCount - 1 do
+  begin
+    Idx := (CaptureWriteCount + i) mod CaptureRingCapacityFrames;
+    CaptureRingBuffer[Idx * 2] := ASrc[i * 2];
+    CaptureRingBuffer[Idx * 2 + 1] := ASrc[i * 2 + 1];
+  end;
+  CaptureWriteCount := CaptureWriteCount + AFrameCount;
+end;
+
+{ FillBlock-only (audio thread) consumer for the capture ring, one frame at a
+  time - silence (not the last real sample held over) whenever the ring is
+  empty, so an underrun is heard as a gap rather than a stuck/repeating
+  sample. }
+procedure PopCaptureFrame(out ACapL, ACapR: Single);
+var
+  Idx: Int64;
+begin
+  if CaptureWriteCount - CaptureReadCount <= 0 then
+  begin
+    ACapL := 0;
+    ACapR := 0;
+    Exit;
+  end;
+  Idx := CaptureReadCount mod CaptureRingCapacityFrames;
+  ACapL := CaptureRingBuffer[Idx * 2] * InputGainLinear;
+  ACapR := CaptureRingBuffer[Idx * 2 + 1] * InputGainLinear;
+  Inc(CaptureReadCount);
+end;
+
 function AnyLiveNoteActive: Boolean;
 var
   t: Integer;
@@ -296,6 +393,21 @@ begin
   Result := False;
   for t := 0 to MaxTracks - 1 do
     if LiveNotes[t].Active or FadingNotes[t].Active then
+      Exit(True);
+end;
+
+{ True while any Input Track has its "M" monitor toggle on - the realtime
+  thread needs to keep calling FillBlock/WriteBlock for this alone even with
+  the transport fully stopped and nothing else active, or live-monitored
+  input would just go silent the moment playback isn't otherwise running. }
+function AnyTrackMonitoring: Boolean;
+var
+  t: Integer;
+begin
+  Result := False;
+  for t := 0 to MaxTracks - 1 do
+    if Project.TrackIsInput[t] and Project.TrackMonitorEnabled[t] and
+      Project.TrackEnabled[t] then
       Exit(True);
 end;
 
@@ -364,6 +476,17 @@ begin
           CountInFramesUntilNextBeat := 0;
           RecordWritePos := 0;
           ClickPlayPos := -1;
+        end;
+      ckStartRecording:
+        begin
+          { Input Track take: same end state count-in reaches on its last
+            beat (RecordStateRecording, Playing True so the playhead moves
+            the same way), just entered immediately instead of after 4
+            clicks - see AudioEngineStartRecording's declaration comment. }
+          RecordTrackIndex := Cmd.TrackIndex;
+          RecordState := RecordStateRecording;
+          RecordWritePos := 0;
+          Playing := True;
         end;
       ckStopRecording:
         begin
@@ -1023,7 +1146,7 @@ var
   Frame, t, i, e: Integer;
   GlobalFrame, ClipRelFrame, SwungPos: Int64;
   Clip: PPlaybackClip;
-  L, R, TrackL, TrackR, RecL, RecR, ClickVal: Single;
+  L, R, TrackL, TrackR, RecL, RecR, ClickVal, CapL, CapR: Single;
   BeatFrames: Int64;
 begin
   FillChar(MixBuffer^, BlockFrames * OutputChannels * SizeOf(Single), 0);
@@ -1036,6 +1159,10 @@ begin
     R := 0;
     RecL := 0;
     RecR := 0;
+    { popped once per frame (not once per track) so every monitoring track
+      hears the identical live sample this frame, instead of each track
+      draining its own share of the ring - see PopCaptureFrame }
+    PopCaptureFrame(CapL, CapR);
 
     for t := 0 to MaxTracks - 1 do
     begin
@@ -1081,10 +1208,32 @@ begin
           FadingNotes[t].Active := False;
       end;
 
+      { input monitoring: mixes the live captured signal straight into this
+        track's audible output with no playhead movement/recording required
+        - independent of the record tap just below, so monitoring can stay
+        on (or off) throughout a take with no change in what gets recorded }
+      if Project.TrackIsInput[t] and Project.TrackMonitorEnabled[t] then
+      begin
+        TrackL := TrackL + CapL;
+        TrackR := TrackR + CapR;
+      end;
+
       if (RecordState = RecordStateRecording) and (t = RecordTrackIndex) then
       begin
-        RecL := TrackL;
-        RecR := TrackR;
+        if Project.TrackIsInput[t] then
+        begin
+          { tapped straight from the capture ring, not TrackL/TrackR - an
+            Input Track's take must be captured regardless of whether this
+            track's own "M" monitor toggle happens to be on, matching
+            regular tracks' "recorded dry" tap just below }
+          RecL := CapL;
+          RecR := CapR;
+        end
+        else
+        begin
+          RecL := TrackL;
+          RecR := TrackR;
+        end;
       end;
 
       { per-track insert effects chain - applied after the record tap, so a
@@ -1201,7 +1350,8 @@ begin
   while not Terminated do
   begin
     DrainCommands;
-    if Playing or AnyLiveNoteActive or (RecordState <> RecordStateIdle) then
+    if Playing or AnyLiveNoteActive or (RecordState <> RecordStateIdle) or
+      AnyTrackMonitoring then
     begin
       FillBlock;
       if SP1200Enabled then
@@ -1211,6 +1361,24 @@ begin
     end
     else
       Sleep(10);
+  end;
+end;
+
+procedure TCaptureThread.Execute;
+var
+  TempBuf: PSingle;
+begin
+  GetMem(TempBuf, InputBufferFrames * OutputChannels * SizeOf(Single));
+  try
+    while not Terminated do
+    begin
+      if CaptureAvailable and Backend.CaptureRead(TempBuf, InputBufferFrames) then
+        PushCaptureFrames(TempBuf, InputBufferFrames)
+      else
+        Sleep(5); { no capture device, or a read failure - avoid busy-spinning }
+    end;
+  finally
+    FreeMem(TempBuf);
   end;
 end;
 
@@ -1225,6 +1393,48 @@ begin
   begin
     Envelope := 1.0 - (i / ClickLen);
     ClickSamples[i] := Envelope * 0.5 * Sin(2 * Pi * ClickFreqHz * i / ProjectSampleRate);
+  end;
+end;
+
+{ Opens the capture backend + ring buffer and starts CaptureThread - shared
+  by AudioEngineInit and AudioEngineSetInputBufferSize (the latter via a
+  prior CloseCaptureAndStopThread), same stop/reopen/restart shape
+  AudioEngineSetBufferSize uses for the output side. CaptureOpen failing
+  (no capture device, e.g. this machine has none, or the DirectSound stub)
+  is not fatal - CaptureAvailable just stays False and the capture thread
+  idles forever, monitoring/Input-Track recording silently produce silence
+  instead of the app failing to start. }
+procedure OpenCaptureAndStartThread;
+begin
+  CaptureRingCapacityFrames := Int64(InputBufferFrames) * CaptureRingBlocks;
+  GetMem(CaptureRingBuffer, CaptureRingCapacityFrames * OutputChannels * SizeOf(Single));
+  CaptureWriteCount := 0;
+  CaptureReadCount := 0;
+
+  CaptureAvailable := Backend.CaptureOpen(ProjectSampleRate, OutputChannels,
+    InputBufferFrames);
+
+  CaptureThread := TCaptureThread.Create(False);
+  CaptureThread.FreeOnTerminate := False;
+end;
+
+procedure CloseCaptureAndStopThread;
+begin
+  if CaptureThread <> nil then
+  begin
+    CaptureThread.Terminate;
+    CaptureThread.WaitFor;
+    FreeAndNil(CaptureThread);
+  end;
+
+  if CaptureAvailable then
+    Backend.CaptureClose;
+  CaptureAvailable := False;
+
+  if CaptureRingBuffer <> nil then
+  begin
+    FreeMem(CaptureRingBuffer);
+    CaptureRingBuffer := nil;
   end;
 end;
 
@@ -1243,6 +1453,8 @@ begin
   RecordState := RecordStateIdle;
   RecordWritePos := 0;
   ClickPlayPos := -1;
+  InputBufferFrames := DefaultInputBufferFrames;
+  InputGainLinear := 1.0;
   AudioEngineInvalidateGrainCache;
   for i := 0 to MaxTracks - 1 do
   begin
@@ -1274,12 +1486,16 @@ begin
 
   PlaybackThread := TPlaybackThread.Create(False);
   PlaybackThread.FreeOnTerminate := False;
+
+  OpenCaptureAndStartThread;
 end;
 
 procedure AudioEngineShutdown;
 var
   i: Integer;
 begin
+  CloseCaptureAndStopThread;
+
   if PlaybackThread <> nil then
   begin
     PlaybackThread.Terminate;
@@ -1495,6 +1711,32 @@ begin
   PlaybackThread.FreeOnTerminate := False;
 end;
 
+function AudioEngineGetInputBufferSize: Integer;
+begin
+  Result := InputBufferFrames;
+end;
+
+procedure AudioEngineSetInputBufferSize(ANewBufferSize: Integer);
+begin
+  if ANewBufferSize = InputBufferFrames then
+    Exit;
+  CloseCaptureAndStopThread;
+  InputBufferFrames := ANewBufferSize;
+  OpenCaptureAndStartThread;
+end;
+
+function AudioEngineGetInputGainDb: Single;
+begin
+  if InputGainLinear <= 0 then
+    Exit(-100);
+  Result := 20 * (Ln(InputGainLinear) / Ln(10));
+end;
+
+procedure AudioEngineSetInputGainDb(ADb: Single);
+begin
+  InputGainLinear := Exp((ADb / 20) * Ln(10));
+end;
+
 procedure AudioEngineDrainPendingFrees;
 var
   Ptr: Pointer;
@@ -1512,6 +1754,15 @@ var
   Cmd: TCommand;
 begin
   Cmd.Kind := ckStartCountIn;
+  Cmd.TrackIndex := ATrackIndex;
+  PushCommand(Cmd);
+end;
+
+procedure AudioEngineStartRecording(ATrackIndex: Integer);
+var
+  Cmd: TCommand;
+begin
+  Cmd.Kind := ckStartRecording;
   Cmd.TrackIndex := ATrackIndex;
   PushCommand(Cmd);
 end;

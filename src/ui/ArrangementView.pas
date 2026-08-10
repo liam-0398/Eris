@@ -14,6 +14,15 @@ type
 
   TSeekEvent = procedure(Sender: TObject; AFrameOffset: Int64) of object;
 
+  { Fired when a timeline clip is "activated" as an instrument the same way
+    a file-browser file is - double-clicked, or dragged down off the bottom
+    of the arrangement onto the device panel's instrument slot below (see
+    MouseUp's dmMove branch and DblClick). Carries the clip's SampleID
+    directly rather than a path: the sample is already resident in
+    Project.SamplePool (loaded from disk, or - for a recorded clip - never
+    backed by a file at all), so there's nothing to import. }
+  TClipSampleEvent = procedure(Sender: TObject; ASampleID: Integer) of object;
+
   TDragMode = (dmNone, dmMove, dmResizeLeft, dmResizeRight, dmRangeSelect, dmGroupMove);
 
   { One clip being dragged as part of a multi-clip group move (started by
@@ -50,9 +59,11 @@ type
       TrackVolumeMax = 2.0;
       MuteButtonSize = 16;
       MuteButtonMargin = 4;
+      MonitorButtonSize = 16;
     var
       FOnFileDrop: TFileDropEvent;
       FOnSeek: TSeekEvent;
+      FOnClipActivate: TClipSampleEvent;
       FOnKeyboardTrackChanged: TNotifyEvent;
       FOnClipSelectionChanged: TNotifyEvent;
       FTrackColors: array[0..Project.MaxTracks - 1] of TColor;
@@ -107,6 +118,7 @@ type
     function XToVolume(X: Integer): Single;
     function HitTestVolumeSlider(ATrackIndex, Y: Integer): Boolean;
     function MuteButtonRect(ATrackIndex: Integer): TRect;
+    function MonitorButtonRect(ATrackIndex: Integer): TRect;
     function ClipOverlapsRange(const AClip: TClip; ARangeStart, ARangeEnd: Int64): Boolean;
     procedure BuildGroupDragItems(ARangeStart, ARangeEnd: Int64; AT1, AT2: Integer);
     procedure SelectClip(ATrack, AClip: Integer);
@@ -136,6 +148,7 @@ type
     procedure MouseMove(Shift: TShiftState; X, Y: Integer); override;
     procedure MouseUp(Button: TMouseButton; Shift: TShiftState;
       X, Y: Integer); override;
+    procedure DblClick; override;
     procedure KeyDown(var Key: Word; Shift: TShiftState); override;
   public
     constructor Create(AOwner: TComponent); override;
@@ -159,6 +172,7 @@ type
     property CursorFrame: Int64 read FCursorFrame;
     property OnFileDrop: TFileDropEvent read FOnFileDrop write FOnFileDrop;
     property OnSeek: TSeekEvent read FOnSeek write FOnSeek;
+    property OnClipActivate: TClipSampleEvent read FOnClipActivate write FOnClipActivate;
     property OnKeyboardTrackChanged: TNotifyEvent read FOnKeyboardTrackChanged
       write FOnKeyboardTrackChanged;
     property OnClipSelectionChanged: TNotifyEvent read FOnClipSelectionChanged
@@ -452,6 +466,20 @@ begin
     Width - MuteButtonMargin, y + MuteButtonMargin + MuteButtonSize);
 end;
 
+{ Input Track only: input-monitoring toggle, sitting immediately left of the
+  mute button - lets the live captured signal through to this track's
+  audible output with no playhead movement/recording required (see
+  AudioEngine.FillBlock's TrackIsInput/TrackMonitorEnabled mix). }
+function TArrangementView.MonitorButtonRect(ATrackIndex: Integer): TRect;
+var
+  y, RightEdge: Integer;
+begin
+  y := RowTop(ATrackIndex);
+  RightEdge := Width - MuteButtonSize - MuteButtonMargin * 2 - MonitorButtonSize;
+  Result := Rect(RightEdge, y + MuteButtonMargin,
+    RightEdge + MonitorButtonSize, y + MuteButtonMargin + MonitorButtonSize);
+end;
+
 procedure TArrangementView.SelectClip(ATrack, AClip: Integer);
 begin
   if (ATrack = FSelectedTrack) and (AClip = FSelectedClip) then
@@ -721,7 +749,7 @@ end;
 procedure TArrangementView.DrawTrackHeaders;
 var
   i, y, SliderY, kx: Integer;
-  MuteRect: TRect;
+  MuteRect, MonitorRect: TRect;
 begin
   for i := 0 to Project.TrackCount - 1 do
   begin
@@ -739,7 +767,10 @@ begin
     Canvas.Pen.Color := clBtnShadow;
     Canvas.Rectangle(HeaderLeft, y, Width, y + TrackHeight);
     Canvas.Brush.Style := bsClear;
-    Canvas.TextOut(HeaderLeft + 8, y + 8, 'Track ' + IntToStr(i + 1));
+    if Project.TrackIsInput[i] then
+      Canvas.TextOut(HeaderLeft + 8, y + 8, 'Input ' + IntToStr(i + 1))
+    else
+      Canvas.TextOut(HeaderLeft + 8, y + 8, 'Track ' + IntToStr(i + 1));
     Canvas.Brush.Style := bsSolid;
 
     { simple on/off mute toggle }
@@ -750,6 +781,21 @@ begin
       Canvas.Brush.Color := clRed;
     Canvas.Pen.Color := clBlack;
     Canvas.Rectangle(MuteRect);
+
+    { Input Track only: "M" input-monitoring toggle }
+    if Project.TrackIsInput[i] then
+    begin
+      MonitorRect := MonitorButtonRect(i);
+      if Project.TrackMonitorEnabled[i] then
+        Canvas.Brush.Color := clYellow
+      else
+        Canvas.Brush.Color := clBtnFace;
+      Canvas.Pen.Color := clBlack;
+      Canvas.Rectangle(MonitorRect);
+      Canvas.Brush.Style := bsClear;
+      Canvas.TextOut(MonitorRect.Left + 4, MonitorRect.Top - 1, 'M');
+      Canvas.Brush.Style := bsSolid;
+    end;
 
     { simple volume slider - a plain line with a draggable knob, no readout }
     SliderY := y + VolumeSliderY;
@@ -1101,6 +1147,14 @@ begin
     Exit;
   end;
 
+  if (TrackIndex >= 0) and (X >= HeaderLeft) and Project.TrackIsInput[TrackIndex] and
+    PtInRect(MonitorButtonRect(TrackIndex), Point(X, Y)) then
+  begin
+    Project.TrackMonitorEnabled[TrackIndex] := not Project.TrackMonitorEnabled[TrackIndex];
+    Invalidate;
+    Exit;
+  end;
+
   if (TrackIndex >= 0) and (X >= HeaderLeft) and HitTestVolumeSlider(TrackIndex, Y) then
   begin
     FDraggingVolumeTrack := TrackIndex;
@@ -1399,6 +1453,22 @@ begin
   case FDragMode of
     dmMove:
       begin
+        { dragged past the bottom edge of the arrangement view itself - onto
+          the device panel below, where a file dropped from the file browser
+          loads as the keyboard track's instrument (see MainForm's
+          DevicePanelDragDrop). A clip dragged there activates the same way
+          instead of actually moving/duplicating it on the timeline - mouse
+          capture keeps delivering coordinates here even once Y runs past
+          Height, same as the volume-slider drag above tolerates X doing. }
+        if (Y >= Height) and Assigned(FOnClipActivate) then
+        begin
+          FOnClipActivate(Self, FDragOrigClip.SampleID);
+          FDragActive := False;
+          FDragMode := dmNone;
+          Invalidate;
+          Exit;
+        end;
+
         if OrigTrack <> FDragTrack then
           Project.PushUndoSnapshot(FDragTrack);
         Project.RemoveClipAt(OrigTrack, FDragClip);
@@ -1604,6 +1674,30 @@ begin
   FDragActive := False;
   FDragMode := dmNone;
   Invalidate;
+end;
+
+{ Double-clicking a clip activates it as the keyboard track's instrument,
+  same as double-clicking a file in the file browser (see MainForm's
+  FileBrowserFileActivate) - the other of the two "same as file drag or
+  double click" entry points MouseUp's dmMove branch above covers for the
+  drag gesture. }
+procedure TArrangementView.DblClick;
+var
+  P: TPoint;
+  TrackIndex, ClipIndex: Integer;
+  Mode: TDragMode;
+begin
+  inherited DblClick;
+  P := ScreenToClient(Mouse.CursorPos);
+  if P.X >= HeaderLeft then
+    Exit;
+  TrackIndex := TrackIndexAtY(P.Y);
+  if TrackIndex < 0 then
+    Exit;
+  if not HitTestClip(TrackIndex, P.X, ClipIndex, Mode) then
+    Exit;
+  if Assigned(FOnClipActivate) then
+    FOnClipActivate(Self, Project.Tracks[TrackIndex].Clips[ClipIndex].SampleID);
 end;
 
 { Extracts whatever portion of AClip falls inside [ARangeStart, ARangeEnd),

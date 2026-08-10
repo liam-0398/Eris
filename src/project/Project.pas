@@ -53,6 +53,17 @@ var
   { simple mute toggle, shown on the track header in the arrangement view }
   TrackEnabled: array[0..MaxTracks - 1] of Boolean;
 
+  { Input Track: records from the live capture device (ALSA line-in for now)
+    instead of from its own keyboard-played/timeline audio - see AudioEngine's
+    RecL/RecR record tap and the "M" input-monitor button on the track header.
+    TrackMonitorEnabled routes the live captured signal straight into this
+    track's mix (post-tap, pre-insert-FX) with no playhead movement and no
+    recording required, so it also doubles as headphone monitoring while
+    actually recording. Meaningful only when TrackIsInput is set, but stored
+    per track like every other track flag here. }
+  TrackIsInput: array[0..MaxTracks - 1] of Boolean;
+  TrackMonitorEnabled: array[0..MaxTracks - 1] of Boolean;
+
   { SP-1200-style swing: delays every other grid step's clips later by a
     percentage. 50 = straight/off, 54..71 mirror the SP-1200's own five
     detents, 75 is the theoretical ceiling (off-step lands exactly on the
@@ -86,6 +97,7 @@ procedure PushUndoSnapshot(ATrackIndex: Integer);
 function PopUndo(out ATrackIndex: Integer): Boolean;
 
 function AddTrack: Boolean;
+function AddInputTrack: Boolean;
 function DeleteTrack(ATrackIndex: Integer): Boolean;
 procedure NewProject;
 
@@ -126,6 +138,8 @@ begin
     TrackEffectCount[i] := 0;
     TrackSwingPercent[i] := 50;
     TrackSwingDivision[i] := 16;
+    TrackIsInput[i] := False;
+    TrackMonitorEnabled[i] := False;
   end;
 end;
 
@@ -268,9 +282,18 @@ begin
   TrackEffectCount[TrackCount] := 0;
   TrackSwingPercent[TrackCount] := 50;
   TrackSwingDivision[TrackCount] := 16;
+  TrackIsInput[TrackCount] := False;
+  TrackMonitorEnabled[TrackCount] := False;
   Inc(TrackCount);
   Inc(NextTrackID);
   Result := True;
+end;
+
+function AddInputTrack: Boolean;
+begin
+  Result := AddTrack;
+  if Result then
+    TrackIsInput[TrackCount - 1] := True;
 end;
 
 function DeleteTrack(ATrackIndex: Integer): Boolean;
@@ -295,6 +318,8 @@ begin
     TrackEffectCount[t] := TrackEffectCount[t + 1];
     TrackSwingPercent[t] := TrackSwingPercent[t + 1];
     TrackSwingDivision[t] := TrackSwingDivision[t + 1];
+    TrackIsInput[t] := TrackIsInput[t + 1];
+    TrackMonitorEnabled[t] := TrackMonitorEnabled[t + 1];
     Move(TrackEffects[t + 1, 0], TrackEffects[t, 0], SizeOf(TrackEffects[t]));
   end;
 
