@@ -1254,7 +1254,13 @@ begin
     Exit;
   end;
 
-  if Project.TrackInstrument[FRecordTrackIndex] < 0 then
+  { A Sampler Track never uses TrackInstrument (it plays TrackSamplerSlots
+    instead) - the recording path itself doesn't care which one a track
+    uses, it just captures whatever the track's live note output is, so
+    this guard only needs to reject the "nothing to play" case for a
+    normal track. }
+  if not Project.TrackIsSampler[FRecordTrackIndex] and
+    (Project.TrackInstrument[FRecordTrackIndex] < 0) then
   begin
     ShowMessage('Load an instrument for this track first.');
     Exit;
