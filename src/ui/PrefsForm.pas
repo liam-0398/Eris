@@ -86,6 +86,7 @@ begin
   FBufferSizeCombo.Items.Add('512');
   FBufferSizeCombo.Items.Add('1024');
   FBufferSizeCombo.Items.Add('2048');
+  FBufferSizeCombo.Items.Add('4096');
   CurrentBufferSizeIdx := FBufferSizeCombo.Items.IndexOf(
     IntToStr(AudioEngineGetBufferSize));
   if CurrentBufferSizeIdx >= 0 then

@@ -1833,7 +1833,7 @@ const
   OutChannels = 2;
 var
   t, i: Integer;
-  RangeStart, RangeEnd, RangeLen, OutFrame, OutIdx, ClipRelFrame: Int64;
+  RangeStart, RangeEnd, RangeLen, OutFrame, OutIdx, ClipRelFrame, SwungPos: Int64;
   Clip: TClip;
   Sample: TSample;
   NewSample: TSample;
@@ -1857,12 +1857,16 @@ begin
 
   HasContent := False;
   for i := 0 to High(Project.Tracks[t].Clips) do
-    if (Project.Tracks[t].Clips[i].Position + Project.Tracks[t].Clips[i].Length > RangeStart) and
-      (Project.Tracks[t].Clips[i].Position < RangeEnd) then
+  begin
+    SwungPos := AudioEngine.SwungPosition(Project.Tracks[t].Clips[i].Position,
+      Project.TrackSwingPercent[t], Project.TrackSwingDivision[t], BeatFrames);
+    if (SwungPos + Project.Tracks[t].Clips[i].Length > RangeStart) and
+      (SwungPos < RangeEnd) then
     begin
       HasContent := True;
       Break;
     end;
+  end;
   if not HasContent then
     Exit; { nothing in range on this track - no point in a silent clip }
 
@@ -1870,18 +1874,23 @@ begin
   FillChar(Buffer^, RangeLen * OutChannels * SizeOf(Single), 0);
 
   { render exactly like ProjectFile.RenderProjectToWav's offline bounce - same
-    per-clip DetunedSample primitive, so warp mode/detune/transient-grain
-    behavior all match live playback with no new DSP. }
+    per-clip DetunedSample primitive AND the same SwungPosition shift, so
+    warp mode/detune/transient-grain/swing behavior all match live playback
+    with no new DSP. Without the swing shift here, a bounce of swung clips
+    silently reverted to their straight grid position - "consolidate" would
+    quietly flatten the swing feel. }
   for i := 0 to High(Project.Tracks[t].Clips) do
   begin
     Clip := Project.Tracks[t].Clips[i];
-    if (Clip.Position + Clip.Length <= RangeStart) or (Clip.Position >= RangeEnd) then
+    SwungPos := AudioEngine.SwungPosition(Clip.Position,
+      Project.TrackSwingPercent[t], Project.TrackSwingDivision[t], BeatFrames);
+    if (SwungPos + Clip.Length <= RangeStart) or (SwungPos >= RangeEnd) then
       Continue;
     Sample := Project.SamplePool[Clip.SampleID];
 
     for OutFrame := 0 to RangeLen - 1 do
     begin
-      ClipRelFrame := (RangeStart + OutFrame) - Clip.Position;
+      ClipRelFrame := (RangeStart + OutFrame) - SwungPos;
       if (ClipRelFrame < 0) or (ClipRelFrame >= Clip.Length) then
         Continue;
       OutIdx := OutFrame * OutChannels;
