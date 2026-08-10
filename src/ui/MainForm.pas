@@ -326,7 +326,10 @@ begin
   AddSamplerTrackItem := AddItem(TrackMenu, 'Add Sam&pler Track', @TrackAddSamplerClick);
   AddSamplerTrackItem.ShortCut := Menus.ShortCut(Ord('N'), [ssCtrl, ssAlt]);
   DeleteTrackItem := AddItem(TrackMenu, '&Delete Track', @TrackDeleteClick);
-  DeleteTrackItem.ShortCut := Menus.ShortCut(Ord('D'), [ssCtrl]);
+  { Ctrl+Shift+D, not Ctrl+D - Edit > Duplicate already owns plain Ctrl+D,
+    and only one of two identically-bound menu items can ever win the
+    dispatch, so this shortcut did nothing at all before. }
+  DeleteTrackItem.ShortCut := Menus.ShortCut(Ord('D'), [ssCtrl, ssShift]);
 
   HelpMenu := AddMenu('&Help');
   AddItem(HelpMenu, '&About...', @HelpAboutClick);

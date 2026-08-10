@@ -204,13 +204,9 @@ whole underlying sample.
 | `Ctrl+N` | Add a new (normal) track |
 | `Ctrl+Shift+N` | Add an Input Track — see [Input tracks](#input-tracks) |
 | `Ctrl+Alt+N` | Add a Sampler Track — see [Sampler Track](#sampler-track) |
-| `Ctrl+D` | Track > Delete Track — **but see the caveat below** |
+| `Ctrl+Shift+D` | Delete the current track |
 
 The maximum is 32 tracks; adding past that shows a message and does nothing.
-
-**Caveat on `Ctrl+D`:** it is bound to both Edit > Duplicate and Track >
-Delete Track. Only one of them can win, so use the **Track > Delete Track
-menu item** when you actually want to delete a track.
 
 Delete Track removes the track whose header you last clicked (the focused
 track), falling back to the track of the selected clip. This means a track
@@ -444,9 +440,9 @@ sorted into them by DSP type.
   size), **Decay** (0–100%), **Mix** (0–100% wet). Defaults are a
   2012-Clams-Casino-style wash: 2500 Hz, 0.35 Hz, 55%, 65%, 70%, 45%.
 
-**Known gap:** HP and BP filter parameters are not yet written to the project
-file, so their cutoff/Q reset to defaults on reload. Every other effect's
-parameters persist.
+Every effect's parameters are saved with the project. Projects saved before
+HP/BP persistence existed reload those two at their creation defaults
+(100 Hz, and 1 kHz / Q 1.00) rather than at zero.
 
 ## Preferences
 

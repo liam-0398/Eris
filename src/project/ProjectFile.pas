@@ -162,6 +162,9 @@ var
 begin
   Ini.WriteInteger(ASection, APrefix + 'Kind', AEffect.Kind);
   Ini.WriteFloat(ASection, APrefix + 'LowpassFreqHz', AEffect.LowpassFreqHz);
+  Ini.WriteFloat(ASection, APrefix + 'HighpassFreqHz', AEffect.HighpassFreqHz);
+  Ini.WriteFloat(ASection, APrefix + 'BandpassFreqHz', AEffect.BandpassFreqHz);
+  Ini.WriteFloat(ASection, APrefix + 'BandpassQ', AEffect.BandpassQ);
   for b := 0 to Effects.MaxEQBands - 1 do
   begin
     Ini.WriteFloat(ASection, APrefix + 'EQFreq' + IntToStr(b), AEffect.EQFreqHz[b]);
@@ -201,6 +204,12 @@ begin
   FillChar(Result, SizeOf(Result), 0);
   Result.Kind := Ini.ReadInteger(ASection, APrefix + 'Kind', Effects.ekNone);
   Result.LowpassFreqHz := Ini.ReadFloat(ASection, APrefix + 'LowpassFreqHz', 8000);
+  { defaults here mirror Effects.DefaultEffect, so a project saved before
+    these three keys existed reloads its HP/BP at the same settings the
+    effect was created with rather than at 0 Hz / Q 0 }
+  Result.HighpassFreqHz := Ini.ReadFloat(ASection, APrefix + 'HighpassFreqHz', 100);
+  Result.BandpassFreqHz := Ini.ReadFloat(ASection, APrefix + 'BandpassFreqHz', 1000);
+  Result.BandpassQ := Ini.ReadFloat(ASection, APrefix + 'BandpassQ', 1.0);
   for b := 0 to Effects.MaxEQBands - 1 do
   begin
     Result.EQFreqHz[b] := Ini.ReadFloat(ASection, APrefix + 'EQFreq' + IntToStr(b), 0);
