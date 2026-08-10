@@ -445,6 +445,7 @@ begin
       Section := 'Track' + IntToStr(t);
       Ini.WriteInteger(Section, 'Instrument', Project.TrackInstrument[t]);
       Ini.WriteInteger(Section, 'Octave', Project.TrackOctave[t]);
+      Ini.WriteFloat(Section, 'InstrumentGainDb', Project.TrackInstrumentGainDb[t]);
       Ini.WriteFloat(Section, 'Volume', Project.TrackVolume[t]);
       Ini.WriteBool(Section, 'Enabled', Project.TrackEnabled[t]);
       Ini.WriteInt64(Section, 'InstrumentStart', Project.TrackInstrumentStart[t]);
@@ -702,6 +703,7 @@ begin
       Section := 'Track' + IntToStr(t);
       Project.TrackInstrument[t] := Ini.ReadInteger(Section, 'Instrument', -1);
       Project.TrackOctave[t] := Ini.ReadInteger(Section, 'Octave', 0);
+      Project.TrackInstrumentGainDb[t] := Ini.ReadFloat(Section, 'InstrumentGainDb', 0);
       Project.TrackVolume[t] := Ini.ReadFloat(Section, 'Volume', 1.0);
       Project.TrackEnabled[t] := Ini.ReadBool(Section, 'Enabled', True);
       Project.TrackSwingPercent[t] := Ini.ReadFloat(Section, 'SwingPercent', 50);

@@ -164,6 +164,7 @@ type
     procedure PushTrackToEngine(ATrackIndex: Integer);
     procedure SetCursorFrame(AFrameOffset: Int64);
     procedure ClearSelection;
+    procedure ClearKeyboardTrack;
     procedure ZoomIn;
     procedure ZoomOut;
     procedure SetGridDivision(ADivision: Integer);
@@ -1033,6 +1034,20 @@ end;
 procedure TArrangementView.ClearSelection;
 begin
   SelectClip(-1, -1);
+  Invalidate;
+end;
+
+{ Drops the focused-track highlight and tells the device panel to follow.
+  Needed after a track is deleted: every later track shifts down one index,
+  so a retained FKeyboardTrack would silently start pointing at a different
+  track (or past the end of the list). }
+procedure TArrangementView.ClearKeyboardTrack;
+begin
+  if FKeyboardTrack = -1 then
+    Exit;
+  FKeyboardTrack := -1;
+  if Assigned(FOnKeyboardTrackChanged) then
+    FOnKeyboardTrackChanged(Self);
   Invalidate;
 end;
 

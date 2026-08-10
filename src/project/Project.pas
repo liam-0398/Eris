@@ -53,6 +53,11 @@ var
     -1 means no instrument loaded }
   TrackInstrument: array[0..MaxTracks - 1] of Integer;
   TrackOctave: array[0..MaxTracks - 1] of Integer;
+  { gain trim in dB for keyboard-played instrument notes, the instrument-side
+    counterpart of a clip's own Gain slider - applied on top of TrackVolume
+    when a note is triggered, so it trims the instrument without touching the
+    track fader that timeline clips also go through. 0 = unity. }
+  TrackInstrumentGainDb: array[0..MaxTracks - 1] of Single;
   { linear gain multiplier applied on top of each clip's own Gain; 1.0 = unity/default }
   TrackVolume: array[0..MaxTracks - 1] of Single;
 
@@ -166,6 +171,7 @@ begin
     TrackActive[i] := i < DefaultTrackCount;
     TrackInstrument[i] := -1;
     TrackOctave[i] := 0;
+    TrackInstrumentGainDb[i] := 0;
     TrackVolume[i] := 1.0;
     TrackInstrumentStart[i] := 0;
     TrackInstrumentEnd[i] := 0;
@@ -312,6 +318,7 @@ begin
   TrackActive[TrackCount] := True;
   TrackInstrument[TrackCount] := -1;
   TrackOctave[TrackCount] := 0;
+  TrackInstrumentGainDb[TrackCount] := 0;
   TrackVolume[TrackCount] := 1.0;
   TrackInstrumentStart[TrackCount] := 0;
   TrackInstrumentEnd[TrackCount] := 0;
@@ -381,6 +388,7 @@ begin
     TrackActive[t] := TrackActive[t + 1];
     TrackInstrument[t] := TrackInstrument[t + 1];
     TrackOctave[t] := TrackOctave[t + 1];
+    TrackInstrumentGainDb[t] := TrackInstrumentGainDb[t + 1];
     TrackVolume[t] := TrackVolume[t + 1];
     TrackInstrumentStart[t] := TrackInstrumentStart[t + 1];
     TrackInstrumentEnd[t] := TrackInstrumentEnd[t + 1];

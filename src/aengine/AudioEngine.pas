@@ -6,7 +6,13 @@ interface
 
 const
   ProjectSampleRate = 44100;
-  MaxClipWarpMarkers = 8;
+  { Ceiling on warp markers per clip - these back the fixed-size
+    MarkerSource/MarkerTimeline arrays in TPlaybackClip below, which have to
+    be fixed-size to stay realtime-safe. Sized for pinning a marker to every
+    hit across a multi-bar phrase (a four-bar break with a marker on each
+    snare is already past the old limit of 8, and quantising individual synth
+    hits wants far more), at 16 bytes per marker per clip. }
+  MaxClipWarpMarkers = 128;
 
 type
   TPlaybackClip = record

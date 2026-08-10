@@ -54,7 +54,6 @@ type
     FSwingLabel: TLabel;
     FSwingDivisionButton: TSpeedButton;
     FSwingSlider: TTrackBar;
-    FSwingValueLabel: TLabel;
     FInstrumentWidget: TPanel;
     FInstrumentNameLabel: TLabel;
     FInstrumentDeleteButton: TButton;
@@ -66,6 +65,8 @@ type
     FWarpEditor: TWarpEditor;
     FWarpRepitchButton: TSpeedButton;
     FWarpBeatsButton: TSpeedButton;
+    FInstrumentGainSlider: TTrackBar;
+    FInstrumentGainValueLabel: TLabel;
     FClipGainSlider: TTrackBar;
     FClipGainValueLabel: TLabel;
     FClipDetuneSlider: TTrackBar;
@@ -151,6 +152,7 @@ type
     procedure SetSelectedClipWarpMode(AMode: Integer);
     procedure UpdateWarpModeButtons;
     procedure ClipGainSliderChange(Sender: TObject);
+    procedure InstrumentGainSliderChange(Sender: TObject);
     procedure ClipDetuneSliderChange(Sender: TObject);
     procedure UpdateClipControls;
     procedure MetronomeToggleClick(Sender: TObject);
@@ -356,7 +358,7 @@ procedure TForm1.BuildLayout;
 
 var
   WarpButtonsPanel, ClipControlsPanel: TPanel;
-  GainLbl, DetuneLbl: TLabel;
+  GainLbl, DetuneLbl, InstGainLbl: TLabel;
 begin
   Width := 1280;
   Height := 800;
@@ -407,6 +409,14 @@ begin
   FMetronomeToggle.Width := Px(32);
   FMetronomeToggle.Height := Px(32);
   FMetronomeToggle.Font.Style := [fsBold];
+  { A TSpeedButton with GroupIndex = 0 cannot be Down: LCL's SetDown forces
+    the value back to False, so assigning Down in the click handler silently
+    did nothing and the metronome could never be switched on at all. Giving it
+    its own group (grouping is scoped per parent control) makes Down real, and
+    AllowAllUp lets the single button in that group pop back up. Clicking now
+    toggles Down natively, so the handler must NOT flip it as well. }
+  FMetronomeToggle.GroupIndex := 9;
+  FMetronomeToggle.AllowAllUp := True;
   FMetronomeToggle.ShowHint := True;
   FMetronomeToggle.Hint := 'Metronome (tempo-aware click on every beat during playback)';
   FMetronomeToggle.OnClick := @MetronomeToggleClick;
@@ -474,11 +484,16 @@ begin
   FTrackWidgetLabel.Layout := tlCenter;
   FTrackWidgetLabel.Caption := 'No Track';
 
+  { the percentage lives in this caption rather than its own label under the
+    slider: GTK2 gives a TTrackBar a taller minimum height than the Px(26)
+    asked for below, so a separate label at Px(102) got overlapped by the
+    slider on X11. Folding the value up here keeps it visible and leaves the
+    slider the whole rest of the widget. }
   FSwingLabel := TLabel.Create(Self);
   FSwingLabel.Parent := FTrackWidget;
   FSwingLabel.Left := Px(8);
   FSwingLabel.Top := Px(52);
-  FSwingLabel.Caption := 'Swing';
+  FSwingLabel.Caption := 'Swing 50%';
 
   { SP-1200-style swing division toggle - which grid unit swing pairs up.
     Defaults to 16th notes; click to switch to 8th notes (or back). }
@@ -508,12 +523,6 @@ begin
   FSwingSlider.ShowHint := True;
   FSwingSlider.Hint := 'Swing amount (SP-1200 detents: 50/54/58/63/67/71%)';
   FSwingSlider.OnChange := @SwingSliderChange;
-
-  FSwingValueLabel := TLabel.Create(Self);
-  FSwingValueLabel.Parent := FTrackWidget;
-  FSwingValueLabel.Left := Px(8);
-  FSwingValueLabel.Top := Px(102);
-  FSwingValueLabel.Caption := '50% (straight)';
 
   { instrument widget - one "device" holding the sample dragged in for
     keyboard play on the currently selected track }
@@ -567,6 +576,38 @@ begin
   FOctavePlusButton.Width := Px(28);
   FOctavePlusButton.Height := Px(24);
   FOctavePlusButton.OnClick := @OctavePlusClick;
+
+  { instrument gain trim - the keyboard-play counterpart of the clip gain
+    slider in the warp widget, same dB range and same vertical/Reversed
+    convention, sat in the empty right-hand column below the delete button.
+    Trims the instrument only; the track fader that timeline clips also pass
+    through is left alone. }
+  InstGainLbl := TLabel.Create(Self);
+  InstGainLbl.Parent := FInstrumentWidget;
+  InstGainLbl.Left := Px(150);
+  InstGainLbl.Top := Px(56);
+  InstGainLbl.Caption := 'Gain';
+
+  FInstrumentGainSlider := TTrackBar.Create(Self);
+  FInstrumentGainSlider.Parent := FInstrumentWidget;
+  FInstrumentGainSlider.Orientation := trVertical;
+  FInstrumentGainSlider.Left := Px(150);
+  FInstrumentGainSlider.Top := Px(72);
+  FInstrumentGainSlider.Width := Px(32);
+  FInstrumentGainSlider.Height := Px(80);
+  FInstrumentGainSlider.Reversed := True; { up = more gain, same as the clip slider }
+  FInstrumentGainSlider.Min := ClipGainMinDb;
+  FInstrumentGainSlider.Max := ClipGainMaxDb;
+  FInstrumentGainSlider.Position := 0;
+  FInstrumentGainSlider.ShowHint := True;
+  FInstrumentGainSlider.Hint := 'Instrument gain trim (dB)';
+  FInstrumentGainSlider.OnChange := @InstrumentGainSliderChange;
+
+  FInstrumentGainValueLabel := TLabel.Create(Self);
+  FInstrumentGainValueLabel.Parent := FInstrumentWidget;
+  FInstrumentGainValueLabel.Left := Px(148);
+  FInstrumentGainValueLabel.Top := Px(156);
+  FInstrumentGainValueLabel.Caption := '0 dB';
 
   FDropHintLabel := TLabel.Create(Self);
   FDropHintLabel.Parent := FDevicePanel;
@@ -1180,15 +1221,30 @@ begin
 end;
 
 procedure TForm1.TrackDeleteClick(Sender: TObject);
+var
+  Track: Integer;
 begin
-  if FArrangementView.SelectedTrack < 0 then
+  { Delete the FOCUSED track - the one whose header was last clicked, which
+    is what KeyboardTrack holds and what the whole device panel already
+    treats as "the current track". This used to insist on SelectedTrack,
+    which only clicking a CLIP ever sets, so any track with no clips on it -
+    every freshly added sampler or instrument track - could never be deleted
+    at all. Falls back to SelectedTrack so selecting a clip still implies its
+    track, and rejects -2 (the Master row, which isn't deletable). }
+  Track := FArrangementView.KeyboardTrack;
+  if Track < 0 then
+    Track := FArrangementView.SelectedTrack;
+  if Track < 0 then
   begin
     ShowMessage('Select a track to delete.');
     Exit;
   end;
-  if Project.DeleteTrack(FArrangementView.SelectedTrack) then
+
+  if Project.DeleteTrack(Track) then
   begin
     FArrangementView.ClearSelection;
+    { every later track just shifted down one index - see ClearKeyboardTrack }
+    FArrangementView.ClearKeyboardTrack;
     FArrangementView.Invalidate;
   end;
 end;
@@ -1553,9 +1609,9 @@ end;
 
 procedure TForm1.MetronomeToggleClick(Sender: TObject);
 begin
-  { standalone TSpeedButton (GroupIndex = 0) never auto-toggles Down on
-    click - only grouped buttons get that for free - so flip it ourselves }
-  FMetronomeToggle.Down := not FMetronomeToggle.Down;
+  { Down has already been toggled natively by the time this fires - the button
+    is in its own GroupIndex with AllowAllUp, see its creation. Flipping it
+    again here would just cancel that out. }
   AudioEngineSetMetronomeEnabled(FMetronomeToggle.Down);
   UpdateMetronomeToggleLook;
 end;
@@ -1596,10 +1652,8 @@ begin
   if Track < 0 then
     Exit;
   Project.TrackSwingPercent[Track] := SwingDetents[FSwingSlider.Position];
-  if FSwingSlider.Position = 0 then
-    FSwingValueLabel.Caption := '50% (straight)'
-  else
-    FSwingValueLabel.Caption := IntToStr(SwingDetents[FSwingSlider.Position]) + '%';
+  FSwingLabel.Caption := 'Swing ' +
+    IntToStr(SwingDetents[FSwingSlider.Position]) + '%';
 end;
 
 procedure TForm1.UpdateSwingControls;
@@ -1610,7 +1664,6 @@ begin
   FSwingLabel.Visible := Track >= 0;
   FSwingDivisionButton.Visible := Track >= 0;
   FSwingSlider.Visible := Track >= 0;
-  FSwingValueLabel.Visible := Track >= 0;
   if Track < 0 then
     Exit;
 
@@ -1631,11 +1684,7 @@ begin
     end;
   end;
   FSwingSlider.Position := BestIdx;
-
-  if BestIdx = 0 then
-    FSwingValueLabel.Caption := '50% (straight)'
-  else
-    FSwingValueLabel.Caption := IntToStr(SwingDetents[BestIdx]) + '%';
+  FSwingLabel.Caption := 'Swing ' + IntToStr(SwingDetents[BestIdx]) + '%';
 end;
 
 procedure TForm1.UpdateWarpModeButtons;
@@ -1685,6 +1734,18 @@ begin
   Project.Tracks[Track].Clips[ClipIdx].Gain := Power(10, GainDb / 20);
   FClipGainValueLabel.Caption := Format('%d dB', [GainDb]);
   FArrangementView.RefreshTrack(Track);
+end;
+
+procedure TForm1.InstrumentGainSliderChange(Sender: TObject);
+var
+  Track, GainDb: Integer;
+begin
+  Track := FArrangementView.KeyboardTrack;
+  if Track < 0 then
+    Exit;
+  GainDb := FInstrumentGainSlider.Position;
+  Project.TrackInstrumentGainDb[Track] := GainDb;
+  FInstrumentGainValueLabel.Caption := Format('%d dB', [GainDb]);
 end;
 
 procedure TForm1.ClipDetuneSliderChange(Sender: TObject);
@@ -2294,6 +2355,9 @@ begin
       FInstrumentWidget.Visible := True;
       FInstrumentNameLabel.Caption := Project.SampleNames[SampleID];
       FOctaveLabel.Caption := Format('Octave: %d', [Project.TrackOctave[Track]]);
+      FInstrumentGainSlider.Position := Round(Project.TrackInstrumentGainDb[Track]);
+      FInstrumentGainValueLabel.Caption :=
+        Format('%d dB', [FInstrumentGainSlider.Position]);
 
       FInstrumentEditorWidget.Visible := not FWarpWidget.Visible;
       if FInstrumentEditorWidget.Visible then
@@ -2371,8 +2435,11 @@ begin
     Exit;
 
   TotalOffset := ASemitoneOffset + Project.TrackOctave[Track] * 12;
+  { instrument gain trim rides on top of the track fader - see
+    Project.TrackInstrumentGainDb }
   AudioEngineTriggerNote(Track, @Sample.Data[StartFrame * Sample.Channels],
-    TrimmedCount, Sample.Channels, TotalOffset, Project.TrackVolume[Track]);
+    TrimmedCount, Sample.Channels, TotalOffset, Project.TrackVolume[Track] *
+    Power(10, Project.TrackInstrumentGainDb[Track] / 20));
 end;
 
 procedure TForm1.SamplerKeySelected(Sender: TObject; AKeyIndex: Integer);
@@ -2423,8 +2490,11 @@ begin
     Exit;
 
   TotalOffset := (Project.TrackOctave[Track] + AOctaveDelta) * 12;
+  { instrument gain trim rides on top of the track fader - see
+    Project.TrackInstrumentGainDb }
   AudioEngineTriggerNote(Track, @Sample.Data[StartFrame * Sample.Channels],
-    TrimmedCount, Sample.Channels, TotalOffset, Project.TrackVolume[Track]);
+    TrimmedCount, Sample.Channels, TotalOffset, Project.TrackVolume[Track] *
+    Power(10, Project.TrackInstrumentGainDb[Track] / 20));
 end;
 
 procedure TForm1.PlaybackPollTimerTimer(Sender: TObject);
