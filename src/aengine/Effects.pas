@@ -5,7 +5,7 @@ unit Effects;
 interface
 
 uses
-  Math, BiquadFilters, Quadraverb;
+  Math, BiquadFilters, Quadraverb, BBE422A, Alesis3630;
 
 const
   MaxEffectsPerTrack = 4;
@@ -27,6 +27,8 @@ const
   ekOverdrive = 13;
   ekQuadraverbReverb = 14;
   ekQuadraverbDelay = 15;
+  ekExciter422A = 16;
+  ekCompressor3630 = 17;
 
   { classic vintage-style chorus (think Ableton Live 1/2's Chorus, or a
     tracker's chorus command) - just a short modulated delay line per
@@ -218,6 +220,27 @@ type
     QVDelayFeedbackL: Single;
     QVDelayFeedbackR: Single;
     QVDelayMixPercent: Single;
+    { BBE Sonic Maximizer 422A. Names and ranges are the original front
+      panel's - see BBE422A.pas, which owns all the DSP and the range
+      constants. Mix is this program's addition, not the box's: the 422A
+      only has a hard In/Out switch. }
+    BBELoContourDb: Single;
+    BBEDefinition: Single;
+    BBEMixPercent: Single;
+    { Alesis 3630. Same arrangement - see Alesis3630.pas. C36Ratio is a
+      plain ratio, with A36RatioInfinite standing for the panel's infinity
+      detent; C36GateThresholdDbfs is dBFS, or A36GateOffDbfs for the
+      panel's fully-counter-clockwise "no gating". }
+    C36Response: Integer;
+    C36Knee: Integer;
+    C36ThresholdDbu: Single;
+    C36Ratio: Single;
+    C36AttackMs: Single;
+    C36ReleaseMs: Single;
+    C36OutputDb: Single;
+    C36GateThresholdDbfs: Single;
+    C36GateRateMs: Single;
+    C36MixPercent: Single;
   end;
 
   TEffectChannelState = record
@@ -327,6 +350,11 @@ type
       separate machines and a slot only ever runs one of them. }
     QVReverb: TQVReverbState;
     QVDelay: TQVDelayState;
+    { Same again for the two emulated boxes below: each owns its whole
+      signal path, including its own filters and delay lines, so neither
+      shares any of the state above. }
+    BBE: TBBE422State;
+    C36: TA36State;
   end;
 
 procedure EffectStateReset(var AState: TEffectState);
@@ -395,6 +423,8 @@ begin
     sentinels, same reasoning as above }
   QVReverbReset(AState.QVReverb);
   QVDelayReset(AState.QVDelay);
+  BBE422Reset(AState.BBE);
+  A36Reset(AState.C36);
 end;
 
 procedure DefaultEffect(AKind: Integer; out AEffect: TEffect);
@@ -508,6 +538,36 @@ begin
         AEffect.QVDelayFeedbackL := 45;
         AEffect.QVDelayFeedbackR := 45;
         AEffect.QVDelayMixPercent := 30;
+      end;
+    ekExciter422A:
+      begin
+        { the master-bus setting rather than a neutral one: Definition about
+          two thirds up, which is where the top of a break starts cutting
+          without the box announcing itself, and Lo Contour up a few dB to
+          put back the 50Hz the process's own band split thins out. Fully
+          wet, because the time alignment is the point and any dry blend
+          fights it - see the ekExciter422A branch in ProcessEffect. }
+        AEffect.BBELoContourDb := 4;
+        AEffect.BBEDefinition := 65;
+        AEffect.BBEMixPercent := 100;
+      end;
+    ekCompressor3630:
+      begin
+        { straight to the break setting: Peak, hard knee, fast attack, high
+          ratio, and a release short enough to pump back up before the next
+          hit. Gate off - it is off on the real panel's fully
+          counter-clockwise position too, and gating a break is a decision,
+          not a default. }
+        AEffect.C36Response := A36ResponsePeak;
+        AEffect.C36Knee := A36KneeHard;
+        AEffect.C36ThresholdDbu := -8;
+        AEffect.C36Ratio := 8;
+        AEffect.C36AttackMs := 1;
+        AEffect.C36ReleaseMs := 120;
+        AEffect.C36OutputDb := 4;
+        AEffect.C36GateThresholdDbfs := A36GateOffDbfs;
+        AEffect.C36GateRateMs := 200;
+        AEffect.C36MixPercent := 100;
       end;
     { ekTuner has no parameters - FillChar above is the whole setup }
   end;
@@ -1385,6 +1445,23 @@ begin
         AEffect.QVDelayType, AEffect.QVDelayTimeLMs, AEffect.QVDelayTimeRMs,
         AEffect.QVDelayFeedbackL, AEffect.QVDelayFeedbackR,
         AEffect.QVDelayMixPercent);
+    { Worth knowing about this one's Mix: the whole point of the BBE process
+      is that it moves the low and mid bands 2.5ms and 0.5ms behind the
+      high band, so anything under 100% wet is summing a delayed low end
+      against an undelayed one and will comb below ~200Hz. That is exactly
+      what parallelling a real 422A against a dry feed does, so it is left
+      alone rather than compensated for - but 100% is the setting the box
+      was used at. }
+    ekExciter422A:
+      BBE422Process(AState.BBE, L, R, ASampleRate,
+        AEffect.BBELoContourDb, AEffect.BBEDefinition,
+        AEffect.BBEMixPercent);
+    ekCompressor3630:
+      A36Process(AState.C36, L, R, ASampleRate,
+        AEffect.C36Response, AEffect.C36Knee, AEffect.C36ThresholdDbu,
+        AEffect.C36Ratio, AEffect.C36AttackMs, AEffect.C36ReleaseMs,
+        AEffect.C36OutputDb, AEffect.C36GateThresholdDbfs,
+        AEffect.C36GateRateMs, AEffect.C36MixPercent);
   end;
 end;
 

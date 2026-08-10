@@ -92,7 +92,7 @@ implementation
 uses
   SysUtils, IniFiles, FileUtil, SampleTypes, Project, WavDecoder,
   AudioEngine, Resample, Waveform, SP1200, TarArchive, Effects, Quadraverb,
-  ThreadUtil;
+  Alesis3630, ThreadUtil;
 
 constructor TProjectLoadThread.Create(const APath: string; AOnTerminate: TNotifyEvent);
 begin
@@ -217,6 +217,19 @@ begin
   Ini.WriteFloat(ASection, APrefix + 'QVDelayFeedbackL', AEffect.QVDelayFeedbackL);
   Ini.WriteFloat(ASection, APrefix + 'QVDelayFeedbackR', AEffect.QVDelayFeedbackR);
   Ini.WriteFloat(ASection, APrefix + 'QVDelayMixPercent', AEffect.QVDelayMixPercent);
+  Ini.WriteFloat(ASection, APrefix + 'BBELoContourDb', AEffect.BBELoContourDb);
+  Ini.WriteFloat(ASection, APrefix + 'BBEDefinition', AEffect.BBEDefinition);
+  Ini.WriteFloat(ASection, APrefix + 'BBEMixPercent', AEffect.BBEMixPercent);
+  Ini.WriteInteger(ASection, APrefix + 'C36Response', AEffect.C36Response);
+  Ini.WriteInteger(ASection, APrefix + 'C36Knee', AEffect.C36Knee);
+  Ini.WriteFloat(ASection, APrefix + 'C36ThresholdDbu', AEffect.C36ThresholdDbu);
+  Ini.WriteFloat(ASection, APrefix + 'C36Ratio', AEffect.C36Ratio);
+  Ini.WriteFloat(ASection, APrefix + 'C36AttackMs', AEffect.C36AttackMs);
+  Ini.WriteFloat(ASection, APrefix + 'C36ReleaseMs', AEffect.C36ReleaseMs);
+  Ini.WriteFloat(ASection, APrefix + 'C36OutputDb', AEffect.C36OutputDb);
+  Ini.WriteFloat(ASection, APrefix + 'C36GateThresholdDbfs', AEffect.C36GateThresholdDbfs);
+  Ini.WriteFloat(ASection, APrefix + 'C36GateRateMs', AEffect.C36GateRateMs);
+  Ini.WriteFloat(ASection, APrefix + 'C36MixPercent', AEffect.C36MixPercent);
 end;
 
 function LoadEffect(Ini: TIniFile; const ASection, APrefix: string): Effects.TEffect;
@@ -282,6 +295,20 @@ begin
   Result.QVDelayFeedbackL := Ini.ReadFloat(ASection, APrefix + 'QVDelayFeedbackL', 45);
   Result.QVDelayFeedbackR := Ini.ReadFloat(ASection, APrefix + 'QVDelayFeedbackR', 45);
   Result.QVDelayMixPercent := Ini.ReadFloat(ASection, APrefix + 'QVDelayMixPercent', 30);
+  Result.BBELoContourDb := Ini.ReadFloat(ASection, APrefix + 'BBELoContourDb', 4);
+  Result.BBEDefinition := Ini.ReadFloat(ASection, APrefix + 'BBEDefinition', 65);
+  Result.BBEMixPercent := Ini.ReadFloat(ASection, APrefix + 'BBEMixPercent', 100);
+  Result.C36Response := Ini.ReadInteger(ASection, APrefix + 'C36Response', Alesis3630.A36ResponsePeak);
+  Result.C36Knee := Ini.ReadInteger(ASection, APrefix + 'C36Knee', Alesis3630.A36KneeHard);
+  Result.C36ThresholdDbu := Ini.ReadFloat(ASection, APrefix + 'C36ThresholdDbu', -8);
+  Result.C36Ratio := Ini.ReadFloat(ASection, APrefix + 'C36Ratio', 8);
+  Result.C36AttackMs := Ini.ReadFloat(ASection, APrefix + 'C36AttackMs', 1);
+  Result.C36ReleaseMs := Ini.ReadFloat(ASection, APrefix + 'C36ReleaseMs', 120);
+  Result.C36OutputDb := Ini.ReadFloat(ASection, APrefix + 'C36OutputDb', 4);
+  Result.C36GateThresholdDbfs := Ini.ReadFloat(ASection, APrefix + 'C36GateThresholdDbfs',
+    Alesis3630.A36GateOffDbfs);
+  Result.C36GateRateMs := Ini.ReadFloat(ASection, APrefix + 'C36GateRateMs', 200);
+  Result.C36MixPercent := Ini.ReadFloat(ASection, APrefix + 'C36MixPercent', 100);
 end;
 
 type

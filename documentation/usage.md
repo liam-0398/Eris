@@ -429,7 +429,8 @@ vari-speed one's is not.
 **Right-click empty space in the bottom device panel** to open the "add
 effect" menu. Whatever is currently selected — a track, or the Master row —
 is what the effect gets added to. Categories: Filters, EQ, Modulation,
-Distortion, Reverb, Utility, Mastering, Experimental.
+Distortion, Reverb, Delay, Dynamics, Exciter, Utility, Mastering,
+Experimental.
 
 Each effect widget has an **X** button in its corner to remove it. Master
 effects run after every track's own inserts, and before the SP-1200
@@ -553,6 +554,99 @@ emulation.
   Time R and Fdbk R only exist in Stereo on the real unit, so they grey out
   in the other two types. Defaults: Ping-Pong at 375 ms, 45% feedback, 30%
   wet — at 165–175 bpm that's roughly a dotted 1/16.
+
+### Dynamics
+
+- **Compressor - 3630** — an emulation of the Alesis 3630 (1989), the cheap
+  dual compressor/limiter/gate that ended up on more jungle records than
+  every expensive compressor put together. Ranges are the original panel's.
+  - **Response**: **Peak** or **RMS**. This is the switch that matters.
+    Peak watches instantaneous peaks and obeys the Attack and Release
+    sliders. **In RMS mode the Attack and Release sliders do nothing at all**
+    and grey out — that is not a shortcut, it is what the manual says the
+    real unit does ("in RMS mode, the attack and release times will be
+    program dependent; the front panel attack and release controls will have
+    no effect"). RMS runs its own cascaded fast/slow detector whose release
+    stretches the harder the box has been working: 10 dB of sustained gain
+    reduction makes it let go about 2.5× slower than at rest. That breathing
+    is the atmospheric master-bus sound — pads swelling back up between
+    snares.
+  - **Knee**: **Hard** clamps at the threshold the moment it's crossed;
+    **Soft** spreads the same curve over 18 dB centred on it, so the box
+    starts working well before the threshold and never puts a kink in the
+    transfer curve.
+  - **Thresh** — −40…+20 dBu, the panel's own scale. The top of it is full
+    scale (0 dBFS is pinned to +20 dBu), so −40 dBu is −60 dBFS.
+  - **Ratio** — 1:1 up to 30:1, and the very top of the slider is the
+    panel's **INF:1** detent, a true limiter.
+  - **Attack** (0.1–200 ms) and **Rlse** (50 ms–3 s), both logarithmic, both
+    Peak mode only. Smoothing happens on the gain reduction in dB, not on
+    the audio, which is why heavy gain reduction audibly releases slower
+    than light gain reduction — the 3630 pump.
+  - **Output** — −20…+20 dB makeup. There is no automatic makeup, same as
+    the original.
+  - **Gate** / **Rate** — the built-in noise gate, last in the chain (which
+    is why setting Ratio to 1:1 turns the whole effect into a standalone
+    gate, exactly as the manual suggests). **Gate** is fully
+    counter-clockwise = **OFF**, then −80 dBFS up to −27.8 dBFS (the panel's
+    −10 dBV ceiling). **Rate** (20 ms–2 s) is the *close* time only; the
+    gate opens instantly and closes 3 dB below where it opened so material
+    sitting on the threshold can't chatter.
+  - **Mix** — 0–100% wet. Under 100% this is parallel compression, which the
+    real box could not do (it has a hard Bypass switch, not a blend).
+
+  Defaults are the break setting: Peak, hard knee, −8 dBu, 8:1, 1 ms attack,
+  120 ms release, +4 dB out, gate off, fully wet. Fast attack and a high
+  ratio flattens the ghost notes up into the snare and turns an Amen into a
+  solid block.
+
+  Not implemented, because this side of the music never used it: the side
+  chain insert jack (a rear-panel patch point with nowhere to go in a chain
+  slot — **Sidechain** under Utility already covers keying off another
+  track), dual-mono operation and the Stereo Link switch (link is always on,
+  and per the manual the detector takes the larger of the two channels so
+  either one alone triggers the box), the +4 dBu/−10 dBV and Input-Output
+  meter switches, and the LED meters. The unit's famous hiss isn't modelled
+  either — a noise floor you can't switch off isn't a feature.
+
+### Exciter
+
+- **Exciter - 422A** — an emulation of the BBE Sonic Maximizer 422A, the
+  cheap half-rack one that sat in front of half the DAT machines in the
+  country. It is not a treble EQ; the BBE process is two things at once and
+  the first one is the part people forget:
+  - **Three-band time alignment**, always on and not adjustable, because it
+    is the process. The signal splits at 150 Hz and 1.2 kHz and the two
+    lower bands are pushed *backwards in time* relative to the top — the low
+    band by 2.5 ms, the mid by 0.5 ms. Recombining three bands that no
+    longer share a timebase is not a flat operation, and the not-flatness is
+    the sound: the top of a break arrives first and the sub of the same hit
+    lands a fifth of a 1/32 later, so hats and rides crack over a wash that
+    is physically behind them. This is the jungle mastering-chain cheat
+    code.
+  - **LoCntr** — Lo Contour, −12…+10 dB at 50 Hz, a tight bump *inside* the
+    delayed low band (the manual's "phase compensated bass equalization").
+    Puts back the weight the band split thins out.
+  - **Defin** — Definition, 0–100. The high band runs through a VCA driven
+    by RMS detectors comparing the high and mid bands against a target
+    balance, so this is a **program-dependent dynamic EQ, not a shelf**: a
+    dull source gets boosted hard, an already-bright one gets boosted little
+    or cut. Authority is ±10 dB. At 0 it is genuinely flat — both the target
+    and the correction strength scale with the knob.
+  - **Mix** — 0–100% wet. **Leave this at 100%.** The wet path's low end is
+    2.5 ms late, so anything under 100% is summing a delayed low end against
+    an undelayed one and will comb below ~200 Hz. That is exactly what
+    parallelling a real 422A against a dry feed does, so it isn't
+    compensated for — but the box was used fully in-line.
+
+  Defaults: Lo Contour +4 dB, Definition 65, 100% wet.
+
+  Not implemented: per-channel independent Lo Contour and Definition (the
+  real 422A is two separate mono channels; the controls are linked here and
+  so is the detector, so the process can't shift the stereo image), the
+  status/clip LEDs, the In-Out switch (a chain slot and Mix cover it), the
+  +16 dBu input clip point that nothing in a float insert will reach, and
+  the rear-panel remote jack and level matching.
 
 ### Utility
 

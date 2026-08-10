@@ -6,7 +6,7 @@ interface
 
 uses
   Classes, SysUtils, Controls, StdCtrls, ComCtrls, ExtCtrls, Graphics, Effects,
-  Quadraverb, Project, UIScale;
+  Quadraverb, BBE422A, Alesis3630, Project, UIScale;
 
 type
   PEffect = ^Effects.TEffect;
@@ -103,6 +103,15 @@ type
     FQVDTimeRCaption: TLabel;
     FQVDFeedbackLSlider, FQVDFeedbackRSlider, FQVDMixSlider: TTrackBar;
     FQVDFeedbackLValueLabel, FQVDFeedbackRValueLabel, FQVDMixValueLabel: TLabel;
+    FBBELoContourSlider, FBBEDefinitionSlider, FBBEMixSlider: TTrackBar;
+    FBBELoContourValueLabel, FBBEDefinitionValueLabel, FBBEMixValueLabel: TLabel;
+    FC36ResponseCombo, FC36KneeCombo: TComboBox;
+    FC36ThresholdSlider, FC36RatioSlider, FC36AttackSlider, FC36ReleaseSlider,
+      FC36OutputSlider, FC36GateThresholdSlider, FC36GateRateSlider,
+      FC36MixSlider: TTrackBar;
+    FC36ThresholdValueLabel, FC36RatioValueLabel, FC36AttackValueLabel,
+      FC36ReleaseValueLabel, FC36OutputValueLabel, FC36GateThresholdValueLabel,
+      FC36GateRateValueLabel, FC36MixValueLabel: TLabel;
     function EffectPtr: PEffect;
     procedure DeleteClick(Sender: TObject);
     procedure LPSliderChange(Sender: TObject);
@@ -157,7 +166,25 @@ type
     procedure QVDFeedbackRSliderChange(Sender: TObject);
     procedure QVDMixSliderChange(Sender: TObject);
     procedure QVDUpdateTypeDependentControls;
-    function QVAddColumn(ALeft: Integer; const ACaption: string;
+    procedure BBELoContourSliderChange(Sender: TObject);
+    procedure BBEDefinitionSliderChange(Sender: TObject);
+    procedure BBEMixSliderChange(Sender: TObject);
+    procedure C36ResponseChange(Sender: TObject);
+    procedure C36KneeChange(Sender: TObject);
+    procedure C36ThresholdSliderChange(Sender: TObject);
+    procedure C36RatioSliderChange(Sender: TObject);
+    procedure C36AttackSliderChange(Sender: TObject);
+    procedure C36ReleaseSliderChange(Sender: TObject);
+    procedure C36OutputSliderChange(Sender: TObject);
+    procedure C36GateThresholdSliderChange(Sender: TObject);
+    procedure C36GateRateSliderChange(Sender: TObject);
+    procedure C36MixSliderChange(Sender: TObject);
+    procedure C36UpdateResponseDependentLabels;
+    { the standard rack column: caption at the top, vertical slider down the
+      middle, value readout on the bottom edge. Every effect that lays out
+      as columns builds them through here, which is what keeps them all the
+      same height as each other. }
+    function AddSliderColumn(ALeft: Integer; const ACaption: string;
       AMin, AMax, APosition: Integer; AOnChange: TNotifyEvent;
       const AHint: string; out AValueLabel: TLabel): TTrackBar;
     procedure BuildLowpass;
@@ -175,6 +202,8 @@ type
     procedure BuildOverdrive;
     procedure BuildQuadraverbReverb;
     procedure BuildQuadraverbDelay;
+    procedure BuildExciter422A;
+    procedure BuildCompressor3630;
   public
     constructor CreateFor(AOwner: TComponent; AParent: TWinControl;
       ATarget, AEffectIndex: Integer; AOnRackChanged: TEffectRackChangedEvent);
@@ -319,6 +348,26 @@ const
   QVDColWidth = 54;
   QVDColGap = 6;
   QVDLeftMargin = 8;
+  { The width AddSliderColumn builds at. Every column layout in this unit
+    has always used 54; this is the one AddSliderColumn itself reads, so a
+    widget that wants standard columns doesn't have to restate it. }
+  SliderColWidth = 54;
+  { BBE 422A: three standard columns - the two the front panel has, plus
+    Mix. Both panel knobs are per-channel on the real box and linked here,
+    see BBE422A.pas. }
+  BBEColCount = 3;
+  BBEColWidth = 54;
+  BBEColGap = 6;
+  BBELeftMargin = 8;
+  { Alesis 3630: a wide first column stacking the two front-panel switches
+    (Peak/RMS and Hard/Soft knee) as dropdowns, then eight standard slider
+    columns for the six knobs, the gate's two, and Mix. Every range comes
+    from Alesis3630.pas rather than being restated here. }
+  C36SwitchColWidth = 96;
+  C36ColCount = 8;
+  C36ColWidth = 54;
+  C36ColGap = 6;
+  C36LeftMargin = 8;
 
 implementation
 
@@ -532,6 +581,8 @@ begin
     Effects.ekOverdrive: TitleLabel.Caption := 'Overdrive';
     Effects.ekQuadraverbReverb: TitleLabel.Caption := 'QuadraVerb Reverb';
     Effects.ekQuadraverbDelay: TitleLabel.Caption := 'QuadraVerb Delay';
+    Effects.ekExciter422A: TitleLabel.Caption := 'Exciter - 422A';
+    Effects.ekCompressor3630: TitleLabel.Caption := 'Compressor - 3630';
   end;
 
   DeleteButton := TButton.Create(AOwner);
@@ -644,6 +695,20 @@ begin
           QVDColCount * (QVDColWidth + QVDColGap) + QVDLeftMargin);
         DeleteButton.Left := Width - Px(28);
         BuildQuadraverbDelay;
+      end;
+    Effects.ekExciter422A:
+      begin
+        Width := Px(BBELeftMargin + BBEColCount * (BBEColWidth + BBEColGap) +
+          BBELeftMargin);
+        DeleteButton.Left := Width - Px(28);
+        BuildExciter422A;
+      end;
+    Effects.ekCompressor3630:
+      begin
+        Width := Px(C36LeftMargin + C36SwitchColWidth + C36ColGap +
+          C36ColCount * (C36ColWidth + C36ColGap) + C36LeftMargin);
+        DeleteButton.Left := Width - Px(28);
+        BuildCompressor3630;
       end;
   end;
 end;
@@ -1665,7 +1730,7 @@ end;
   slider filling the middle, live value readout at the bottom - the same
   EQ4-style column the rest of the rack uses, just built once here instead
   of copied eight times. }
-function TEffectWidget.QVAddColumn(ALeft: Integer; const ACaption: string;
+function TEffectWidget.AddSliderColumn(ALeft: Integer; const ACaption: string;
   AMin, AMax, APosition: Integer; AOnChange: TNotifyEvent;
   const AHint: string; out AValueLabel: TLabel): TTrackBar;
 var
@@ -1682,7 +1747,7 @@ begin
   Result.Orientation := trVertical;
   Result.Left := Px(ALeft);
   Result.Top := Px(48);
-  Result.Width := Px(QVRColWidth);
+  Result.Width := Px(SliderColWidth);
   Result.Height := Px(WidgetHeight - 48 - 24);
   Result.Reversed := True;
   Result.Min := AMin;
@@ -1756,35 +1821,35 @@ begin
   FQVRDecayCaption.Height := Px(WidgetHeight - 84 - 6);
 
   Col := QVRLeftMargin + QVRTypeColWidth + QVRColGap;
-  FQVRPredelaySlider := QVAddColumn(Col, 'Predly',
+  FQVRPredelaySlider := AddSliderColumn(Col, 'Predly',
     Quadraverb.QVPredelayMinMs, Quadraverb.QVPredelayMaxMs,
     Round(EffectPtr^.QVReverbPredelayMs), @QVRPredelaySliderChange,
     'Time before the first reflections (1-140ms)', FQVRPredelayValueLabel);
   FQVRPredelayValueLabel.Caption := Format('%dms', [Round(EffectPtr^.QVReverbPredelayMs)]);
 
   Inc(Col, ColStep);
-  FQVRPredelayMixSlider := QVAddColumn(Col, 'Pre/Pst',
+  FQVRPredelayMixSlider := AddSliderColumn(Col, 'Pre/Pst',
     Quadraverb.QVPredelayMixMin, Quadraverb.QVPredelayMixMax,
     Round(EffectPtr^.QVReverbPredelayMix), @QVRPredelayMixSliderChange,
     'How much un-predelayed signal also feeds the tank', FQVRPredelayMixValueLabel);
   FQVRPredelayMixValueLabel.Caption := QVPredelayMixText(Round(EffectPtr^.QVReverbPredelayMix));
 
   Inc(Col, ColStep);
-  FQVRDecaySlider := QVAddColumn(Col, 'Decay',
+  FQVRDecaySlider := AddSliderColumn(Col, 'Decay',
     Quadraverb.QVDecayMin, Quadraverb.QVDecayMax,
     Round(EffectPtr^.QVReverbDecay), @QVRDecaySliderChange,
     'Length of the tail (Reverse Time when type is Reverse)', FQVRDecayValueLabel);
   FQVRDecayValueLabel.Caption := Format('%d', [Round(EffectPtr^.QVReverbDecay)]);
 
   Inc(Col, ColStep);
-  FQVRDiffusionSlider := QVAddColumn(Col, 'Diff',
+  FQVRDiffusionSlider := AddSliderColumn(Col, 'Diff',
     Quadraverb.QVDiffusionMin, Quadraverb.QVDiffusionMax,
     Round(EffectPtr^.QVReverbDiffusion), @QVRDiffusionSliderChange,
     'Low = discrete echoes, high = smeared into a wash', FQVRDiffusionValueLabel);
   FQVRDiffusionValueLabel.Caption := Format('%d', [Round(EffectPtr^.QVReverbDiffusion)]);
 
   Inc(Col, ColStep);
-  FQVRDensitySlider := QVAddColumn(Col, 'Dens',
+  FQVRDensitySlider := AddSliderColumn(Col, 'Dens',
     Quadraverb.QVDensityMin, Quadraverb.QVDensityMax,
     Round(EffectPtr^.QVReverbDensity), @QVRDensitySliderChange,
     'Gap between the first reflection and the body (no effect on Hall)',
@@ -1792,7 +1857,7 @@ begin
   FQVRDensityValueLabel.Caption := Format('%d', [Round(EffectPtr^.QVReverbDensity)]);
 
   Inc(Col, ColStep);
-  FQVRLowDecaySlider := QVAddColumn(Col, 'LoDcy',
+  FQVRLowDecaySlider := AddSliderColumn(Col, 'LoDcy',
     Quadraverb.QVBandDecayMin, Quadraverb.QVBandDecayMax,
     Round(EffectPtr^.QVReverbLowDecay), @QVRLowDecaySliderChange,
     'Shortens the low end of the tail only (0 = full length)',
@@ -1800,7 +1865,7 @@ begin
   FQVRLowDecayValueLabel.Caption := Format('%d', [Round(EffectPtr^.QVReverbLowDecay)]);
 
   Inc(Col, ColStep);
-  FQVRHighDecaySlider := QVAddColumn(Col, 'HiDcy',
+  FQVRHighDecaySlider := AddSliderColumn(Col, 'HiDcy',
     Quadraverb.QVBandDecayMin, Quadraverb.QVBandDecayMax,
     Round(EffectPtr^.QVReverbHighDecay), @QVRHighDecaySliderChange,
     'Shortens the top of the tail only - pull it down for a dark wash',
@@ -1808,7 +1873,7 @@ begin
   FQVRHighDecayValueLabel.Caption := Format('%d', [Round(EffectPtr^.QVReverbHighDecay)]);
 
   Inc(Col, ColStep);
-  FQVRMixSlider := QVAddColumn(Col, 'Mix', 0, 100,
+  FQVRMixSlider := AddSliderColumn(Col, 'Mix', 0, 100,
     Round(EffectPtr^.QVReverbMixPercent), @QVRMixSliderChange, '',
     FQVRMixValueLabel);
   FQVRMixValueLabel.Caption := Format('%d%%', [Round(EffectPtr^.QVReverbMixPercent)]);
@@ -1877,19 +1942,19 @@ begin
   FQVDTimeREdit.OnEditingDone := @QVDTimeEditDone;
 
   Col := QVDLeftMargin + QVDTypeColWidth + QVDColGap;
-  FQVDFeedbackLSlider := QVAddColumn(Col, 'Fdbk L', 0,
+  FQVDFeedbackLSlider := AddSliderColumn(Col, 'Fdbk L', 0,
     Quadraverb.QVDelayFeedbackMax, Round(EffectPtr^.QVDelayFeedbackL),
     @QVDFeedbackLSliderChange, '', FQVDFeedbackLValueLabel);
   FQVDFeedbackLValueLabel.Caption := Format('%d%%', [Round(EffectPtr^.QVDelayFeedbackL)]);
 
   Inc(Col, ColStep);
-  FQVDFeedbackRSlider := QVAddColumn(Col, 'Fdbk R', 0,
+  FQVDFeedbackRSlider := AddSliderColumn(Col, 'Fdbk R', 0,
     Quadraverb.QVDelayFeedbackMax, Round(EffectPtr^.QVDelayFeedbackR),
     @QVDFeedbackRSliderChange, 'Stereo type only', FQVDFeedbackRValueLabel);
   FQVDFeedbackRValueLabel.Caption := Format('%d%%', [Round(EffectPtr^.QVDelayFeedbackR)]);
 
   Inc(Col, ColStep);
-  FQVDMixSlider := QVAddColumn(Col, 'Mix', 0, 100,
+  FQVDMixSlider := AddSliderColumn(Col, 'Mix', 0, 100,
     Round(EffectPtr^.QVDelayMixPercent), @QVDMixSliderChange, '',
     FQVDMixValueLabel);
   FQVDMixValueLabel.Caption := Format('%d%%', [Round(EffectPtr^.QVDelayMixPercent)]);
@@ -2316,6 +2381,315 @@ procedure TEffectWidget.QVDMixSliderChange(Sender: TObject);
 begin
   EffectPtr^.QVDelayMixPercent := FQVDMixSlider.Position;
   FQVDMixValueLabel.Caption := Format('%d%% wet', [FQVDMixSlider.Position]);
+end;
+
+{ "+4dB" / "0dB" / "-7dB" - the 422A's Lo Contour is calibrated in dB at
+  50Hz and is asymmetric (-12 to +10), so the sign has to show. }
+function BBELoContourText(AValue: Integer): string;
+begin
+  if AValue > 0 then
+    Result := Format('+%ddB', [AValue])
+  else
+    Result := Format('%ddB', [AValue]);
+end;
+
+procedure TEffectWidget.BuildExciter422A;
+var
+  Col, ColStep: Integer;
+begin
+  ColStep := BBEColWidth + BBEColGap;
+  Col := BBELeftMargin;
+
+  FBBELoContourSlider := AddSliderColumn(Col, 'LoCntr',
+    BBE422A.BBELoContourMinDb, BBE422A.BBELoContourMaxDb,
+    Round(EffectPtr^.BBELoContourDb), @BBELoContourSliderChange,
+    'Phase-compensated bump at 50Hz, inside the delayed low band',
+    FBBELoContourValueLabel);
+  FBBELoContourValueLabel.Caption :=
+    BBELoContourText(Round(EffectPtr^.BBELoContourDb));
+
+  Inc(Col, ColStep);
+  FBBEDefinitionSlider := AddSliderColumn(Col, 'Defin',
+    BBE422A.BBEDefinitionMin, BBE422A.BBEDefinitionMax,
+    Round(EffectPtr^.BBEDefinition), @BBEDefinitionSliderChange,
+    'How hard the VCA drags the high band towards the balance the box wants',
+    FBBEDefinitionValueLabel);
+  FBBEDefinitionValueLabel.Caption := Format('%d', [Round(EffectPtr^.BBEDefinition)]);
+
+  Inc(Col, ColStep);
+  FBBEMixSlider := AddSliderColumn(Col, 'Mix', 0, 100,
+    Round(EffectPtr^.BBEMixPercent), @BBEMixSliderChange,
+    'Under 100% combs the low end - the wet path is 2.5ms late down there',
+    FBBEMixValueLabel);
+  FBBEMixValueLabel.Caption := Format('%d%% wet', [Round(EffectPtr^.BBEMixPercent)]);
+end;
+
+procedure TEffectWidget.BBELoContourSliderChange(Sender: TObject);
+begin
+  EffectPtr^.BBELoContourDb := FBBELoContourSlider.Position;
+  FBBELoContourValueLabel.Caption := BBELoContourText(FBBELoContourSlider.Position);
+end;
+
+procedure TEffectWidget.BBEDefinitionSliderChange(Sender: TObject);
+begin
+  EffectPtr^.BBEDefinition := FBBEDefinitionSlider.Position;
+  FBBEDefinitionValueLabel.Caption := Format('%d', [FBBEDefinitionSlider.Position]);
+end;
+
+procedure TEffectWidget.BBEMixSliderChange(Sender: TObject);
+begin
+  EffectPtr^.BBEMixPercent := FBBEMixSlider.Position;
+  FBBEMixValueLabel.Caption := Format('%d%% wet', [FBBEMixSlider.Position]);
+end;
+
+{ "8.0:1" / "20:1" / "INF:1", matching how the original's ratio scale reads
+  (1:1 through to an infinity detent at the top of the travel). }
+function C36RatioText(ARatio: Single): string;
+begin
+  if ARatio >= Alesis3630.A36RatioInfThreshold then
+    Result := 'INF:1'
+  else if ARatio < 10 then
+    Result := Format('%.1f:1', [ARatio])
+  else
+    Result := Format('%.0f:1', [ARatio]);
+end;
+
+{ The 3630's time controls span 0.1ms to 3 seconds between them, so the unit
+  has to change with the value or the readout is unreadable at one end. }
+function C36TimeText(AMs: Single): string;
+begin
+  if AMs < 10 then
+    Result := Format('%.1fms', [AMs])
+  else if AMs < 1000 then
+    Result := Format('%.0fms', [AMs])
+  else
+    Result := Format('%.2fs', [AMs / 1000]);
+end;
+
+function C36GateText(ADbfs: Single): string;
+begin
+  if ADbfs <= Alesis3630.A36GateOffDbfs then
+    Result := 'OFF'
+  else
+    Result := Format('%.0fdB', [ADbfs]);
+end;
+
+procedure TEffectWidget.BuildCompressor3630;
+var
+  Lbl: TLabel;
+  i, Col, ColStep: Integer;
+begin
+  ColStep := C36ColWidth + C36ColGap;
+
+  Lbl := TLabel.Create(Owner);
+  Lbl.Parent := Self;
+  Lbl.Left := Px(C36LeftMargin);
+  Lbl.Top := Px(30);
+  Lbl.Caption := 'Response';
+
+  FC36ResponseCombo := TComboBox.Create(Owner);
+  FC36ResponseCombo.Parent := Self;
+  FC36ResponseCombo.Style := csDropDownList;
+  FC36ResponseCombo.Left := Px(C36LeftMargin);
+  FC36ResponseCombo.Top := Px(48);
+  FC36ResponseCombo.Width := Px(C36SwitchColWidth);
+  for i := 0 to Alesis3630.A36ResponseCount - 1 do
+    FC36ResponseCombo.Items.Add(Alesis3630.A36ResponseNames[i]);
+  if (EffectPtr^.C36Response >= 0) and
+    (EffectPtr^.C36Response < Alesis3630.A36ResponseCount) then
+    FC36ResponseCombo.ItemIndex := EffectPtr^.C36Response
+  else
+    FC36ResponseCombo.ItemIndex := Alesis3630.A36ResponsePeak;
+  FC36ResponseCombo.ShowHint := True;
+  FC36ResponseCombo.Hint := 'RMS makes Attack and Release program dependent ' +
+    'and ignores both knobs, as on the original';
+  FC36ResponseCombo.OnChange := @C36ResponseChange;
+
+  Lbl := TLabel.Create(Owner);
+  Lbl.Parent := Self;
+  Lbl.Left := Px(C36LeftMargin);
+  Lbl.Top := Px(86);
+  Lbl.Caption := 'Knee';
+
+  FC36KneeCombo := TComboBox.Create(Owner);
+  FC36KneeCombo.Parent := Self;
+  FC36KneeCombo.Style := csDropDownList;
+  FC36KneeCombo.Left := Px(C36LeftMargin);
+  FC36KneeCombo.Top := Px(104);
+  FC36KneeCombo.Width := Px(C36SwitchColWidth);
+  for i := 0 to Alesis3630.A36KneeCount - 1 do
+    FC36KneeCombo.Items.Add(Alesis3630.A36KneeNames[i]);
+  if (EffectPtr^.C36Knee >= 0) and
+    (EffectPtr^.C36Knee < Alesis3630.A36KneeCount) then
+    FC36KneeCombo.ItemIndex := EffectPtr^.C36Knee
+  else
+    FC36KneeCombo.ItemIndex := Alesis3630.A36KneeHard;
+  FC36KneeCombo.ShowHint := True;
+  FC36KneeCombo.Hint := 'Hard clamps at the threshold, soft starts ' +
+    'well below it';
+  FC36KneeCombo.OnChange := @C36KneeChange;
+
+  Col := C36LeftMargin + C36SwitchColWidth + C36ColGap;
+  FC36ThresholdSlider := AddSliderColumn(Col, 'Thresh',
+    Alesis3630.A36ThresholdMinDbu, Alesis3630.A36ThresholdMaxDbu,
+    Round(EffectPtr^.C36ThresholdDbu), @C36ThresholdSliderChange,
+    'Panel scale, in dBu - the top of it is full scale', FC36ThresholdValueLabel);
+  FC36ThresholdValueLabel.Caption :=
+    Format('%ddBu', [Round(EffectPtr^.C36ThresholdDbu)]);
+
+  Inc(Col, ColStep);
+  FC36RatioSlider := AddSliderColumn(Col, 'Ratio', 0, Alesis3630.A36SliderMax,
+    Alesis3630.A36RatioToSlider(EffectPtr^.C36Ratio), @C36RatioSliderChange,
+    'Fully clockwise is the infinity detent - a hard limiter',
+    FC36RatioValueLabel);
+  FC36RatioValueLabel.Caption := C36RatioText(EffectPtr^.C36Ratio);
+
+  Inc(Col, ColStep);
+  FC36AttackSlider := AddSliderColumn(Col, 'Attack', 0, Alesis3630.A36SliderMax,
+    Alesis3630.A36LogMsToSlider(EffectPtr^.C36AttackMs,
+      Alesis3630.A36AttackMinMs, Alesis3630.A36AttackMaxMs),
+    @C36AttackSliderChange, 'Peak mode only (0.1-200ms)', FC36AttackValueLabel);
+
+  Inc(Col, ColStep);
+  FC36ReleaseSlider := AddSliderColumn(Col, 'Rlse', 0, Alesis3630.A36SliderMax,
+    Alesis3630.A36LogMsToSlider(EffectPtr^.C36ReleaseMs,
+      Alesis3630.A36ReleaseMinMs, Alesis3630.A36ReleaseMaxMs),
+    @C36ReleaseSliderChange, 'Peak mode only (50ms-3s)', FC36ReleaseValueLabel);
+
+  Inc(Col, ColStep);
+  FC36OutputSlider := AddSliderColumn(Col, 'Output',
+    Alesis3630.A36OutputMinDb, Alesis3630.A36OutputMaxDb,
+    Round(EffectPtr^.C36OutputDb), @C36OutputSliderChange,
+    'Makeup gain - the box has no automatic one', FC36OutputValueLabel);
+  FC36OutputValueLabel.Caption := Format('%ddB', [Round(EffectPtr^.C36OutputDb)]);
+
+  Inc(Col, ColStep);
+  FC36GateThresholdSlider := AddSliderColumn(Col, 'Gate', 0,
+    Alesis3630.A36SliderMax,
+    Alesis3630.A36GateDbfsToSlider(EffectPtr^.C36GateThresholdDbfs),
+    @C36GateThresholdSliderChange,
+    'Fully counter-clockwise is the panel''s "no gating"',
+    FC36GateThresholdValueLabel);
+  FC36GateThresholdValueLabel.Caption :=
+    C36GateText(EffectPtr^.C36GateThresholdDbfs);
+
+  Inc(Col, ColStep);
+  FC36GateRateSlider := AddSliderColumn(Col, 'Rate', 0, Alesis3630.A36SliderMax,
+    Alesis3630.A36LogMsToSlider(EffectPtr^.C36GateRateMs,
+      Alesis3630.A36GateRateMinMs, Alesis3630.A36GateRateMaxMs),
+    @C36GateRateSliderChange,
+    'How long the gate takes to fade closed (20ms-2s)', FC36GateRateValueLabel);
+  FC36GateRateValueLabel.Caption := C36TimeText(EffectPtr^.C36GateRateMs);
+
+  Inc(Col, ColStep);
+  FC36MixSlider := AddSliderColumn(Col, 'Mix', 0, 100,
+    Round(EffectPtr^.C36MixPercent), @C36MixSliderChange,
+    'Under 100% is parallel compression, which the original could not do',
+    FC36MixValueLabel);
+  FC36MixValueLabel.Caption := Format('%d%% wet', [Round(EffectPtr^.C36MixPercent)]);
+
+  C36UpdateResponseDependentLabels;
+end;
+
+{ RMS mode drives its own attack and release from the program material and
+  the front-panel knobs do nothing at all in it - the manual is explicit
+  about that - so grey them out rather than leaving two live-looking sliders
+  that don't reach the audio. }
+procedure TEffectWidget.C36UpdateResponseDependentLabels;
+var
+  IsRms: Boolean;
+begin
+  IsRms := EffectPtr^.C36Response = Alesis3630.A36ResponseRms;
+  FC36AttackSlider.Enabled := not IsRms;
+  FC36ReleaseSlider.Enabled := not IsRms;
+  if IsRms then
+  begin
+    FC36AttackValueLabel.Caption := 'prog';
+    FC36ReleaseValueLabel.Caption := 'prog';
+  end
+  else
+  begin
+    FC36AttackValueLabel.Caption := C36TimeText(EffectPtr^.C36AttackMs);
+    FC36ReleaseValueLabel.Caption := C36TimeText(EffectPtr^.C36ReleaseMs);
+  end;
+end;
+
+procedure TEffectWidget.C36ResponseChange(Sender: TObject);
+begin
+  EffectPtr^.C36Response := FC36ResponseCombo.ItemIndex;
+  C36UpdateResponseDependentLabels;
+end;
+
+procedure TEffectWidget.C36KneeChange(Sender: TObject);
+begin
+  EffectPtr^.C36Knee := FC36KneeCombo.ItemIndex;
+end;
+
+procedure TEffectWidget.C36ThresholdSliderChange(Sender: TObject);
+begin
+  EffectPtr^.C36ThresholdDbu := FC36ThresholdSlider.Position;
+  FC36ThresholdValueLabel.Caption :=
+    Format('%ddBu', [FC36ThresholdSlider.Position]);
+end;
+
+procedure TEffectWidget.C36RatioSliderChange(Sender: TObject);
+var
+  Ratio: Single;
+begin
+  Ratio := Alesis3630.A36SliderToRatio(FC36RatioSlider.Position);
+  EffectPtr^.C36Ratio := Ratio;
+  FC36RatioValueLabel.Caption := C36RatioText(Ratio);
+end;
+
+procedure TEffectWidget.C36AttackSliderChange(Sender: TObject);
+var
+  Ms: Single;
+begin
+  Ms := Alesis3630.A36SliderToLogMs(FC36AttackSlider.Position,
+    Alesis3630.A36AttackMinMs, Alesis3630.A36AttackMaxMs);
+  EffectPtr^.C36AttackMs := Ms;
+  FC36AttackValueLabel.Caption := C36TimeText(Ms);
+end;
+
+procedure TEffectWidget.C36ReleaseSliderChange(Sender: TObject);
+var
+  Ms: Single;
+begin
+  Ms := Alesis3630.A36SliderToLogMs(FC36ReleaseSlider.Position,
+    Alesis3630.A36ReleaseMinMs, Alesis3630.A36ReleaseMaxMs);
+  EffectPtr^.C36ReleaseMs := Ms;
+  FC36ReleaseValueLabel.Caption := C36TimeText(Ms);
+end;
+
+procedure TEffectWidget.C36OutputSliderChange(Sender: TObject);
+begin
+  EffectPtr^.C36OutputDb := FC36OutputSlider.Position;
+  FC36OutputValueLabel.Caption := Format('%ddB', [FC36OutputSlider.Position]);
+end;
+
+procedure TEffectWidget.C36GateThresholdSliderChange(Sender: TObject);
+var
+  Dbfs: Single;
+begin
+  Dbfs := Alesis3630.A36SliderToGateDbfs(FC36GateThresholdSlider.Position);
+  EffectPtr^.C36GateThresholdDbfs := Dbfs;
+  FC36GateThresholdValueLabel.Caption := C36GateText(Dbfs);
+end;
+
+procedure TEffectWidget.C36GateRateSliderChange(Sender: TObject);
+var
+  Ms: Single;
+begin
+  Ms := Alesis3630.A36SliderToLogMs(FC36GateRateSlider.Position,
+    Alesis3630.A36GateRateMinMs, Alesis3630.A36GateRateMaxMs);
+  EffectPtr^.C36GateRateMs := Ms;
+  FC36GateRateValueLabel.Caption := C36TimeText(Ms);
+end;
+
+procedure TEffectWidget.C36MixSliderChange(Sender: TObject);
+begin
+  EffectPtr^.C36MixPercent := FC36MixSlider.Position;
+  FC36MixValueLabel.Caption := Format('%d%% wet', [FC36MixSlider.Position]);
 end;
 
 end.

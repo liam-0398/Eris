@@ -116,6 +116,14 @@
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
+        <Filename Value="src/aengine/BBE422A.pas"/>
+        <IsPartOfProject Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="src/aengine/Alesis3630.pas"/>
+        <IsPartOfProject Value="True"/>
+      </Unit>
+      <Unit>
         <Filename Value="src/aengine/Effects.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit>

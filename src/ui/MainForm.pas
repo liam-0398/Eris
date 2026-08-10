@@ -189,6 +189,8 @@ type
     procedure AddDrowningEffectClick(Sender: TObject);
     procedure AddTunerEffectClick(Sender: TObject);
     procedure AddOverdriveEffectClick(Sender: TObject);
+    procedure AddExciter422AEffectClick(Sender: TObject);
+    procedure AddCompressor3630EffectClick(Sender: TObject);
     procedure AddQuadraverbReverbEffectClick(Sender: TObject);
     procedure AddQuadraverbDelayEffectClick(Sender: TObject);
     procedure BuildEffectsMenu;
@@ -2099,6 +2101,16 @@ begin
   AddEffectToCurrentTrack(Effects.ekQuadraverbDelay);
 end;
 
+procedure TForm1.AddExciter422AEffectClick(Sender: TObject);
+begin
+  AddEffectToCurrentTrack(Effects.ekExciter422A);
+end;
+
+procedure TForm1.AddCompressor3630EffectClick(Sender: TObject);
+begin
+  AddEffectToCurrentTrack(Effects.ekCompressor3630);
+end;
+
 procedure TForm1.BuildEffectsMenu;
 
   function AddCategory(const ACaption: string): TMenuItem;
@@ -2119,7 +2131,8 @@ procedure TForm1.BuildEffectsMenu;
 
 var
   FiltersItem, EQItem, ModulationItem, DistortionItem, ReverbItem, DelayItem,
-  UtilityItem, MasteringItem, ExperimentalItem: TMenuItem;
+  DynamicsItem, ExciterItem, UtilityItem, MasteringItem,
+  ExperimentalItem: TMenuItem;
 begin
   FEffectsMenu := TPopupMenu.Create(Self);
 
@@ -2145,6 +2158,12 @@ begin
 
   DelayItem := AddCategory('Delay');
   AddEffectItem(DelayItem, 'QuadraVerb Delay', @AddQuadraverbDelayEffectClick);
+
+  DynamicsItem := AddCategory('Dynamics');
+  AddEffectItem(DynamicsItem, 'Compressor - 3630', @AddCompressor3630EffectClick);
+
+  ExciterItem := AddCategory('Exciter');
+  AddEffectItem(ExciterItem, 'Exciter - 422A', @AddExciter422AEffectClick);
 
   UtilityItem := AddCategory('Utility');
   AddEffectItem(UtilityItem, 'Sidechain', @AddSidechainEffectClick);
