@@ -5,7 +5,7 @@ unit Effects;
 interface
 
 uses
-  Math, BiquadFilters, Quadraverb, BBE422A, Alesis3630;
+  Math, BiquadFilters, Quadraverb, BBE422A, Alesis3630, BossFZ2;
 
 const
   MaxEffectsPerTrack = 4;
@@ -29,6 +29,7 @@ const
   ekQuadraverbDelay = 15;
   ekExciter422A = 16;
   ekCompressor3630 = 17;
+  ekFuzzFZ2 = 18;
 
   { classic vintage-style chorus (think Ableton Live 1/2's Chorus, or a
     tracker's chorus command) - just a short modulated delay line per
@@ -241,6 +242,17 @@ type
     C36GateThresholdDbfs: Single;
     C36GateRateMs: Single;
     C36MixPercent: Single;
+    { Boss FZ-2 Hyper Fuzz. Same arrangement again - see BossFZ2.pas, which
+      owns all the DSP and every range constant. FZ2Mode is one of its
+      FZ2Mode* constants; the four knobs are the panel's own 0..10, stored
+      here on 0..100 so a slider has something to resolve. Mix is this
+      program's addition, not the pedal's. }
+    FZ2Mode: Integer;
+    FZ2Gain: Single;
+    FZ2Treble: Single;
+    FZ2Bass: Single;
+    FZ2Level: Single;
+    FZ2MixPercent: Single;
   end;
 
   TEffectChannelState = record
@@ -355,6 +367,7 @@ type
       shares any of the state above. }
     BBE: TBBE422State;
     C36: TA36State;
+    FZ2: TFZ2State;
   end;
 
 procedure EffectStateReset(var AState: TEffectState);
@@ -425,6 +438,7 @@ begin
   QVDelayReset(AState.QVDelay);
   BBE422Reset(AState.BBE);
   A36Reset(AState.C36);
+  FZ2Reset(AState.FZ2);
 end;
 
 procedure DefaultEffect(AKind: Integer; out AEffect: TEffect);
@@ -568,6 +582,34 @@ begin
         AEffect.C36GateThresholdDbfs := A36GateOffDbfs;
         AEffect.C36GateRateMs := 200;
         AEffect.C36MixPercent := 100;
+      end;
+    ekFuzzFZ2:
+      begin
+        { Dopethrone, not a neutral setting. Fuzz II because the mid-scoop
+          is the whole point of that record's guitar sound - Fuzz I next to
+          it sounds like a distortion pedal. Gain buried, because Electric
+          Wizard did not own a knob that pointed anywhere but clockwise;
+          Bass most of the way up to put the weight back under a scoop that
+          just removed a lot of it; Treble a little over noon, which is
+          enough for the fuzz's own fizz to cut without the octave section
+          turning into hiss.
+
+          Level under half looks low for this patch and isn't: with Gain
+          buried, the fuzz output is pinned near full scale before Level
+          ever sees it - that is what the diodes DO - and the +9dB bass
+          shelf on top of a hard-clipped square would take the peaks past
+          0dBFS at anything near noon. Level here is a DAW output trim, not
+          the catch-up gain it is on a pedalboard, and it is the knob to
+          push by ear once the rest of the chain is set. Where the input
+          came from makes no difference to this: the whole point of 66dB
+          into a diode clipper is that the output level stops depending on
+          the input level. }
+        AEffect.FZ2Mode := FZ2ModeFuzz2;
+        AEffect.FZ2Gain := 100;
+        AEffect.FZ2Treble := 62;
+        AEffect.FZ2Bass := 88;
+        AEffect.FZ2Level := 45;
+        AEffect.FZ2MixPercent := 100;
       end;
     { ekTuner has no parameters - FillChar above is the whole setup }
   end;
@@ -1462,6 +1504,10 @@ begin
         AEffect.C36Ratio, AEffect.C36AttackMs, AEffect.C36ReleaseMs,
         AEffect.C36OutputDb, AEffect.C36GateThresholdDbfs,
         AEffect.C36GateRateMs, AEffect.C36MixPercent);
+    ekFuzzFZ2:
+      FZ2Process(AState.FZ2, L, R, ASampleRate, AEffect.FZ2Mode,
+        AEffect.FZ2Gain, AEffect.FZ2Treble, AEffect.FZ2Bass,
+        AEffect.FZ2Level, AEffect.FZ2MixPercent);
   end;
 end;
 

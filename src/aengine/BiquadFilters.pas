@@ -17,6 +17,13 @@ procedure ComputeLowpassBiquad(AFc, AFs, AQ: Double; out ACoeffs: TBiquadCoeffs)
 procedure ComputeHighpassBiquad(AFc, AFs, AQ: Double; out ACoeffs: TBiquadCoeffs);
 procedure ComputeBandpassBiquad(AFc, AFs, AQ: Double; out ACoeffs: TBiquadCoeffs);
 procedure ComputePeakingBiquad(AFc, AFs, AQ, AGainDb: Double; out ACoeffs: TBiquadCoeffs);
+{ Shelving pair. ASlope is the RBJ cookbook's S: 1.0 is the steepest slope
+  that stays monotonic (no corner resonance), and lower values widen the
+  transition. Unlike the peaking filter above, the gain applies to
+  everything past the corner rather than to a band, which is what a tone
+  control's bass/treble knob actually does. }
+procedure ComputeLowShelfBiquad(AFc, AFs, ASlope, AGainDb: Double; out ACoeffs: TBiquadCoeffs);
+procedure ComputeHighShelfBiquad(AFc, AFs, ASlope, AGainDb: Double; out ACoeffs: TBiquadCoeffs);
 function ProcessBiquad(var AState: TBiquadState; const ACoeffs: TBiquadCoeffs;
   AInput: Single): Single;
 
@@ -85,6 +92,44 @@ begin
   ACoeffs.B2 := (1 - alpha * AAmp) / a0;
   ACoeffs.A1 := (-2 * cosw0) / a0;
   ACoeffs.A2 := (1 - alpha / AAmp) / a0;
+end;
+
+{ standard RBJ cookbook low shelf }
+procedure ComputeLowShelfBiquad(AFc, AFs, ASlope, AGainDb: Double; out ACoeffs: TBiquadCoeffs);
+var
+  w0, cosw0, alpha, AAmp, SqrtA, TwoSqrtAAlpha, a0: Double;
+begin
+  AAmp := Power(10, AGainDb / 40);
+  w0 := 2 * Pi * AFc / AFs;
+  cosw0 := Cos(w0);
+  alpha := Sin(w0) / 2 * Sqrt((AAmp + 1 / AAmp) * (1 / ASlope - 1) + 2);
+  SqrtA := Sqrt(AAmp);
+  TwoSqrtAAlpha := 2 * SqrtA * alpha;
+  a0 := (AAmp + 1) + (AAmp - 1) * cosw0 + TwoSqrtAAlpha;
+  ACoeffs.B0 := (AAmp * ((AAmp + 1) - (AAmp - 1) * cosw0 + TwoSqrtAAlpha)) / a0;
+  ACoeffs.B1 := (2 * AAmp * ((AAmp - 1) - (AAmp + 1) * cosw0)) / a0;
+  ACoeffs.B2 := (AAmp * ((AAmp + 1) - (AAmp - 1) * cosw0 - TwoSqrtAAlpha)) / a0;
+  ACoeffs.A1 := (-2 * ((AAmp - 1) + (AAmp + 1) * cosw0)) / a0;
+  ACoeffs.A2 := ((AAmp + 1) + (AAmp - 1) * cosw0 - TwoSqrtAAlpha) / a0;
+end;
+
+{ standard RBJ cookbook high shelf }
+procedure ComputeHighShelfBiquad(AFc, AFs, ASlope, AGainDb: Double; out ACoeffs: TBiquadCoeffs);
+var
+  w0, cosw0, alpha, AAmp, SqrtA, TwoSqrtAAlpha, a0: Double;
+begin
+  AAmp := Power(10, AGainDb / 40);
+  w0 := 2 * Pi * AFc / AFs;
+  cosw0 := Cos(w0);
+  alpha := Sin(w0) / 2 * Sqrt((AAmp + 1 / AAmp) * (1 / ASlope - 1) + 2);
+  SqrtA := Sqrt(AAmp);
+  TwoSqrtAAlpha := 2 * SqrtA * alpha;
+  a0 := (AAmp + 1) - (AAmp - 1) * cosw0 + TwoSqrtAAlpha;
+  ACoeffs.B0 := (AAmp * ((AAmp + 1) + (AAmp - 1) * cosw0 + TwoSqrtAAlpha)) / a0;
+  ACoeffs.B1 := (-2 * AAmp * ((AAmp - 1) + (AAmp + 1) * cosw0)) / a0;
+  ACoeffs.B2 := (AAmp * ((AAmp + 1) + (AAmp - 1) * cosw0 - TwoSqrtAAlpha)) / a0;
+  ACoeffs.A1 := (2 * ((AAmp - 1) - (AAmp + 1) * cosw0)) / a0;
+  ACoeffs.A2 := ((AAmp + 1) - (AAmp - 1) * cosw0 - TwoSqrtAAlpha) / a0;
 end;
 
 function ProcessBiquad(var AState: TBiquadState; const ACoeffs: TBiquadCoeffs;

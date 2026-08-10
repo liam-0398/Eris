@@ -6,7 +6,7 @@ interface
 
 uses
   Classes, SysUtils, Controls, StdCtrls, ComCtrls, ExtCtrls, Graphics, Effects,
-  Quadraverb, BBE422A, Alesis3630, Project, UIScale;
+  Quadraverb, BBE422A, Alesis3630, BossFZ2, Project, UIScale;
 
 type
   PEffect = ^Effects.TEffect;
@@ -112,6 +112,11 @@ type
     FC36ThresholdValueLabel, FC36RatioValueLabel, FC36AttackValueLabel,
       FC36ReleaseValueLabel, FC36OutputValueLabel, FC36GateThresholdValueLabel,
       FC36GateRateValueLabel, FC36MixValueLabel: TLabel;
+    FFZ2ModeCombo: TComboBox;
+    FFZ2GainSlider, FFZ2TrebleSlider, FFZ2BassSlider, FFZ2LevelSlider,
+      FFZ2MixSlider: TTrackBar;
+    FFZ2GainValueLabel, FFZ2TrebleValueLabel, FFZ2BassValueLabel,
+      FFZ2LevelValueLabel, FFZ2MixValueLabel: TLabel;
     function EffectPtr: PEffect;
     procedure DeleteClick(Sender: TObject);
     procedure LPSliderChange(Sender: TObject);
@@ -180,6 +185,13 @@ type
     procedure C36GateRateSliderChange(Sender: TObject);
     procedure C36MixSliderChange(Sender: TObject);
     procedure C36UpdateResponseDependentLabels;
+    procedure FZ2ModeChange(Sender: TObject);
+    procedure FZ2GainSliderChange(Sender: TObject);
+    procedure FZ2TrebleSliderChange(Sender: TObject);
+    procedure FZ2BassSliderChange(Sender: TObject);
+    procedure FZ2LevelSliderChange(Sender: TObject);
+    procedure FZ2MixSliderChange(Sender: TObject);
+    procedure FZ2UpdateModeDependentLabels;
     { the standard rack column: caption at the top, vertical slider down the
       middle, value readout on the bottom edge. Every effect that lays out
       as columns builds them through here, which is what keeps them all the
@@ -204,6 +216,7 @@ type
     procedure BuildQuadraverbDelay;
     procedure BuildExciter422A;
     procedure BuildCompressor3630;
+    procedure BuildFuzzFZ2;
   public
     constructor CreateFor(AOwner: TComponent; AParent: TWinControl;
       ATarget, AEffectIndex: Integer; AOnRackChanged: TEffectRackChangedEvent);
@@ -368,6 +381,15 @@ const
   C36ColWidth = 54;
   C36ColGap = 6;
   C36LeftMargin = 8;
+  { Boss FZ-2: a wide first column for the three-way mode switch, then the
+    four panel knobs plus Mix as standard slider columns. The knobs read
+    0.0-10.0 like the pedal's own markings even though they are stored
+    0..100 - see BossFZ2.pas. }
+  FZ2ModeColWidth = 96;
+  FZ2ColCount = 5;
+  FZ2ColWidth = 54;
+  FZ2ColGap = 6;
+  FZ2LeftMargin = 8;
 
 implementation
 
@@ -583,6 +605,7 @@ begin
     Effects.ekQuadraverbDelay: TitleLabel.Caption := 'QuadraVerb Delay';
     Effects.ekExciter422A: TitleLabel.Caption := 'Exciter - 422A';
     Effects.ekCompressor3630: TitleLabel.Caption := 'Compressor - 3630';
+    Effects.ekFuzzFZ2: TitleLabel.Caption := 'Fuzz - FZ-2';
   end;
 
   DeleteButton := TButton.Create(AOwner);
@@ -709,6 +732,13 @@ begin
           C36ColCount * (C36ColWidth + C36ColGap) + C36LeftMargin);
         DeleteButton.Left := Width - Px(28);
         BuildCompressor3630;
+      end;
+    Effects.ekFuzzFZ2:
+      begin
+        Width := Px(FZ2LeftMargin + FZ2ModeColWidth + FZ2ColGap +
+          FZ2ColCount * (FZ2ColWidth + FZ2ColGap) + FZ2LeftMargin);
+        DeleteButton.Left := Width - Px(28);
+        BuildFuzzFZ2;
       end;
   end;
 end;
@@ -2690,6 +2720,128 @@ procedure TEffectWidget.C36MixSliderChange(Sender: TObject);
 begin
   EffectPtr^.C36MixPercent := FC36MixSlider.Position;
   FC36MixValueLabel.Caption := Format('%d%% wet', [FC36MixSlider.Position]);
+end;
+
+{ The FZ-2's knobs are marked 0-10, not 0-100 and not in percent, so that is
+  what the readouts say. }
+function FZ2KnobText(AValue: Integer): string;
+begin
+  Result := Format('%.1f', [AValue / 10]);
+end;
+
+procedure TEffectWidget.BuildFuzzFZ2;
+var
+  Lbl: TLabel;
+  i, Col, ColStep: Integer;
+begin
+  ColStep := FZ2ColWidth + FZ2ColGap;
+
+  Lbl := TLabel.Create(Owner);
+  Lbl.Parent := Self;
+  Lbl.Left := Px(FZ2LeftMargin);
+  Lbl.Top := Px(30);
+  Lbl.Caption := 'Mode';
+
+  FFZ2ModeCombo := TComboBox.Create(Owner);
+  FFZ2ModeCombo.Parent := Self;
+  FFZ2ModeCombo.Style := csDropDownList;
+  FFZ2ModeCombo.Left := Px(FZ2LeftMargin);
+  FFZ2ModeCombo.Top := Px(48);
+  FFZ2ModeCombo.Width := Px(FZ2ModeColWidth);
+  for i := 0 to BossFZ2.FZ2ModeCount - 1 do
+    FFZ2ModeCombo.Items.Add(BossFZ2.FZ2ModeNames[i]);
+  if (EffectPtr^.FZ2Mode >= 0) and (EffectPtr^.FZ2Mode < BossFZ2.FZ2ModeCount) then
+    FFZ2ModeCombo.ItemIndex := EffectPtr^.FZ2Mode
+  else
+    FFZ2ModeCombo.ItemIndex := BossFZ2.FZ2ModeFuzz2;
+  FFZ2ModeCombo.ShowHint := True;
+  FFZ2ModeCombo.Hint := 'Fuzz II is Fuzz I through the 1kHz mid-scoop; ' +
+    'Boost takes the fuzz out of the path entirely';
+  FFZ2ModeCombo.OnChange := @FZ2ModeChange;
+
+  Col := FZ2LeftMargin + FZ2ModeColWidth + FZ2ColGap;
+  FFZ2GainSlider := AddSliderColumn(Col, 'Gain',
+    BossFZ2.FZ2KnobMin, BossFZ2.FZ2KnobMax, Round(EffectPtr^.FZ2Gain),
+    @FZ2GainSliderChange, 'How hard both stages are driven - in Boost mode ' +
+    'this is the boost amount instead', FFZ2GainValueLabel);
+
+  Inc(Col, ColStep);
+  FFZ2TrebleSlider := AddSliderColumn(Col, 'Treble',
+    BossFZ2.FZ2KnobMin, BossFZ2.FZ2KnobMax, Round(EffectPtr^.FZ2Treble),
+    @FZ2TrebleSliderChange, 'High shelf, flat at 5.0', FFZ2TrebleValueLabel);
+  FFZ2TrebleValueLabel.Caption := FZ2KnobText(Round(EffectPtr^.FZ2Treble));
+
+  Inc(Col, ColStep);
+  FFZ2BassSlider := AddSliderColumn(Col, 'Bass',
+    BossFZ2.FZ2KnobMin, BossFZ2.FZ2KnobMax, Round(EffectPtr^.FZ2Bass),
+    @FZ2BassSliderChange, 'Low shelf, flat at 5.0', FFZ2BassValueLabel);
+  FFZ2BassValueLabel.Caption := FZ2KnobText(Round(EffectPtr^.FZ2Bass));
+
+  Inc(Col, ColStep);
+  FFZ2LevelSlider := AddSliderColumn(Col, 'Level',
+    BossFZ2.FZ2KnobMin, BossFZ2.FZ2KnobMax, Round(EffectPtr^.FZ2Level),
+    @FZ2LevelSliderChange, 'Output volume - well above unity at the top, ' +
+    'like the pedal', FFZ2LevelValueLabel);
+  FFZ2LevelValueLabel.Caption := FZ2KnobText(Round(EffectPtr^.FZ2Level));
+
+  Inc(Col, ColStep);
+  FFZ2MixSlider := AddSliderColumn(Col, 'Mix', 0, 100,
+    Round(EffectPtr^.FZ2MixPercent), @FZ2MixSliderChange,
+    'The pedal has no blend - anything under 100% is this program''s idea',
+    FFZ2MixValueLabel);
+  FFZ2MixValueLabel.Caption := Format('%d%% wet', [Round(EffectPtr^.FZ2MixPercent)]);
+
+  FZ2UpdateModeDependentLabels;
+end;
+
+{ Boost mode reuses the Gain pot as a straight clean-boost control, so the
+  readout switches from the panel's 0-10 to the dB it is actually asking
+  for - the same reason the 3630's Attack/Release readouts change in RMS
+  mode. The knob still does something in both, so unlike those two it is
+  never disabled. }
+procedure TEffectWidget.FZ2UpdateModeDependentLabels;
+begin
+  if EffectPtr^.FZ2Mode = BossFZ2.FZ2ModeBoost then
+    FFZ2GainValueLabel.Caption := Format('+%ddB',
+      [Round(EffectPtr^.FZ2Gain / 100 * BossFZ2.FZ2BoostMaxDb)])
+  else
+    FFZ2GainValueLabel.Caption := FZ2KnobText(Round(EffectPtr^.FZ2Gain));
+end;
+
+procedure TEffectWidget.FZ2ModeChange(Sender: TObject);
+begin
+  EffectPtr^.FZ2Mode := FFZ2ModeCombo.ItemIndex;
+  FZ2UpdateModeDependentLabels;
+end;
+
+procedure TEffectWidget.FZ2GainSliderChange(Sender: TObject);
+begin
+  EffectPtr^.FZ2Gain := FFZ2GainSlider.Position;
+  FZ2UpdateModeDependentLabels;
+end;
+
+procedure TEffectWidget.FZ2TrebleSliderChange(Sender: TObject);
+begin
+  EffectPtr^.FZ2Treble := FFZ2TrebleSlider.Position;
+  FFZ2TrebleValueLabel.Caption := FZ2KnobText(FFZ2TrebleSlider.Position);
+end;
+
+procedure TEffectWidget.FZ2BassSliderChange(Sender: TObject);
+begin
+  EffectPtr^.FZ2Bass := FFZ2BassSlider.Position;
+  FFZ2BassValueLabel.Caption := FZ2KnobText(FFZ2BassSlider.Position);
+end;
+
+procedure TEffectWidget.FZ2LevelSliderChange(Sender: TObject);
+begin
+  EffectPtr^.FZ2Level := FFZ2LevelSlider.Position;
+  FFZ2LevelValueLabel.Caption := FZ2KnobText(FFZ2LevelSlider.Position);
+end;
+
+procedure TEffectWidget.FZ2MixSliderChange(Sender: TObject);
+begin
+  EffectPtr^.FZ2MixPercent := FFZ2MixSlider.Position;
+  FFZ2MixValueLabel.Caption := Format('%d%% wet', [FFZ2MixSlider.Position]);
 end;
 
 end.

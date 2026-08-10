@@ -92,7 +92,7 @@ implementation
 uses
   SysUtils, IniFiles, FileUtil, SampleTypes, Project, WavDecoder,
   AudioEngine, Resample, Waveform, SP1200, TarArchive, Effects, Quadraverb,
-  Alesis3630, ThreadUtil;
+  Alesis3630, BossFZ2, ThreadUtil;
 
 constructor TProjectLoadThread.Create(const APath: string; AOnTerminate: TNotifyEvent);
 begin
@@ -230,6 +230,12 @@ begin
   Ini.WriteFloat(ASection, APrefix + 'C36GateThresholdDbfs', AEffect.C36GateThresholdDbfs);
   Ini.WriteFloat(ASection, APrefix + 'C36GateRateMs', AEffect.C36GateRateMs);
   Ini.WriteFloat(ASection, APrefix + 'C36MixPercent', AEffect.C36MixPercent);
+  Ini.WriteInteger(ASection, APrefix + 'FZ2Mode', AEffect.FZ2Mode);
+  Ini.WriteFloat(ASection, APrefix + 'FZ2Gain', AEffect.FZ2Gain);
+  Ini.WriteFloat(ASection, APrefix + 'FZ2Treble', AEffect.FZ2Treble);
+  Ini.WriteFloat(ASection, APrefix + 'FZ2Bass', AEffect.FZ2Bass);
+  Ini.WriteFloat(ASection, APrefix + 'FZ2Level', AEffect.FZ2Level);
+  Ini.WriteFloat(ASection, APrefix + 'FZ2MixPercent', AEffect.FZ2MixPercent);
 end;
 
 function LoadEffect(Ini: TIniFile; const ASection, APrefix: string): Effects.TEffect;
@@ -309,6 +315,12 @@ begin
     Alesis3630.A36GateOffDbfs);
   Result.C36GateRateMs := Ini.ReadFloat(ASection, APrefix + 'C36GateRateMs', 200);
   Result.C36MixPercent := Ini.ReadFloat(ASection, APrefix + 'C36MixPercent', 100);
+  Result.FZ2Mode := Ini.ReadInteger(ASection, APrefix + 'FZ2Mode', BossFZ2.FZ2ModeFuzz2);
+  Result.FZ2Gain := Ini.ReadFloat(ASection, APrefix + 'FZ2Gain', 100);
+  Result.FZ2Treble := Ini.ReadFloat(ASection, APrefix + 'FZ2Treble', 62);
+  Result.FZ2Bass := Ini.ReadFloat(ASection, APrefix + 'FZ2Bass', 88);
+  Result.FZ2Level := Ini.ReadFloat(ASection, APrefix + 'FZ2Level', 45);
+  Result.FZ2MixPercent := Ini.ReadFloat(ASection, APrefix + 'FZ2MixPercent', 100);
 end;
 
 type

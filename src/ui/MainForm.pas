@@ -190,6 +190,7 @@ type
     procedure AddTunerEffectClick(Sender: TObject);
     procedure AddOverdriveEffectClick(Sender: TObject);
     procedure AddExciter422AEffectClick(Sender: TObject);
+    procedure AddFuzzFZ2EffectClick(Sender: TObject);
     procedure AddCompressor3630EffectClick(Sender: TObject);
     procedure AddQuadraverbReverbEffectClick(Sender: TObject);
     procedure AddQuadraverbDelayEffectClick(Sender: TObject);
@@ -2234,6 +2235,11 @@ begin
   AddEffectToCurrentTrack(Effects.ekCompressor3630);
 end;
 
+procedure TForm1.AddFuzzFZ2EffectClick(Sender: TObject);
+begin
+  AddEffectToCurrentTrack(Effects.ekFuzzFZ2);
+end;
+
 procedure TForm1.BuildEffectsMenu;
 
   function AddCategory(const ACaption: string): TMenuItem;
@@ -2254,7 +2260,7 @@ procedure TForm1.BuildEffectsMenu;
 
 var
   FiltersItem, EQItem, ModulationItem, DistortionItem, ReverbItem, DelayItem,
-  DynamicsItem, ExciterItem, UtilityItem, MasteringItem,
+  DynamicsItem, ExciterItem, PedalsItem, UtilityItem, MasteringItem,
   ExperimentalItem: TMenuItem;
 begin
   FEffectsMenu := TPopupMenu.Create(Self);
@@ -2287,6 +2293,12 @@ begin
 
   ExciterItem := AddCategory('Exciter');
   AddEffectItem(ExciterItem, 'Exciter - 422A', @AddExciter422AEffectClick);
+
+  { emulations of actual stompboxes, kept apart from the generic Distortion/
+    Modulation categories above - what you reach for here is a specific
+    pedal, not a class of effect }
+  PedalsItem := AddCategory('Pedals');
+  AddEffectItem(PedalsItem, 'Fuzz - FZ-2', @AddFuzzFZ2EffectClick);
 
   UtilityItem := AddCategory('Utility');
   AddEffectItem(UtilityItem, 'Sidechain', @AddSidechainEffectClick);
