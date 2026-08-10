@@ -668,6 +668,17 @@ begin
 
     SampleCount := Ini.ReadInteger('Samples', 'Count', 0);
 
+    { The outgoing project's audio is raw GetMem'd blocks hanging off
+      TSample.Data - SetLength below drops the TSample records but cannot know
+      to free what they point at, so without this every Open leaked the whole
+      previous project's sample memory for the rest of the session. Safe to do
+      here: the caller (FileOpenClick) has already stopped the transport and
+      spun until AudioEngineIsBusy went false, which is exactly the protocol
+      NewProject uses before its own identical free loop. }
+    for i := 0 to High(Project.SamplePool) do
+      if Project.SamplePool[i].Data <> nil then
+        FreeMem(Project.SamplePool[i].Data);
+
     { pre-size every output array once, up front, so the worker threads can
       write to their own disjoint indices with no locking and no risk of a
       concurrent SetLength reallocating out from under another thread }

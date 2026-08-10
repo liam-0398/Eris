@@ -884,6 +884,22 @@ begin
   FArrangementView.SetCursorFrame(0);
   for t := 0 to Project.TrackCount - 1 do
     FArrangementView.RefreshTrack(t);
+
+  { Clear every engine track slot above the new project's track count.
+    Nothing else does, and FillBlock iterates all MaxTracks slots gated only
+    on Project.TrackEnabled[t] - which LoadProject also only writes for
+    t < TrackCount, so a slot left over from a bigger project stays enabled
+    AND still holds that project's TPlaybackClip array. Those clips' raw
+    Transients/Data pointers reference sample arrays the load has already
+    replaced: SampleTransients is an array OF DYNAMIC ARRAYS, so SetLength
+    genuinely frees the old inner arrays rather than leaking them, and the
+    stale slot is then binary-searching freed memory with a garbage count on
+    the next Play. That is the open-several-projects-and-the-playhead-locks
+    bug - it needs nothing more than one project having fewer tracks than the
+    one opened before it. }
+  for t := Project.TrackCount to Project.MaxTracks - 1 do
+    AudioEngineSetTrackClips(t, nil, 0);
+
   FTempoEdit.Text := IntToStr(Round(Project.TempoBPM));
   FPlayPauseButton.Caption := 'Play';
   UpdateDevicePanel;

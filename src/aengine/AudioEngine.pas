@@ -139,8 +139,15 @@ uses
 const
   DefaultBlockFrames = 512;
   OutputChannels = 2;
-  RingBufferCapacity = 32;
-  PendingFreeCapacity = 64;
+  { has to comfortably exceed the largest synchronous burst a single UI action
+    can produce - RefreshAllTracksUI pushes ckStop + ckSeek plus one
+    ckSetTrackClips for EVERY track slot (live tracks and the stale ones being
+    cleared), so MaxTracks * 2 + slack }
+  RingBufferCapacity = 128;
+  { how long PushCommand will wait for the audio thread to free a ring slot
+    before giving up - see PushCommand }
+  CommandPushTimeoutMs = 250;
+  PendingFreeCapacity = 128;
   MaxTracks = Project.MaxTracks;
   NoteFadeSamples = 128; { short crossfade on hard-retrigger, avoids a click }
   MaxRecordSeconds = 180;
@@ -283,14 +290,44 @@ var
     pass over tracks just to avoid it. }
   TrackTapLevel: array[0..MaxTracks - 1] of Single;
 
+{ Main-thread-only producer for the command ring. NEVER call this from either
+  realtime thread - it can wait.
+
+  Waiting is the point. This used to return False the moment the ring was
+  full and every caller ignored that, which silently dropped commands during
+  any burst. RefreshAllTracksUI is exactly such a burst: ckStop + ckSeek plus
+  one ckSetTrackClips PER TRACK, all pushed synchronously in a tight loop, so
+  up to MaxTracks + 2 commands land at once while the audio thread - stopped,
+  and therefore sitting in TPlaybackThread.Execute's Sleep(10) branch - is
+  only draining at about 100 Hz. A dropped ckSetTrackClips leaves
+  TrackClips[t] still pointing at the PREVIOUS project's array, whose Data
+  pointers reference a SamplePool that loading has already freed; a dropped
+  ckSeek/ckStop/ckPlay wedges the transport outright. That is the
+  open-several-projects-then-the-playhead-locks-and-nothing-plays failure.
+
+  The consumer drains unconditionally at the top of every Execute iteration,
+  so space always frees up within a block period unless the audio thread is
+  dead. Bounded so a dead audio thread degrades to the old drop-it behavior
+  rather than hanging the UI forever. }
 function PushCommand(const ACmd: TCommand): Boolean;
 var
-  NextHead: Integer;
+  NextHead, Waited: Integer;
 begin
+  Waited := 0;
   NextHead := (RingHead + 1) mod RingBufferCapacity;
-  if NextHead = RingTail then
-    Exit(False);
+  while NextHead = RingTail do
+  begin
+    if Waited >= CommandPushTimeoutMs then
+      Exit(False);
+    Sleep(1);
+    Inc(Waited);
+  end;
+
   RingBuffer[RingHead] := ACmd;
+  { the slot's contents must be visible to the consumer before the head that
+    publishes it - without this the compiler or CPU is free to reorder them
+    and the audio thread can read a half-written command }
+  WriteBarrier;
   RingHead := NextHead;
   Result := True;
 end;
@@ -299,6 +336,9 @@ function PopCommand(out ACmd: TCommand): Boolean;
 begin
   if RingTail = RingHead then
     Exit(False);
+  { pairs with PushCommand's WriteBarrier - don't let the slot read hoist
+    above the head check that says it's populated }
+  ReadBarrier;
   ACmd := RingBuffer[RingTail];
   RingTail := (RingTail + 1) mod RingBufferCapacity;
   Result := True;
