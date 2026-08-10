@@ -13,7 +13,7 @@ DISCLAIMER: HEAVY LLM usage. I know decent Pascal but do not know about audio en
 
 ## Features
 
-- **Arrangement view**: multi-track linear timeline (up to 16 tracks),
+- **Arrangement view**: multi-track linear timeline (up to 32 tracks),
   Ableton-style track headers with per-track mute and volume, zoomable/
   scrollable, adjustable grid snap resolution (1/16 note to 1 bar).
 - **Non-destructive clip editing**: split, move, resize/trim, drag-and-drop,
@@ -27,17 +27,29 @@ DISCLAIMER: HEAVY LLM usage. I know decent Pascal but do not know about audio en
     length, like a sampler or tracker.
   - A visual warp marker editor per clip (add/move/delete markers, local
     stretch or shift-everything-after).
-- **Keyboard-play instruments**: drag a WAV onto a track's device slot,
-  QWERTY tracker-style key-to-note mapping, monophonic one-shot playback with
-  hard retrigger, per-track octave shift and sample trim, resample-based
-  vari-speed pitch shift (linear interpolation, deliberately lo-fi/OctaMED
-  character, not a clean stretch algorithm).
+- **Keyboard-play instruments**: drag a WAV (or an existing timeline clip)
+  onto a track's device slot, QWERTY tracker-style key-to-note mapping,
+  monophonic one-shot playback with hard retrigger, per-track octave shift
+  and sample trim, resample-based vari-speed pitch shift (linear
+  interpolation, deliberately lo-fi/OctaMED character, not a clean stretch
+  algorithm).
+- **Sampler Track**: a dedicated, sample-only track type — a one-octave bank
+  of 12 keyboard-played samples (one per lower-row QWERTY key) instead of a
+  single shared instrument. Drag a timeline clip onto a key to assign it,
+  preserving whatever trim the clip already had; right-click a filled key to
+  clone it into the next empty key, so one long sample (a breakbeat) can be
+  spread across the keyboard and re-sliced per key. Unlike instrument mode,
+  the octave shift transposes the whole bank by whole octaves rather than
+  pitching each key individually. Created via Track > Add Sampler Track
+  (`Ctrl+Alt+N`).
 - **Recording**: 4-beat count-in, records straight to a new clip on the
   source track.
 - **Tempo-aware metronome**, independent of count-in, toggled on/off live.
-- **Effects**: per-track and master-bus insert chains (Lowpass filter, 4-band
-  EQ, Limiter, Chorus, Basic Reverb — see `documentation/usage.md` for every
-  parameter), plus a dedicated **Master** track/bus row for global effects.
+- **Effects**: per-track and master-bus insert chains — Lowpass filter,
+  4-band EQ, Limiter, Chorus, Flanger, Phaser, Sidechain (ducking keyed off
+  another track's level), Basic Reverb, and an experimental Drowning
+  (vocal-wash) effect (see `documentation/usage.md` for every parameter),
+  plus a dedicated **Master** track/bus row for global effects.
 - **SP-1200 emulation**: a separate, always-available master-bus lo-fi
   decimation mode (sample-and-hold to ~26kHz/12-bit, no anti-aliasing), baked
   identically into live playback and rendered/exported audio so they can

@@ -41,11 +41,46 @@ Lower octave:  Z  S  X  D  C  V  G  B  H  N  J  M
 The track's own octave offset (`+`/`-` buttons on the instrument widget)
 shifts the whole mapping up/down by full octaves.
 
+### Sampler Track
+
+A Sampler Track (Track menu > Add Sampler Track, or `Ctrl+Alt+N`) is a
+dedicated, sample-only track type: instead of one shared instrument, its
+device panel shows 12 boxes — one per lower-row QWERTY key
+(`Z S X D C V G B H N J M`) — each holding its own independent sample.
+
+- **Assign a key** by dragging a clip from the timeline onto one of the 12
+  boxes. Whatever trim the clip already had carries over as that key's
+  start/end markers, instead of defaulting to the whole underlying sample.
+  Dropping onto an already-filled key **replaces it outright** — no
+  stacking.
+- **Click a box** to select it and show its waveform plus start/end markers
+  below, with the same `+`/`-` zoom buttons and bar/beat grid as the
+  instrument and warp waveform editors. The grid always starts counting
+  from the very beginning of the sample (bar 1, beat 0) — a sampler key has
+  no position on the timeline of its own.
+- **Right-click a filled box** to clone its sample and start/end markers
+  into the next empty box (searching forward, wrapping around) and select
+  it — the fast way to spread one long sample (a breakbeat) across several
+  keys, then drag each key's own markers onto a different slice.
+- **Empty key = silent.**
+- **Octave shift** uses the same `+`/`-` buttons as instrument mode, but
+  behaves differently: instead of pitching one shared sample per key, a
+  Sampler Track's 12 keys each keep their own assigned sample, and the
+  octave shift transposes the *whole bank* together in whole-octave steps
+  only. The lower QWERTY row plays at the track's current octave setting;
+  the upper row plays the same 12 keys one (or more) octave(s) up — so, for
+  example, with the octave set to -1, the upper row plays every key at its
+  original, unpitched recording speed.
+- A Sampler Track's device panel slot is always the per-key waveform editor
+  — the clip/warp editor never shows for it, even if a clip happens to be
+  selected on its timeline lane.
+
 ## Files
 
 | Shortcut | Action |
 |---|---|
 | `Ctrl+N` | Add a new track (**not** "New Project" — there's no shortcut for that) |
+| `Ctrl+Alt+N` | Add a new Sampler Track — see [Sampler Track](#sampler-track) below |
 | `Ctrl+O` | Open a project |
 | `Ctrl+S` | Save |
 | `Ctrl+Shift+S` | Save As |
@@ -106,6 +141,13 @@ Drag a `.wav` file from the browser and drop it either:
 
 Double-clicking a file in the browser does the instrument-load version
 directly, using whichever track is currently selected.
+
+You can also drag a clip that's already on the timeline off the **bottom
+edge of the arrangement view**, onto the device panel below (or just
+double-click the clip) to load it as the instrument the same way. This
+seeds the instrument's start **and** end markers from wherever that clip
+was already trimmed to on the timeline, instead of always resetting to the
+whole underlying sample.
 
 ## Track headers & the Master row
 
