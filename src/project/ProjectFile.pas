@@ -638,20 +638,34 @@ type
   end;
   TSampleLoadJobArray = array of TSampleLoadJob;
 
-  { Each thread owns a disjoint slice of sample-pool indices, pre-sized by
-    the caller before any thread starts - writes to Project.SamplePool[i]
-    etc. from different threads never touch the same array element, so no
-    locking is needed despite the arrays being shared globals. }
+  { Every thread sees the WHOLE job list and claims work from it one index at
+    a time through a shared atomic cursor, rather than being handed a fixed
+    slice up front. Each index is still claimed by exactly one thread, so the
+    no-locking argument for writing Project.SamplePool[i] etc. is unchanged -
+    what changes is WHICH thread gets which job, and that it is decided when
+    the thread is free rather than before any file has been opened.
+
+    Static slicing is what this replaced, and it splits by job COUNT while the
+    cost is dominated by job SIZE. A real project's samples span three orders
+    of magnitude (a 4KB one-shot next to a 2MB recorded take), so the fixed
+    slices are wildly unequal in work: one thread draws the four big takes,
+    finishes long after the rest, and since LoadSamplesThreaded cannot return
+    until every WaitFor returns, that one straggler IS the load time while ten
+    cores sit idle. Pulling from a cursor self-balances - a thread that drew a
+    big file simply claims fewer of them. }
   TSampleLoadThread = class(TThread)
   private
+    { shared with every other worker and with the caller; read-only here }
     FJobs: TSampleLoadJobArray;
+    FCursor: PLongInt;
   protected
     procedure Execute; override;
   public
-    constructor Create(const AJobs: TSampleLoadJobArray);
+    constructor Create(const AJobs: TSampleLoadJobArray; ACursor: PLongInt);
   end;
 
-constructor TSampleLoadThread.Create(const AJobs: TSampleLoadJobArray);
+constructor TSampleLoadThread.Create(const AJobs: TSampleLoadJobArray;
+  ACursor: PLongInt);
 begin
   { fields are set BEFORE calling the inherited constructor, which starts
     the thread immediately (CreateSuspended=False) - Execute only ever
@@ -660,7 +674,11 @@ begin
     + a later .Start) hung indefinitely here - FPC's suspended-thread
     emulation on Linux/cthreads never actually resumed, so WaitFor blocked
     the GUI thread forever on every project open. }
-  FJobs := Copy(AJobs, 0, Length(AJobs));
+  { a reference to the caller's array, not a copy - it is never written after
+    this point, and the refcount is taken here on the CALLER's thread, before
+    the thread below can possibly run }
+  FJobs := AJobs;
+  FCursor := ACursor;
   inherited Create(False);
   FreeOnTerminate := False;
 end;
@@ -671,8 +689,15 @@ var
   Sample, EmptySample: TSample;
 begin
   FillChar(EmptySample, SizeOf(EmptySample), 0);
-  for i := 0 to High(FJobs) do
+  while True do
   begin
+    { claim the next job; InterlockedIncrement returns the POST-increment
+      value, so subtracting one gives the index this thread just took and no
+      other thread can take }
+    i := InterlockedIncrement(FCursor^) - 1;
+    if i > High(FJobs) then
+      Break;
+
     Idx := FJobs[i].Index;
     if DecodeSampleFile(FJobs[i].ResolvedPath, Sample) then
     begin
@@ -706,7 +731,10 @@ end;
   those arrays - before this is called. }
 procedure LoadSamplesThreaded(const AJobs: TSampleLoadJobArray);
 var
-  ThreadCount, ChunkSize, w, StartIdx, EndIdx: Integer;
+  ThreadCount, w: Integer;
+  { the shared claim counter - a local is safe because every thread that can
+    reach it is joined below before this procedure returns }
+  Cursor: LongInt;
   Threads: array of TSampleLoadThread;
 begin
   if Length(AJobs) = 0 then
@@ -716,19 +744,16 @@ begin
   if ThreadCount > ThreadUtil.WorkerThreadCap then
     ThreadCount := ThreadUtil.WorkerThreadCap;
 
-  ChunkSize := (Length(AJobs) + ThreadCount - 1) div ThreadCount;
+  Cursor := 0;
   SetLength(Threads, ThreadCount);
 
   { each thread starts running as soon as it's constructed (Create(False) -
-    see the constructor's comment) - no separate Start pass needed }
+    see the constructor's comment) - no separate Start pass needed. Threads
+    created earlier begin claiming jobs while the later ones are still being
+    constructed, which is harmless: the cursor is the only thing handing work
+    out. }
   for w := 0 to ThreadCount - 1 do
-  begin
-    StartIdx := w * ChunkSize;
-    EndIdx := StartIdx + ChunkSize;
-    if EndIdx > Length(AJobs) then
-      EndIdx := Length(AJobs);
-    Threads[w] := TSampleLoadThread.Create(Copy(AJobs, StartIdx, EndIdx - StartIdx));
-  end;
+    Threads[w] := TSampleLoadThread.Create(AJobs, @Cursor);
 
   for w := 0 to ThreadCount - 1 do
   begin

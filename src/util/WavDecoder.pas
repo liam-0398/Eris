@@ -5,7 +5,7 @@ unit WavDecoder;
 interface
 
 uses
-  Classes, SysUtils, SampleTypes, AiffDecoder, Resample;
+  Classes, SysUtils, SampleTypes, AiffDecoder, Resample, AVector;
   { Mp3Decoder is not wired in yet - it doesn't exist as a unit yet, this
     is a deliberate midpoint so AIFF support and the sample-load thread fix
     can be built and tested independently of the still-unwritten MP3 port }
@@ -179,13 +179,20 @@ begin
     GetMem(ASample.Data, FrameCount * NumChannels * SizeOf(Single));
 
     { 16-bit PCM - overwhelmingly the common case, and the one Eris itself
-      writes - gets its own loop. The general loop below re-tests the format
+      writes - gets its own path. The general loop below re-tests the format
       and re-enters a case on BitsPerSample for EVERY sample, which for a
       3-minute stereo file is ~16M redundant branches on values that cannot
-      change mid-file. Same arithmetic, so the decoded floats are identical. }
+      change mid-file. Same arithmetic, so the decoded floats are identical.
+
+      AVector.VConvertS16 is that loop, 8 samples per instruction where the
+      CPU has AVX2 and byte-identical Pascal where it does not - see its
+      comment for why the widen-and-scale cannot round differently. This runs
+      for EVERY sample a project loads, including the ones already at the
+      canonical rate that skip ResampleToCanonical entirely, so it is the
+      widest-reaching thing on the load path. }
     if (AudioFormat = FormatPCM) and (BitsPerSample = 16) then
-      for i := 0 to (FrameCount * NumChannels) - 1 do
-        ASample.Data[i] := PSmallInt(@RawData[i * 2])^ / 32768.0
+      VConvertS16(ASample.Data, PSmallInt(RawData),
+        Int64(FrameCount) * NumChannels)
     else
     for i := 0 to (FrameCount * NumChannels) - 1 do
     begin
@@ -359,15 +366,34 @@ const
 
 { Converts a freshly decoded sample to CanonicalSampleRate in place, so the
   pool only ever holds one rate - see that constant's comment for why a
-  mixed-rate pool misbehaves. Uses Resample.Interpolate, the same interpolator
-  the engine's own vari-speed playback runs on, so an imported 48k file sounds
-  exactly like the engine pitching it would. A no-op for anything already at
-  the canonical rate, which is every file Eris itself writes. }
+  mixed-rate pool misbehaves. Runs the same linear interpolation the engine's
+  own vari-speed playback does, so an imported 48k file sounds exactly like
+  the engine pitching it would. A no-op for anything already at the canonical
+  rate, which is every file Eris itself writes.
+
+  The interpolation is written out here rather than calling
+  Resample.Interpolate per sample. That is a procedure VARIABLE, so every
+  output sample was an indirect call - unindexable, uninlinable, and repeating
+  per CHANNEL work that only depends on the frame: the Trunc, the two bounds
+  compares and the Frac subtract were all recomputed for channel 1 having just
+  been computed for channel 0. On a stereo 48k file that is ~10M indirect
+  calls and half of them redundant. Resample.Interpolate stays exactly as it
+  is for the realtime path, where the position genuinely varies per sample and
+  the branch cannot be hoisted.
+
+  Bit-exact against what it replaces, deliberately: the position is still
+  i * Ratio as a fresh Double multiply and NOT an accumulator (pos := pos +
+  Ratio drifts by a ulp per step and would change every value after the
+  first), Frac stays Double, S1 - S0 stays a Single subtract, and the one
+  rounding back to Single still happens at the store. Same operands, same
+  order, same roundings. }
 procedure ResampleToCanonical(var ASample: TSample);
 var
-  NewData: PSingle;
-  NewCount, i, c: Integer;
-  Ratio: Double;
+  Src, NewData: PSingle;
+  NewCount, SrcCount, Channels, i, c, Idx, SrcBase, DstBase: Integer;
+  Ratio, Pos, Frac: Double;
+  S0, S1: Single;
+  HaveNext: Boolean;
 begin
   if (ASample.Data = nil) or (ASample.FrameCount <= 0)
     or (ASample.Channels <= 0) or (ASample.SampleRate <= 0)
@@ -380,11 +406,39 @@ begin
   if NewCount <= 0 then
     Exit;
 
-  GetMem(NewData, Int64(NewCount) * ASample.Channels * SizeOf(Single));
+  { hoisted out of the loop - these are record fields read ~10M times each }
+  Src := ASample.Data;
+  SrcCount := ASample.FrameCount;
+  Channels := ASample.Channels;
+
+  GetMem(NewData, Int64(NewCount) * Channels * SizeOf(Single));
+  DstBase := 0;
   for i := 0 to NewCount - 1 do
-    for c := 0 to ASample.Channels - 1 do
-      NewData[i * ASample.Channels + c] := Resample.Interpolate(
-        ASample.Data, ASample.FrameCount, ASample.Channels, c, i * Ratio);
+  begin
+    Pos := i * Ratio;
+    Idx := Trunc(Pos);
+    { Round() above can put the last output frame past the end of the source -
+      the old code hit the same case as Interpolate's own out-of-range guard
+      and got the same silence }
+    if (Idx < 0) or (Idx >= SrcCount) then
+      FillChar(NewData[DstBase], Channels * SizeOf(Single), 0)
+    else
+    begin
+      Frac := Pos - Idx;
+      SrcBase := Idx * Channels;
+      HaveNext := Idx + 1 < SrcCount;
+      for c := 0 to Channels - 1 do
+      begin
+        S0 := Src[SrcBase + c];
+        if HaveNext then
+          S1 := Src[SrcBase + Channels + c]
+        else
+          S1 := 0;
+        NewData[DstBase + c] := S0 + Frac * (S1 - S0);
+      end;
+    end;
+    Inc(DstBase, Channels);
+  end;
 
   FreeMem(ASample.Data);
   ASample.Data := NewData;

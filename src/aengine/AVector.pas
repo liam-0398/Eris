@@ -71,6 +71,17 @@ procedure VScale(ADst: PSingle; AScale: Single; ACount: PtrInt);
 procedure VMaxAbs2(ADst, ASrcA, ASrcB: PSingle; ACount: PtrInt);
 { ADst[i] := clamp(ADst[i], -1.0, +1.0) }
 procedure VClamp1(ADst: PSingle; ACount: PtrInt);
+{ ADst[i] := ASrc[i] / 32768.0, ASrc being interleaved 16-bit signed PCM.
+
+  The one routine here whose input is not already float. It is still
+  elementwise and still bit-identical, and the argument is arithmetic rather
+  than structural: a SmallInt converts to float EXACTLY (15 bits of magnitude,
+  a Single carries 24), and 32768 is a power of two, so the divide is exact in
+  any precision and cannot round. The scalar loop's Double intermediate and
+  this one's Single therefore land on the same number, every time, with no
+  appeal to "inaudible". Feeding it a non-power-of-two scale would break that
+  and is why it is hard-coded rather than a parameter. }
+procedure VConvertS16(ADst: PSingle; ASrc: PSmallInt; ACount: PtrInt);
 
 implementation
 
@@ -132,6 +143,14 @@ begin
       ADst[i] := 1.0
     else if ADst[i] < -1.0 then
       ADst[i] := -1.0;
+end;
+
+procedure VConvertS16Pas(ADst: PSingle; ASrc: PSmallInt; ACount: PtrInt);
+var
+  i: PtrInt;
+begin
+  for i := 0 to ACount - 1 do
+    ADst[i] := ASrc[i] / 32768.0;
 end;
 
 {$IFDEF CPUX86_64}
@@ -368,6 +387,50 @@ begin
   end ['rax', 'rcx', 'rdx'];
 end;
 
+{ Widen-and-scale: 8 int16 -> 8 int32 -> 8 floats -> scaled, per iteration.
+
+  Unlike the routines above, the tail is NOT an asm scalar mirror of the
+  vector body - it hands straight back to VConvertS16Pas. The scalar form
+  here would need VCVTSI2SS, whose 3-operand AVX encoding is the one thing in
+  this unit FPC's assembler is fussiest about sizing, and there is nothing to
+  gain: calling the Pascal reference for the last <8 elements makes the tail
+  identical to the oracle by construction rather than by argument.
+
+  The 16-bit load is a separate VMOVDQU into xmm rather than a memory operand
+  on VPMOVSXWD, for the same reason VBROADCASTSS is fed from a register
+  elsewhere in this unit: FPC sizes a memory operand from the 256-bit
+  destination and rejects the (correct) 128-bit form. }
+procedure VConvertS16Avx(ADst: PSingle; ASrc: PSmallInt; ACount: PtrInt);
+var
+  S: Single;
+  Vec: PtrInt;
+begin
+  S := 1.0 / 32768.0;
+  Vec := ACount - (ACount mod 8);
+  if Vec > 0 then
+  asm
+    mov  rax, ADst
+    mov  r10, ASrc
+    mov  rcx, Vec
+    xor  rdx, rdx
+    vmovss  xmm2, S
+    vbroadcastss ymm2, xmm2
+@loop8:
+    vmovdqu   xmm0, [r10+rdx*2]
+    vpmovsxwd ymm0, xmm0
+    vcvtdq2ps ymm0, ymm0
+    vmulps    ymm0, ymm0, ymm2
+    vmovups   [rax+rdx*4], ymm0
+    add  rdx, 8
+    cmp  rdx, rcx
+    jl   @loop8
+    vzeroupper
+  end ['rax', 'rcx', 'rdx', 'r10'];
+
+  if Vec < ACount then
+    VConvertS16Pas(@ADst[Vec], @ASrc[Vec], ACount - Vec);
+end;
+
 {$ENDIF}
 
 { ---------------------------------------------------------------------------
@@ -446,6 +509,20 @@ begin
   VClamp1Pas(ADst, ACount);
 end;
 
+procedure VConvertS16(ADst: PSingle; ASrc: PSmallInt; ACount: PtrInt);
+begin
+  if ACount <= 0 then
+    Exit;
+{$IFDEF CPUX86_64}
+  if VectorPathIsAVX2 then
+  begin
+    VConvertS16Avx(ADst, ASrc, ACount);
+    Exit;
+  end;
+{$ENDIF}
+  VConvertS16Pas(ADst, ASrc, ACount);
+end;
+
 {$IFDEF CPUX86_64}
 
 { Runs every routine both ways over the same input and compares the RESULT
@@ -461,6 +538,7 @@ const
   N = 61; { 7 vector iterations + a 5-element tail }
 var
   Src, RefBuf, TstBuf, SrcB: array[0..N - 1] of Single;
+  S16Src: array[0..N - 1] of SmallInt;
   Seed: LongWord;
   i: Integer;
 
@@ -521,6 +599,26 @@ begin
   Reset;
   VClamp1Pas(@RefBuf[0], N);
   VClamp1Avx(@TstBuf[0], N);
+  if not Same then Exit;
+
+  { s16 source of its own, since this is the one routine that does not take
+    floats in. Both ends of the range are included: -32768 has no positive
+    counterpart and is the value a naive negate-based conversion gets wrong. }
+  for i := 0 to N - 1 do
+  begin
+    Seed := Seed * 1103515245 + 12345;
+    S16Src[i] := SmallInt(Word(Seed shr 13));
+  end;
+  S16Src[0] := 0;
+  S16Src[1] := -32768;
+  S16Src[2] := 32767;
+  S16Src[3] := -1;
+  S16Src[4] := 1;
+
+  FillChar(RefBuf, SizeOf(RefBuf), 0);
+  FillChar(TstBuf, SizeOf(TstBuf), 0);
+  VConvertS16Pas(@RefBuf[0], @S16Src[0], N);
+  VConvertS16Avx(@TstBuf[0], @S16Src[0], N);
   if not Same then Exit;
 
   Result := True;
