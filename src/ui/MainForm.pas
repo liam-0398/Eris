@@ -8,7 +8,9 @@ uses
   Classes, SysUtils, Math, Types, Forms, Controls, Graphics, Dialogs, Menus, ExtCtrls,
   StdCtrls, ComCtrls, Buttons, LCLType, ArrangementView, PrefsForm, FileBrowser,
   SampleTypes, AudioEngine, Project, ProjectFile, WarpEditor,
-  InstrumentEditor, SamplerEditor, Effects, EffectsRack, UIScale, MidiInput;
+  { Theme last - it shadows Graphics' system colours; see Theme.pas }
+  InstrumentEditor, SamplerEditor, Effects, EffectsRack, UIScale, MidiInput,
+  Theme;
 
 type
   TForm1 = class(TForm)

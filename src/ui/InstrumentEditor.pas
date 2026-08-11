@@ -5,7 +5,9 @@ unit InstrumentEditor;
 interface
 
 uses
-  Classes, SysUtils, Controls, Graphics, LCLType, SampleTypes, Project, Waveform;
+  { Theme last - it shadows Graphics' system colours; see Theme.pas }
+  Classes, SysUtils, Controls, Graphics, LCLType, SampleTypes, Project, Waveform,
+  Theme;
 
 const
   InstrumentDefaultPixelsPerSecond = 150;

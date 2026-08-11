@@ -7,7 +7,9 @@ interface
 uses
   Classes, SysUtils, Math, Types, Forms, Controls, Graphics, LCLType, LCLIntf,
   StdCtrls, Buttons, FileBrowser, SampleTypes, Project, AudioEngine, Waveform,
-  ClipOverwrite;
+  { last on purpose - Theme shadows Graphics' clBtnFace/clWindow/... with the
+    themed palette, and only wins if it is resolved after Graphics }
+  ClipOverwrite, Theme;
 
 type
   TFileDropEvent = procedure(Sender: TObject; ATrackIndex: Integer;
