@@ -92,7 +92,26 @@ implementation
 uses
   SysUtils, IniFiles, FileUtil, SampleTypes, Project, ProjectCache, WavDecoder,
   AudioEngine, Resample, Waveform, SP1200, TarArchive, Effects, Quadraverb,
-  Alesis3630, BossFZ2, ThreadUtil, DenormalGuard;
+  Alesis3630, BossFZ2, ThreadUtil, DenormalGuard
+  {$IFDEF WINDOWS}, Windows{$ENDIF};
+
+{ RTL RenameFile is rename(2) on unix - which replaces an existing
+  destination atomically - but MoveFile on Windows, which FAILS outright if
+  the destination exists. That is why saving over an existing project used
+  to report "could not save" on Windows while Save As to a fresh name worked
+  fine. MoveFileEx with MOVEFILE_REPLACE_EXISTING restores the unix
+  semantics the save path below is written against, keeping the replacement
+  a single operation rather than a delete-then-rename that would leave the
+  last good save deleted if the rename then failed. }
+function ReplaceFile(const AFrom, ATo: string): Boolean;
+begin
+  {$IFDEF WINDOWS}
+  Result := MoveFileExW(PWideChar(UnicodeString(AFrom)),
+    PWideChar(UnicodeString(ATo)), MOVEFILE_REPLACE_EXISTING);
+  {$ELSE}
+  Result := RenameFile(AFrom, ATo);
+  {$ENDIF}
+end;
 
 constructor TProjectLoadThread.Create(const APath: string; AOnTerminate: TNotifyEvent);
 begin
@@ -708,7 +727,7 @@ begin
   if FileExists(TmpPath) then
     DeleteFile(TmpPath);
   if CreateTarFromDirectory(Dir, TmpPath) then
-    Result := RenameFile(TmpPath, APath)
+    Result := ReplaceFile(TmpPath, APath)
   else
   begin
     DeleteFile(TmpPath);
