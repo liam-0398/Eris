@@ -92,6 +92,10 @@
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
+        <Filename Value="src/project/ProjectCache.pas"/>
+        <IsPartOfProject Value="True"/>
+      </Unit>
+      <Unit>
         <Filename Value="src/aengine/Waveform.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit>

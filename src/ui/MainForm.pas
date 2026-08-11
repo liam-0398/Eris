@@ -1023,8 +1023,8 @@ begin
   AudioEngineSeek(0);
   FArrangementView.ClearSelection;
   FArrangementView.SetCursorFrame(0);
-  for t := 0 to Project.TrackCount - 1 do
-    FArrangementView.RefreshTrack(t);
+  { one pass over the project, not one per track - see RefreshAllTracks }
+  FArrangementView.RefreshAllTracks;
 
   { Clear every engine track slot above the new project's track count.
     Nothing else does, and FillBlock iterates all MaxTracks slots gated only
@@ -1632,7 +1632,6 @@ procedure TForm1.TempoEditEditingDone(Sender: TObject);
 var
   Value: Integer;
   OldBPM: Single;
-  t: Integer;
 begin
   if not TryStrToInt(Trim(FTempoEdit.Text), Value) then
     Value := Round(Project.DefaultTempoBPM);
@@ -1651,8 +1650,9 @@ begin
     Project.RescaleForTempoChange(OldBPM, Value);
     Project.TempoBPM := Value;
     FArrangementView.RescaleTimeReferences(OldBPM / Value);
-    for t := 0 to Project.TrackCount - 1 do
-      FArrangementView.RefreshTrack(t);
+    { every track's clips moved, but the scrollbar ranges only need working
+      out once for the new arrangement length - see RefreshAllTracks }
+    FArrangementView.RefreshAllTracks;
   end
   else
     Project.TempoBPM := Value;

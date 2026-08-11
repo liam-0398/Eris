@@ -8,7 +8,18 @@ uses
   Math, BiquadFilters, Quadraverb, BBE422A, Alesis3630, BossFZ2;
 
 const
-  MaxEffectsPerTrack = 4;
+  { Per-chain insert slots (a track's, the master's, or a send bus's). Raised
+    4 -> 24: four was a hard stop long before a chain got musically silly,
+    and with this many boxes in the rack (QuadraVerb, 422A, 3630, FZ-2...)
+    a real chain runs out of slots immediately.
+
+    What it costs, since it multiplies three arrays: TEffect is 308 bytes and
+    TEffectState 3504, so Project.TrackEffects grows to ~236KB and
+    AudioEngine's TrackEffectState to ~2.7MB - both globals, both fine.
+    ProjectFile.RenderProjectToWav's copies of those states are NOT globals
+    and were locals; at this count they are ~2.7MB of stack in one frame, so
+    they are heap-allocated there instead (see the declaration there). }
+  MaxEffectsPerTrack = 24;
   MaxEQBands = 4;
 
   ekNone = 0;

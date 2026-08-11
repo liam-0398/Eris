@@ -12,7 +12,7 @@ uses
   machinery only rescales controls placed via a .lfm). Px() rescales a
   hand-picked "design" pixel value according to the display environment:
   - On Wayland with HiDPI: uses Screen.PixelsPerInch scaling (handles 150% scale etc)
-  - On Xorg: applies a fixed 1.05x scale to match Wayland HiDPI appearance }
+  - Everywhere else (Xorg, Windows): 1:1, design pixels as written }
 function Px(ADesignPixels: Integer): Integer;
 
 implementation
@@ -31,14 +31,13 @@ begin
     { Wayland: use DPI-based scaling (handles HiDPI, 150% scale, etc.) }
     Result := Round(ADesignPixels * Screen.PixelsPerInch / 96)
   else
-    { Xorg: fixed 1.05x scale - every hand-placed size in this app assumes
-      some scale applies (see unit comment), so leaving Xorg fully unscaled
-      left every widget smaller than intended. 1.05x (down from 1.5x, then
-      1.125x, both of which read too big/stock-GTK3-bulky) keeps widgets
-      close to their designed size. Narrow vertical TTrackBars (e.g. the EQ4
-      gain sliders) get their own extra travel room directly in EffectsRack
-      instead of relying on this multiplier for it. }
-    Result := Round(ADesignPixels * 1.05);
+    { Xorg and Windows: none. The multiplier here has come down over time
+      (1.5x, then 1.125x, then 1.05x, all of which still read bulkier than
+      the design sizes), and at 1.0 the hand-placed pixel values are simply
+      taken as written. Narrow vertical TTrackBars (e.g. the EQ4 gain
+      sliders) already get their extra travel room directly in EffectsRack
+      rather than from this multiplier, so nothing depends on it being > 1. }
+    Result := ADesignPixels;
 end;
 
 end.

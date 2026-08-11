@@ -245,6 +245,9 @@ const
   EQBandWidth = 56;
   EQBandGap = 6;
   EQLeftMargin = 8;
+  { top of the EQ4 gain sliders: clear of the frequency edits (48 + 26) and
+    of the "Gain (dB)" caption that sits on its own row 18px above it }
+  EQGainRowTop = 92;
   { Flanger/Phaser share Chorus's rate convention (Hz * 100 on an integer
     slider) and add a Feedback control clamped to 95% in the DSP - the UI
     range matches that clamp so the slider can't imply headroom that isn't
@@ -365,6 +368,30 @@ const
     has always used 54; this is the one AddSliderColumn itself reads, so a
     widget that wants standard columns doesn't have to restate it. }
   SliderColWidth = 54;
+  { ...and the gap/margin that go with it. Every per-effect ColGap/LeftMargin
+    triplet above is 6/8; these are the shared pair the layouts converted
+    below use instead of adding four more copies of the same two numbers. }
+  SliderColGap = 6;
+  SliderColMargin = 8;
+  { Bandpass, Chorus, Limiter and Basic Reverb were the last widgets still
+    laid out as full-width stacked rows (label / horizontal slider / readout,
+    ~46px of design height each). That never really fitted: a GTK trackbar
+    draws its own position number inside its bounds, so a row asking for a
+    26px-tall slider actually occupies more like 45 and lands on top of the
+    readout underneath it - which is what the overlapping text in every one
+    of these boxes was. Bandpass was worse still, needing four rows in a box
+    fixed at WidgetHeight, so its Q slider and both readouts sat below the
+    bottom edge and never appeared at all. All four now use the same column
+    layout the rest of the rack converged on (see AddSliderColumn), which
+    gives the slider its own full-height lane and puts the readout on a row
+    of its own. }
+  BandpassColCount = 2;
+  ChorusColCount = 2;
+  LimiterColCount = 2;
+  { Reverb keeps its preset dropdown, so it follows the Sidechain/QuadraVerb
+    shape: one wide column for the dropdown, then standard slider columns }
+  ReverbTypeColWidth = 96;
+  ReverbColCount = 1;
   { BBE 422A: three standard columns - the two the front panel has, plus
     Mix. Both panel knobs are per-channel on the real box and linked here,
     see BBE422A.pas. }
@@ -631,7 +658,8 @@ begin
       end;
     Effects.ekBandpass:
       begin
-        Width := Px(200);
+        Width := Px(SliderColMargin +
+          BandpassColCount * (SliderColWidth + SliderColGap) + SliderColMargin);
         DeleteButton.Left := Width - Px(28);
         BuildBandpass;
       end;
@@ -643,19 +671,22 @@ begin
       end;
     Effects.ekLimiter:
       begin
-        Width := Px(200);
+        Width := Px(SliderColMargin +
+          LimiterColCount * (SliderColWidth + SliderColGap) + SliderColMargin);
         DeleteButton.Left := Width - Px(28);
         BuildLimiter;
       end;
     Effects.ekChorus:
       begin
-        Width := Px(200);
+        Width := Px(SliderColMargin +
+          ChorusColCount * (SliderColWidth + SliderColGap) + SliderColMargin);
         DeleteButton.Left := Width - Px(28);
         BuildChorus;
       end;
     Effects.ekReverb:
       begin
-        Width := Px(220); { a bit wider - "Basic Reverb" needs the room }
+        Width := Px(SliderColMargin + ReverbTypeColWidth + SliderColGap +
+          ReverbColCount * (SliderColWidth + SliderColGap) + SliderColMargin);
         DeleteButton.Left := Width - Px(28);
         BuildReverb;
       end;
@@ -801,55 +832,34 @@ begin
   FHPValueLabel.Caption := Format('%d Hz', [Round(EffectPtr^.HighpassFreqHz)]);
 end;
 
+{ Compact enough for a 54px column: "480Hz" below 1kHz, "12.0k" above, where
+  the plain "12000 Hz" of the old full-width row would overhang into the
+  neighbouring column's readout. }
+function BandpassFreqText(AFreqHz: Single): string;
+begin
+  if AFreqHz >= 1000 then
+    Result := Format('%.1fk', [AFreqHz / 1000])
+  else
+    Result := Format('%dHz', [Round(AFreqHz)]);
+end;
+
 procedure TEffectWidget.BuildBandpass;
 var
-  Lbl: TLabel;
+  Col2: Integer;
 begin
-  Lbl := TLabel.Create(Owner);
-  Lbl.Parent := Self;
-  Lbl.Left := Px(8);
-  Lbl.Top := Px(40);
-  Lbl.Caption := 'Center frequency';
+  { two standard columns - see the BandpassColCount comment for why this is
+    no longer the stacked-row layout its Lowpass/Highpass siblings use }
+  Col2 := SliderColMargin + SliderColWidth + SliderColGap;
 
-  FBPSlider := TTrackBar.Create(Owner);
-  FBPSlider.Parent := Self;
-  FBPSlider.Left := Px(8);
-  FBPSlider.Top := Px(68);
-  FBPSlider.Width := Width - Px(16);
-  FBPSlider.Height := Px(60);
-  FBPSlider.Min := 0;
-  FBPSlider.Max := 100;
-  FBPSlider.Position := FreqToLogSlider(EffectPtr^.BandpassFreqHz);
-  FBPSlider.OnChange := @BPSliderChange;
+  FBPSlider := AddSliderColumn(SliderColMargin, 'Freq', 0, 100,
+    FreqToLogSlider(EffectPtr^.BandpassFreqHz), @BPSliderChange,
+    'Center frequency', FBPValueLabel);
+  FBPValueLabel.Caption := BandpassFreqText(EffectPtr^.BandpassFreqHz);
 
-  FBPValueLabel := TLabel.Create(Owner);
-  FBPValueLabel.Parent := Self;
-  FBPValueLabel.Left := Px(8);
-  FBPValueLabel.Top := Px(140);
-  FBPValueLabel.Caption := Format('%d Hz', [Round(EffectPtr^.BandpassFreqHz)]);
-
-  Lbl := TLabel.Create(Owner);
-  Lbl.Parent := Self;
-  Lbl.Left := Px(8);
-  Lbl.Top := Px(160);
-  Lbl.Caption := 'Q (bandwidth)';
-
-  FBPQSlider := TTrackBar.Create(Owner);
-  FBPQSlider.Parent := Self;
-  FBPQSlider.Left := Px(8);
-  FBPQSlider.Top := Px(188);
-  FBPQSlider.Width := Width - Px(16);
-  FBPQSlider.Height := Px(60);
-  FBPQSlider.Min := 0;
-  FBPQSlider.Max := 100;
-  FBPQSlider.Position := Round(EffectPtr^.BandpassQ * 20);
-  FBPQSlider.OnChange := @BPQSliderChange;
-
-  FBPQValueLabel := TLabel.Create(Owner);
-  FBPQValueLabel.Parent := Self;
-  FBPQValueLabel.Left := Px(8);
-  FBPQValueLabel.Top := Px(260);
-  FBPQValueLabel.Caption := Format('Q: %.2f', [EffectPtr^.BandpassQ]);
+  FBPQSlider := AddSliderColumn(Col2, 'Q', 0, 100,
+    Round(EffectPtr^.BandpassQ * 20), @BPQSliderChange, 'Bandwidth (Q)',
+    FBPQValueLabel);
+  FBPQValueLabel.Caption := Format('%.2f', [EffectPtr^.BandpassQ]);
 end;
 
 procedure TEffectWidget.BuildEQ4;
@@ -858,17 +868,24 @@ var
   FreqRowLabel, GainRowLabel: TLabel;
 begin
   { logical top-to-bottom flow: a labeled row of frequency inputs, then a
-    labeled row of vertical gain sliders directly below their own band }
+    labeled row of vertical gain sliders directly below their own band.
+
+    Both rows sit on the same rhythm the column layouts use (caption at 30,
+    control at 48) - see AddSliderColumn. The gain row's caption used to be
+    at 108 with its sliders starting at 114, and a GTK trackbar draws its
+    own position number INSIDE its top edge, so those numbers printed
+    straight through the "Gain (dB)" caption. Six pixels was never a gap;
+    the caption needs a whole row to itself. }
   FreqRowLabel := TLabel.Create(Owner);
   FreqRowLabel.Parent := Self;
   FreqRowLabel.Left := Px(EQLeftMargin);
-  FreqRowLabel.Top := Px(38);
+  FreqRowLabel.Top := Px(30);
   FreqRowLabel.Caption := 'Freq (Hz)';
 
   GainRowLabel := TLabel.Create(Owner);
   GainRowLabel.Parent := Self;
   GainRowLabel.Left := Px(EQLeftMargin);
-  GainRowLabel.Top := Px(108);
+  GainRowLabel.Top := Px(EQGainRowTop - 18);
   GainRowLabel.Caption := 'Gain (dB)';
 
   for b := 0 to Effects.MaxEQBands - 1 do
@@ -878,7 +895,7 @@ begin
     FEQFreqEdit[b] := TEdit.Create(Owner);
     FEQFreqEdit[b].Parent := Self;
     FEQFreqEdit[b].Left := Px(bx);
-    FEQFreqEdit[b].Top := Px(60);
+    FEQFreqEdit[b].Top := Px(48);
     FEQFreqEdit[b].Width := Px(EQBandWidth);
     FEQFreqEdit[b].Height := Px(26);
     FEQFreqEdit[b].Text := IntToStr(Round(EffectPtr^.EQFreqHz[b]));
@@ -894,14 +911,13 @@ begin
       silently transposed into a squashed, overflowing box }
     FEQGainSlider[b].Orientation := trVertical;
     FEQGainSlider[b].Left := Px(bx);
-    { Top raised from the original 128 to 114 (bottom margin unchanged at
-      10) so the slider itself is exactly 1/3 taller than its original 42px
-      - see UIScale.Px's comment: too little travel and GTK2 renders a
-      vertical TTrackBar as barely more than its own round thumb, unusable
-      on X11. }
-    FEQGainSlider[b].Top := Px(114);
+    { too little travel and GTK renders a vertical TTrackBar as barely more
+      than its own round thumb (and its position number eats the top ~18px
+      of whatever height it is given), so this takes every pixel between the
+      Gain caption and the bottom margin }
+    FEQGainSlider[b].Top := Px(EQGainRowTop);
     FEQGainSlider[b].Width := Px(EQBandWidth);
-    FEQGainSlider[b].Height := Px(WidgetHeight) - Px(114) - Px(10);
+    FEQGainSlider[b].Height := Px(WidgetHeight - EQGainRowTop - 8);
     { GTK's un-inverted vertical range puts the Min value at the top, which
       reads backwards for a gain fader - flip it so dragging up means more
       gain, matching every real mixer/EQ }
@@ -917,151 +933,69 @@ begin
 end;
 
 procedure TEffectWidget.BuildLimiter;
-var
-  Lbl1, Lbl2: TLabel;
 begin
-  Lbl1 := TLabel.Create(Owner);
-  Lbl1.Parent := Self;
-  Lbl1.Left := Px(8);
-  Lbl1.Top := Px(36);
-  Lbl1.Caption := 'Ceiling (dB)';
+  FLimiterThresholdSlider := AddSliderColumn(SliderColMargin, 'Ceiling',
+    LimiterMinThresholdDb, LimiterMaxThresholdDb,
+    Round(EffectPtr^.LimiterThresholdDb), @LimiterThresholdSliderChange,
+    'Ceiling (dB)', FLimiterThresholdValueLabel);
+  FLimiterThresholdValueLabel.Caption :=
+    Format('%d dB', [Round(EffectPtr^.LimiterThresholdDb)]);
 
-  FLimiterThresholdSlider := TTrackBar.Create(Owner);
-  FLimiterThresholdSlider.Parent := Self;
-  FLimiterThresholdSlider.Left := Px(8);
-  FLimiterThresholdSlider.Top := Px(54);
-  FLimiterThresholdSlider.Width := Width - Px(16);
-  FLimiterThresholdSlider.Height := Px(26);
-  FLimiterThresholdSlider.Min := LimiterMinThresholdDb;
-  FLimiterThresholdSlider.Max := LimiterMaxThresholdDb;
-  FLimiterThresholdSlider.Position := Round(EffectPtr^.LimiterThresholdDb);
-  FLimiterThresholdSlider.OnChange := @LimiterThresholdSliderChange;
-
-  FLimiterThresholdValueLabel := TLabel.Create(Owner);
-  FLimiterThresholdValueLabel.Parent := Self;
-  FLimiterThresholdValueLabel.Left := Px(8);
-  FLimiterThresholdValueLabel.Top := Px(82);
-  FLimiterThresholdValueLabel.Caption := Format('%d dB', [Round(EffectPtr^.LimiterThresholdDb)]);
-
-  Lbl2 := TLabel.Create(Owner);
-  Lbl2.Parent := Self;
-  Lbl2.Left := Px(8);
-  Lbl2.Top := Px(100);
-  Lbl2.Caption := 'Release (ms)';
-
-  FLimiterReleaseSlider := TTrackBar.Create(Owner);
-  FLimiterReleaseSlider.Parent := Self;
-  FLimiterReleaseSlider.Left := Px(8);
-  FLimiterReleaseSlider.Top := Px(118);
-  FLimiterReleaseSlider.Width := Width - Px(16);
-  FLimiterReleaseSlider.Height := Px(26);
-  FLimiterReleaseSlider.Min := LimiterMinReleaseMs;
-  FLimiterReleaseSlider.Max := LimiterMaxReleaseMs;
-  FLimiterReleaseSlider.Position := Round(EffectPtr^.LimiterReleaseMs);
-  FLimiterReleaseSlider.OnChange := @LimiterReleaseSliderChange;
-
-  FLimiterReleaseValueLabel := TLabel.Create(Owner);
-  FLimiterReleaseValueLabel.Parent := Self;
-  FLimiterReleaseValueLabel.Left := Px(8);
-  FLimiterReleaseValueLabel.Top := Px(146);
-  FLimiterReleaseValueLabel.Caption := Format('%d ms', [Round(EffectPtr^.LimiterReleaseMs)]);
+  FLimiterReleaseSlider := AddSliderColumn(
+    SliderColMargin + SliderColWidth + SliderColGap, 'Release',
+    LimiterMinReleaseMs, LimiterMaxReleaseMs,
+    Round(EffectPtr^.LimiterReleaseMs), @LimiterReleaseSliderChange,
+    'Release (ms)', FLimiterReleaseValueLabel);
+  FLimiterReleaseValueLabel.Caption :=
+    Format('%d ms', [Round(EffectPtr^.LimiterReleaseMs)]);
 end;
 
 procedure TEffectWidget.BuildChorus;
-var
-  Lbl1, Lbl2: TLabel;
 begin
-  Lbl1 := TLabel.Create(Owner);
-  Lbl1.Parent := Self;
-  Lbl1.Left := Px(8);
-  Lbl1.Top := Px(36);
-  Lbl1.Caption := 'Rate (Hz)';
+  FChorusRateSlider := AddSliderColumn(SliderColMargin, 'Rate',
+    ChorusMinRateX100, ChorusMaxRateX100, Round(EffectPtr^.ChorusRateHz * 100),
+    @ChorusRateSliderChange, 'LFO rate (Hz)', FChorusRateValueLabel);
+  FChorusRateValueLabel.Caption := Format('%.2fHz', [EffectPtr^.ChorusRateHz]);
 
-  FChorusRateSlider := TTrackBar.Create(Owner);
-  FChorusRateSlider.Parent := Self;
-  FChorusRateSlider.Left := Px(8);
-  FChorusRateSlider.Top := Px(54);
-  FChorusRateSlider.Width := Width - Px(16);
-  FChorusRateSlider.Height := Px(26);
-  FChorusRateSlider.Min := ChorusMinRateX100;
-  FChorusRateSlider.Max := ChorusMaxRateX100;
-  FChorusRateSlider.Position := Round(EffectPtr^.ChorusRateHz * 100);
-  FChorusRateSlider.OnChange := @ChorusRateSliderChange;
-
-  FChorusRateValueLabel := TLabel.Create(Owner);
-  FChorusRateValueLabel.Parent := Self;
-  FChorusRateValueLabel.Left := Px(8);
-  FChorusRateValueLabel.Top := Px(82);
-  FChorusRateValueLabel.Caption := Format('%.2f Hz', [EffectPtr^.ChorusRateHz]);
-
-  Lbl2 := TLabel.Create(Owner);
-  Lbl2.Parent := Self;
-  Lbl2.Left := Px(8);
-  Lbl2.Top := Px(100);
-  Lbl2.Caption := 'Depth (%)';
-
-  FChorusDepthSlider := TTrackBar.Create(Owner);
-  FChorusDepthSlider.Parent := Self;
-  FChorusDepthSlider.Left := Px(8);
-  FChorusDepthSlider.Top := Px(118);
-  FChorusDepthSlider.Width := Width - Px(16);
-  FChorusDepthSlider.Height := Px(26);
-  FChorusDepthSlider.Min := ChorusMinDepthPercent;
-  FChorusDepthSlider.Max := ChorusMaxDepthPercent;
-  FChorusDepthSlider.Position := Round(EffectPtr^.ChorusDepthPercent);
-  FChorusDepthSlider.OnChange := @ChorusDepthSliderChange;
-
-  FChorusDepthValueLabel := TLabel.Create(Owner);
-  FChorusDepthValueLabel.Parent := Self;
-  FChorusDepthValueLabel.Left := Px(8);
-  FChorusDepthValueLabel.Top := Px(146);
-  FChorusDepthValueLabel.Caption := Format('%d%%', [Round(EffectPtr^.ChorusDepthPercent)]);
+  FChorusDepthSlider := AddSliderColumn(
+    SliderColMargin + SliderColWidth + SliderColGap, 'Depth',
+    ChorusMinDepthPercent, ChorusMaxDepthPercent,
+    Round(EffectPtr^.ChorusDepthPercent), @ChorusDepthSliderChange,
+    'Modulation depth (%)', FChorusDepthValueLabel);
+  FChorusDepthValueLabel.Caption :=
+    Format('%d%%', [Round(EffectPtr^.ChorusDepthPercent)]);
 end;
 
 procedure TEffectWidget.BuildReverb;
 var
-  Lbl1, Lbl2: TLabel;
+  Lbl: TLabel;
   p: Integer;
 begin
-  Lbl1 := TLabel.Create(Owner);
-  Lbl1.Parent := Self;
-  Lbl1.Left := Px(8);
-  Lbl1.Top := Px(36);
-  Lbl1.Caption := 'Type';
+  { wide dropdown column then one standard slider column, same shape as
+    Sidechain/QuadraVerb Reverb }
+  Lbl := TLabel.Create(Owner);
+  Lbl.Parent := Self;
+  Lbl.Left := Px(SliderColMargin);
+  Lbl.Top := Px(30);
+  Lbl.Caption := 'Type';
 
   FReverbPresetCombo := TComboBox.Create(Owner);
   FReverbPresetCombo.Parent := Self;
   FReverbPresetCombo.Style := csDropDownList;
-  FReverbPresetCombo.Left := Px(8);
-  FReverbPresetCombo.Top := Px(54);
-  FReverbPresetCombo.Width := Width - Px(16);
+  FReverbPresetCombo.Left := Px(SliderColMargin);
+  FReverbPresetCombo.Top := Px(48);
+  FReverbPresetCombo.Width := Px(ReverbTypeColWidth);
   for p := 0 to Effects.ReverbPresetCount - 1 do
     FReverbPresetCombo.Items.Add(Effects.ReverbPresetNames[p]);
   FReverbPresetCombo.ItemIndex := EffectPtr^.ReverbPreset;
   FReverbPresetCombo.OnChange := @ReverbPresetChange;
 
-  Lbl2 := TLabel.Create(Owner);
-  Lbl2.Parent := Self;
-  Lbl2.Left := Px(8);
-  Lbl2.Top := Px(100);
-  Lbl2.Caption := 'Dry / Wet';
-
-  FReverbMixSlider := TTrackBar.Create(Owner);
-  FReverbMixSlider.Parent := Self;
-  FReverbMixSlider.Left := Px(8);
-  FReverbMixSlider.Top := Px(118);
-  FReverbMixSlider.Width := Width - Px(16);
-  FReverbMixSlider.Height := Px(26);
-  FReverbMixSlider.Min := ReverbMinMixPercent;
-  FReverbMixSlider.Max := ReverbMaxMixPercent;
-  FReverbMixSlider.Position := Round(EffectPtr^.ReverbMixPercent);
-  FReverbMixSlider.OnChange := @ReverbMixSliderChange;
-
-  FReverbMixValueLabel := TLabel.Create(Owner);
-  FReverbMixValueLabel.Parent := Self;
-  FReverbMixValueLabel.Left := Px(8);
-  FReverbMixValueLabel.Top := Px(146);
-  FReverbMixValueLabel.Caption := Format('%d%% wet', [Round(EffectPtr^.ReverbMixPercent)]);
+  FReverbMixSlider := AddSliderColumn(
+    SliderColMargin + ReverbTypeColWidth + SliderColGap, 'Dry/Wet',
+    ReverbMinMixPercent, ReverbMaxMixPercent, Round(EffectPtr^.ReverbMixPercent),
+    @ReverbMixSliderChange, 'Wet mix (%)', FReverbMixValueLabel);
+  FReverbMixValueLabel.Caption :=
+    Format('%d%%', [Round(EffectPtr^.ReverbMixPercent)]);
 end;
 
 procedure TEffectWidget.BuildFlanger;
@@ -2031,7 +1965,7 @@ var
 begin
   Freq := LogSliderToFreq(FBPSlider.Position);
   EffectPtr^.BandpassFreqHz := Freq;
-  FBPValueLabel.Caption := Format('%d Hz', [Round(Freq)]);
+  FBPValueLabel.Caption := BandpassFreqText(Freq);
 end;
 
 procedure TEffectWidget.BPQSliderChange(Sender: TObject);
@@ -2040,7 +1974,7 @@ var
 begin
   Q := FBPQSlider.Position / 20;
   EffectPtr^.BandpassQ := Q;
-  FBPQValueLabel.Caption := Format('Q: %.2f', [Q]);
+  FBPQValueLabel.Caption := Format('%.2f', [Q]);
 end;
 
 procedure TEffectWidget.EQFreqEditDone(Sender: TObject);
@@ -2083,7 +2017,8 @@ var
 begin
   RateHz := FChorusRateSlider.Position / 100;
   EffectPtr^.ChorusRateHz := RateHz;
-  FChorusRateValueLabel.Caption := Format('%.2f Hz', [RateHz]);
+  { no space before the unit - the readout now sits in a 54px column }
+  FChorusRateValueLabel.Caption := Format('%.2fHz', [RateHz]);
 end;
 
 procedure TEffectWidget.ChorusDepthSliderChange(Sender: TObject);
@@ -2100,7 +2035,7 @@ end;
 procedure TEffectWidget.ReverbMixSliderChange(Sender: TObject);
 begin
   EffectPtr^.ReverbMixPercent := FReverbMixSlider.Position;
-  FReverbMixValueLabel.Caption := Format('%d%% wet', [FReverbMixSlider.Position]);
+  FReverbMixValueLabel.Caption := Format('%d%%', [FReverbMixSlider.Position]);
 end;
 
 procedure TEffectWidget.FlangerRateSliderChange(Sender: TObject);

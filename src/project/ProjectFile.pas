@@ -90,7 +90,7 @@ function RenderProjectToWav(const AOutputPath: string): Boolean;
 implementation
 
 uses
-  SysUtils, IniFiles, FileUtil, SampleTypes, Project, WavDecoder,
+  SysUtils, IniFiles, FileUtil, SampleTypes, Project, ProjectCache, WavDecoder,
   AudioEngine, Resample, Waveform, SP1200, TarArchive, Effects, Quadraverb,
   Alesis3630, BossFZ2, ThreadUtil, DenormalGuard;
 
@@ -327,34 +327,6 @@ begin
   Result.FZ2MixPercent := Ini.ReadFloat(ASection, APrefix + 'FZ2MixPercent', 100);
 end;
 
-type
-  TStrArr = array of string;
-
-{ Hand-rolled single-pass split, deliberately not TStrings.DelimitedText -
-  the packed clip format below never needs quoting/escaping (its own
-  delimiters can't appear inside the numeric fields they separate), so a
-  linear Pos-free scan is simpler and cheaper than a general CSV parser. }
-function SplitStr(const S: string; ADelim: Char): TStrArr;
-var
-  Parts: TStrArr;
-  Count, StartPos, i: Integer;
-begin
-  if S = '' then
-    Exit(nil);
-  SetLength(Parts, 0);
-  Count := 0;
-  StartPos := 1;
-  for i := 1 to Length(S) + 1 do
-    if (i > Length(S)) or (S[i] = ADelim) then
-    begin
-      SetLength(Parts, Count + 1);
-      Parts[Count] := Copy(S, StartPos, i - StartPos);
-      Inc(Count);
-      StartPos := i + 1;
-    end;
-  Result := Parts;
-end;
-
 function PortableFloatSettings: TFormatSettings;
 begin
   Result := DefaultFormatSettings;
@@ -389,43 +361,6 @@ begin
     FloatToStr(AClip.Gain, FS), AClip.WarpMode, MarkerPart]);
 end;
 
-function UnpackClip(const S: string; ATrackID: Integer): TClip;
-var
-  Fields, MarkerPairs, MarkerFields: TStrArr;
-  FS: TFormatSettings;
-  m: Integer;
-begin
-  FillChar(Result, SizeOf(Result), 0);
-  FS := PortableFloatSettings;
-  Fields := SplitStr(S, ',');
-  if Length(Fields) < 8 then
-    Exit;
-
-  Result.SampleID := StrToIntDef(Fields[0], -1);
-  Result.Offset := StrToInt64Def(Fields[1], 0);
-  Result.Length := StrToInt64Def(Fields[2], 0);
-  Result.Position := StrToInt64Def(Fields[3], 0);
-  Result.TrackID := ATrackID;
-  Result.PitchSemitones := StrToFloatDef(Fields[4], 0, FS);
-  Result.Gain := StrToFloatDef(Fields[5], 1.0, FS);
-  Result.WarpMode := StrToIntDef(Fields[6], SampleTypes.WarpModeBeats);
-
-  if Fields[7] <> '' then
-  begin
-    MarkerPairs := SplitStr(Fields[7], MarkerDelim);
-    SetLength(Result.WarpMarkers, Length(MarkerPairs));
-    for m := 0 to High(MarkerPairs) do
-    begin
-      MarkerFields := SplitStr(MarkerPairs[m], MarkerFieldDelim);
-      if Length(MarkerFields) >= 2 then
-      begin
-        Result.WarpMarkers[m].SourceFrame := StrToInt64Def(MarkerFields[0], 0);
-        Result.WarpMarkers[m].TimelineFrame := StrToInt64Def(MarkerFields[1], 0);
-      end;
-    end;
-  end;
-end;
-
 { Packs a whole track's clip list (including every clip's warp markers) into
   ONE string, written under a single ini key - see LoadProject/SaveProject.
   TIniFile (src: FPC's inifiles.pp) does a linear scan to find a key within
@@ -438,38 +373,168 @@ end;
   small, fixed number of ini calls regardless of clip count. }
 function PackClips(const AClips: TClipArray): string;
 var
-  i: Integer;
+  i, Used, Piece: Integer;
+  Part: string;
 begin
   Result := '';
+  Used := 0;
   for i := 0 to High(AClips) do
   begin
+    Part := PackClip(AClips[i]);
+    Piece := Length(Part);
     if i > 0 then
-      Result := Result + ClipDelim;
-    Result := Result + PackClip(AClips[i]);
+      Inc(Piece);
+    { grow geometrically into a single buffer instead of `Result := Result +
+      Part`, which reallocates the whole (by then very long) string on every
+      clip of a heavily chopped track }
+    if Used + Piece > Length(Result) then
+      SetLength(Result, (Used + Piece) * 2 + 64);
+    if i > 0 then
+    begin
+      Inc(Used);
+      Result[Used] := ClipDelim;
+    end;
+    if Length(Part) > 0 then
+      Move(Part[1], Result[Used + 1], Length(Part));
+    Inc(Used, Length(Part));
   end;
+  SetLength(Result, Used);
 end;
 
+{ Parses one track's packed text in a single forward pass, allocating only
+  the clip array (sized once, up front, from a delimiter count) and one
+  marker array per warped clip.
+
+  What this replaces was three nested levels of splitting: the track string
+  into per-clip strings, each clip string into its 8 fields, then the marker
+  field into pairs and each pair into two numbers - so every character of
+  the track was copied into a fresh heap string three or four times over,
+  and each split grew its result array one element at a time (a realloc and
+  move per clip, on a track that can hold thousands). Reading the digits
+  straight out of the original string removes all of it; the two Copy calls
+  left are the float fields, kept so their text still round-trips through
+  exactly the same StrToFloatDef that wrote them.
+
+  Field scanning stops dead at a clip boundary, so a malformed clip can only
+  ever damage itself and never consume the clips after it. }
 procedure UnpackClips(const S: string; ATrackID: Integer; out AClips: TClipArray);
 var
-  Parts: TStrArr;
-  i: Integer;
+  L, P, ClipCount, i, MarkerCount, FieldStart: Integer;
+  FS: TFormatSettings;
+  Markers: TWarpMarkerArray;
+
+  { integer field: reads the digits at P and leaves P on whatever stopped it }
+  function ScanInt: Int64;
+  var
+    Neg: Boolean;
+  begin
+    Result := 0;
+    Neg := False;
+    if (P <= L) and ((S[P] = '-') or (S[P] = '+')) then
+    begin
+      Neg := S[P] = '-';
+      Inc(P);
+    end;
+    while (P <= L) and (S[P] >= '0') and (S[P] <= '9') do
+    begin
+      Result := Result * 10 + (Ord(S[P]) - Ord('0'));
+      Inc(P);
+    end;
+    if Neg then
+      Result := -Result;
+  end;
+
+  { step over the rest of the current comma-separated field and its comma }
+  procedure NextField;
+  begin
+    while (P <= L) and (S[P] <> ',') and (S[P] <> ClipDelim) do
+      Inc(P);
+    if (P <= L) and (S[P] = ',') then
+      Inc(P);
+  end;
+
 begin
-  if S = '' then
+  Markers := nil;
+  L := Length(S);
+  if L = 0 then
   begin
     SetLength(AClips, 0);
     Exit;
   end;
-  Parts := SplitStr(S, ClipDelim);
-  SetLength(AClips, Length(Parts));
-  for i := 0 to High(Parts) do
-    AClips[i] := UnpackClip(Parts[i], ATrackID);
+
+  ClipCount := 1;
+  for i := 1 to L do
+    if S[i] = ClipDelim then
+      Inc(ClipCount);
+  SetLength(AClips, ClipCount);
+
+  FS := PortableFloatSettings;
+  P := 1;
+  for i := 0 to ClipCount - 1 do
+  begin
+    { SetLength above zero-filled every element, so anything a short/damaged
+      clip never assigns is already 0 (and WarpMarkers already nil) }
+    AClips[i].TrackID := ATrackID;
+
+    AClips[i].SampleID := ScanInt; NextField;
+    AClips[i].Offset := ScanInt; NextField;
+    AClips[i].Length := ScanInt; NextField;
+    AClips[i].Position := ScanInt; NextField;
+
+    FieldStart := P;
+    while (P <= L) and (S[P] <> ',') and (S[P] <> ClipDelim) do
+      Inc(P);
+    AClips[i].PitchSemitones := StrToFloatDef(Copy(S, FieldStart, P - FieldStart), 0, FS);
+    if (P <= L) and (S[P] = ',') then
+      Inc(P);
+
+    FieldStart := P;
+    while (P <= L) and (S[P] <> ',') and (S[P] <> ClipDelim) do
+      Inc(P);
+    AClips[i].Gain := StrToFloatDef(Copy(S, FieldStart, P - FieldStart), 1.0, FS);
+    if (P <= L) and (S[P] = ',') then
+      Inc(P);
+
+    AClips[i].WarpMode := ScanInt; NextField;
+
+    { markers run to the end of this clip; collected into one buffer that is
+      reused across clips and copied out at its final size, so the marker
+      count never has to be counted in a separate scan }
+    MarkerCount := 0;
+    while (P <= L) and (S[P] <> ClipDelim) do
+    begin
+      if MarkerCount >= Length(Markers) then
+        SetLength(Markers, MarkerCount * 2 + 16);
+      Markers[MarkerCount].SourceFrame := ScanInt;
+      if (P <= L) and (S[P] = MarkerFieldDelim) then
+        Inc(P);
+      Markers[MarkerCount].TimelineFrame := ScanInt;
+      Inc(MarkerCount);
+      while (P <= L) and (S[P] <> MarkerDelim) and (S[P] <> ClipDelim) do
+        Inc(P);
+      if (P <= L) and (S[P] = MarkerDelim) then
+        Inc(P);
+    end;
+    if MarkerCount > 0 then
+      AClips[i].WarpMarkers := Copy(Markers, 0, MarkerCount);
+
+    { on to the next clip }
+    while (P <= L) and (S[P] <> ClipDelim) do
+      Inc(P);
+    if P <= L then
+      Inc(P);
+  end;
 end;
 
 function SaveProject(const APath: string): Boolean;
 var
-  Dir, IniPath, Section, Prefix, EmbeddedName, TmpPath: string;
+  Dir, IniPath, Section, Prefix, EmbeddedName, TmpPath, StoredPath: string;
   Ini: TIniFile;
   t, i, e: Integer;
+  { every track's packed clip text, kept so the cache written below can be
+    stamped with a hash of exactly the text that went into the ini }
+  PackedText: array of string;
+  Cache: TProjectCacheData;
 begin
   Result := False;
 
@@ -517,6 +582,7 @@ begin
     end;
 
     Ini.WriteInteger('Samples', 'Count', Length(Project.SamplePool));
+    SetLength(Cache.Samples, Length(Project.SamplePool));
     for i := 0 to High(Project.SamplePool) do
     begin
       { written unconditionally so a sample's display name (e.g. a
@@ -542,12 +608,31 @@ begin
         EncodeWav(IncludeTrailingPathDelimiter(Dir) + EmbeddedName,
           Project.SamplePool[i].Data, Project.SamplePool[i].FrameCount,
           Project.SamplePool[i].Channels, Project.SamplePool[i].SampleRate);
-        Ini.WriteString('Samples', 'Path' + IntToStr(i), EmbeddedName);
+        StoredPath := EmbeddedName;
       end
       else
-        Ini.WriteString('Samples', 'Path' + IntToStr(i), Project.SamplePaths[i]);
+        StoredPath := Project.SamplePaths[i];
+      Ini.WriteString('Samples', 'Path' + IntToStr(i), StoredPath);
+
+      { the derived analysis this pool slot already holds, banked for the
+        next load - see ProjectCache. Keyed to the same path string the ini
+        just got, and fingerprinted against the audio it describes. }
+      Cache.Samples[i].StoredPath := StoredPath;
+      Cache.Samples[i].FrameCount := Project.SamplePool[i].FrameCount;
+      Cache.Samples[i].Channels := Project.SamplePool[i].Channels;
+      Cache.Samples[i].SampleRate := Project.SamplePool[i].SampleRate;
+      Cache.Samples[i].DataHash := SampleDataFingerprint(Project.SamplePool[i].Data,
+        Project.SamplePool[i].FrameCount, Project.SamplePool[i].Channels);
+      if i <= High(Project.SamplePeaks) then
+        Cache.Samples[i].Peaks := Project.SamplePeaks[i];
+      if i <= High(Project.SampleTransients) then
+        Cache.Samples[i].Transients := Project.SampleTransients[i];
+      if i <= High(Project.SamplePeriods) then
+        Cache.Samples[i].PeriodFrames := Project.SamplePeriods[i];
     end;
 
+    SetLength(PackedText, Project.TrackCount);
+    SetLength(Cache.Tracks, Project.TrackCount);
     for t := 0 to Project.TrackCount - 1 do
     begin
       Section := 'Track' + IntToStr(t);
@@ -588,8 +673,12 @@ begin
 
       { see PackClips' comment - one key holds every clip (and all their warp
         markers) for the track, instead of ~9 keys per clip that made saving
-        a heavily-chopped track scale as O(clip-count^2) }
-      Ini.WriteString(Section, 'ClipsPacked', PackClips(Project.Tracks[t].Clips));
+        a heavily-chopped track scale as O(clip-count^2). Still the format of
+        record even with the binary cache written below: the cache is only
+        believed when its stamp matches this exact text. }
+      PackedText[t] := PackClips(Project.Tracks[t].Clips);
+      Ini.WriteString(Section, 'ClipsPacked', PackedText[t]);
+      Cache.Tracks[t] := Project.Tracks[t].Clips;
     end;
 
     Result := True;
@@ -602,6 +691,14 @@ begin
     DeleteDirectory(Dir, False);
     Exit;
   end;
+
+  { the load-accelerating sidecar, written into the bundle alongside
+    project.ini so CreateTarFromDirectory picks it up like any other file.
+    A failure here is deliberately not a failure of the save - the project
+    is already fully described by the ini, and a bundle with no (or a
+    rejected) cache just loads the slow way. }
+  Cache.ClipStamp := ClipTextStamp(PackedText);
+  WriteProjectCache(IncludeTrailingPathDelimiter(Dir) + ProjectCacheFileName, Cache);
 
   { write to a sibling temp file and rename over APath only once the tar is
     confirmed good - renaming on the same filesystem is atomic, so a crash/
@@ -635,6 +732,17 @@ type
       SaveProject) - Execute below falls back to deriving one from
       StoredPath exactly as it always did, so old projects still load fine }
     DisplayName: string;
+    { this slot's entry from the bundle's cache.bin, already matched by path
+      (see LoadProject) but NOT yet by content - Execute below fingerprints
+      what it actually decoded before believing any of it. False on a bundle
+      with no cache, i.e. anything saved by an older build, in which case
+      the three analysis passes run exactly as they always did. }
+    HasCache: Boolean;
+    CacheFrameCount, CacheChannels, CacheSampleRate: Integer;
+    CacheDataHash: QWord;
+    CachePeriodFrames: Integer;
+    CachePeaks: TWaveformPeaks;
+    CacheTransients: TFrameArray;
   end;
   TSampleLoadJobArray = array of TSampleLoadJob;
 
@@ -687,6 +795,7 @@ procedure TSampleLoadThread.Execute;
 var
   i, Idx: Integer;
   Sample, EmptySample: TSample;
+  CacheHit: Boolean;
 begin
   FillChar(EmptySample, SizeOf(EmptySample), 0);
   while True do
@@ -713,15 +822,45 @@ begin
       Project.SampleNames[Idx] := '(missing: ' + ExtractFileName(FJobs[i].StoredPath) + ')';
     end;
     Project.SamplePaths[Idx] := FJobs[i].StoredPath;
-    { mirrors Project.AddSampleToPool exactly - analyze whatever ended up
-      in the pool slot, real or empty }
-    Project.SamplePeaks[Idx] := ComputeWaveformPeaks(Project.SamplePool[Idx]);
-    Project.SampleTransients[Idx] := DetectTransients(Project.SamplePool[Idx].Data,
-      Project.SamplePool[Idx].FrameCount, Project.SamplePool[Idx].Channels,
-      Project.SamplePool[Idx].SampleRate);
-    Project.SamplePeriods[Idx] := DetectFundamentalPeriod(Project.SamplePool[Idx].Data,
-      Project.SamplePool[Idx].FrameCount, Project.SamplePool[Idx].Channels,
-      Project.SamplePool[Idx].SampleRate);
+
+    { Peaks, transients and the fundamental period are three more passes over
+      the audio on top of decoding it - together several times the cost of
+      the decode, and DetectFundamentalPeriod's autocorrelation is the worst
+      of them - yet all three are pure functions of the sample data. If the
+      bundle banked them at save time and the audio still fingerprints the
+      same, take them and skip all three. A stale entry (an external sample
+      edited since the save) fails the fingerprint and just falls through to
+      computing them. }
+    CacheHit := False;
+    if FJobs[i].HasCache and (Project.SamplePool[Idx].Data <> nil) and
+      (Project.SamplePool[Idx].FrameCount = FJobs[i].CacheFrameCount) and
+      (Project.SamplePool[Idx].Channels = FJobs[i].CacheChannels) and
+      (Project.SamplePool[Idx].SampleRate = FJobs[i].CacheSampleRate) then
+      CacheHit := SampleDataFingerprint(Project.SamplePool[Idx].Data,
+        Project.SamplePool[Idx].FrameCount, Project.SamplePool[Idx].Channels) =
+        FJobs[i].CacheDataHash;
+
+    if CacheHit then
+    begin
+      { plain dynamic-array assignments: the cache arrays are never written
+        after LoadProject built them, and FPC refcounts them atomically, so
+        several workers taking a reference at once is safe }
+      Project.SamplePeaks[Idx] := FJobs[i].CachePeaks;
+      Project.SampleTransients[Idx] := FJobs[i].CacheTransients;
+      Project.SamplePeriods[Idx] := FJobs[i].CachePeriodFrames;
+    end
+    else
+    begin
+      { mirrors Project.AddSampleToPool exactly - analyze whatever ended up
+        in the pool slot, real or empty }
+      Project.SamplePeaks[Idx] := ComputeWaveformPeaks(Project.SamplePool[Idx]);
+      Project.SampleTransients[Idx] := DetectTransients(Project.SamplePool[Idx].Data,
+        Project.SamplePool[Idx].FrameCount, Project.SamplePool[Idx].Channels,
+        Project.SamplePool[Idx].SampleRate);
+      Project.SamplePeriods[Idx] := DetectFundamentalPeriod(Project.SamplePool[Idx].Data,
+        Project.SamplePool[Idx].FrameCount, Project.SamplePool[Idx].Channels,
+        Project.SamplePool[Idx].SampleRate);
+    end;
   end;
 end;
 
@@ -763,12 +902,22 @@ begin
 end;
 
 function LoadProject(const APath: string): Boolean;
+const
+  { a value ClipsPacked can never legitimately hold, so one ReadString
+    answers both "is the key there" and "what does it say" - ValueExists
+    plus ReadString is two linear scans of the same section }
+  NoPackedKey = #1;
 var
   Dir, IniPath, Section, Prefix, StoredPath, ResolvedPath: string;
   Ini: TIniFile;
   t, i, m, e, SampleCount, ClipCount, MarkerCount: Integer;
   Clip: TClip;
   SampleJobs: TSampleLoadJobArray;
+  Cache: TProjectCacheData;
+  HaveCache, UseCachedClips, AllTracksPacked: Boolean;
+  { each track's ClipsPacked text, parsed after the track loop so the cache's
+    stamp can be checked against all of it first }
+  PackedText: array of string;
 begin
   Result := False;
 
@@ -793,6 +942,12 @@ begin
     Exit;
 
   Project.NewProject;
+
+  { optional, and absent from every bundle saved before it existed - see
+    ProjectCache. Read before anything uses it; a False here just means
+    every sample gets analyzed and every clip parsed the long way. }
+  HaveCache := ReadProjectCache(IncludeTrailingPathDelimiter(Dir) +
+    ProjectCacheFileName, Cache);
 
   Ini := TIniFile.Create(IniPath);
   try
@@ -866,10 +1021,31 @@ begin
         key - TSampleLoadThread.Execute falls back to the old
         derive-from-filename behavior in that case }
       SampleJobs[i].DisplayName := Ini.ReadString('Samples', 'Name' + IntToStr(i), '');
+
+      { hand this slot its banked analysis if the cache has an entry for the
+        same pool index AND the same path string - a pool that has been
+        reordered or repointed since the cache was written therefore can't
+        hand slot i the analysis of some other sample. The audio itself is
+        checked in the worker, once it has actually been decoded. }
+      if HaveCache and (i <= High(Cache.Samples)) and
+        (Cache.Samples[i].StoredPath = StoredPath) and
+        (Cache.Samples[i].FrameCount > 0) then
+      begin
+        SampleJobs[i].HasCache := True;
+        SampleJobs[i].CacheFrameCount := Cache.Samples[i].FrameCount;
+        SampleJobs[i].CacheChannels := Cache.Samples[i].Channels;
+        SampleJobs[i].CacheSampleRate := Cache.Samples[i].SampleRate;
+        SampleJobs[i].CacheDataHash := Cache.Samples[i].DataHash;
+        SampleJobs[i].CachePeriodFrames := Cache.Samples[i].PeriodFrames;
+        SampleJobs[i].CachePeaks := Cache.Samples[i].Peaks;
+        SampleJobs[i].CacheTransients := Cache.Samples[i].Transients;
+      end;
     end;
 
     LoadSamplesThreaded(SampleJobs);
 
+    SetLength(PackedText, Project.TrackCount);
+    AllTracksPacked := True;
     for t := 0 to Project.TrackCount - 1 do
     begin
       Section := 'Track' + IntToStr(t);
@@ -921,11 +1097,15 @@ begin
           Ini.ReadFloat(Section, 'Send' + IntToStr(i) + 'Level', 0.5);
       end;
 
-      if Ini.ValueExists(Section, 'ClipsPacked') then
-        { current format - see PackClips/SaveProject }
-        UnpackClips(Ini.ReadString(Section, 'ClipsPacked', ''), t, Project.Tracks[t].Clips)
-      else
+      { current format - see PackClips/SaveProject. Read but NOT parsed here:
+        the cache checked after this loop may make parsing it unnecessary,
+        and its text is what that check is against. }
+      PackedText[t] := Ini.ReadString(Section, 'ClipsPacked', NoPackedKey);
+      if PackedText[t] = NoPackedKey then
       begin
+        PackedText[t] := '';
+        AllTracksPacked := False;
+
         { backward compatibility: a project.ini saved before clips were
           packed into one key stores one flat Clip<N>.* key (plus 2 more per
           warp marker) per clip instead - keep parsing that layout so those
@@ -961,6 +1141,24 @@ begin
         end;
       end;
     end;
+
+    { The cache's clip block is only believed when its stamp still matches
+      the ini text that was just read - so an externally edited (or older,
+      or partly flat-format) project.ini always wins over it, and the binary
+      block can never be a second, silently diverging copy of the
+      arrangement. When it does match, the whole text parse is skipped. }
+    UseCachedClips := HaveCache and AllTracksPacked and
+      (Length(Cache.Tracks) = Project.TrackCount) and
+      (Cache.ClipStamp = ClipTextStamp(PackedText));
+
+    for t := 0 to Project.TrackCount - 1 do
+      if UseCachedClips then
+        Project.Tracks[t].Clips := Cache.Tracks[t]
+      else if PackedText[t] <> '' then
+        { '' covers both "the track really has no clips" and "this track came
+          from the flat legacy layout above, which already filled it in" -
+          neither wants the parser, and the second must not be overwritten }
+        UnpackClips(PackedText[t], t, Project.Tracks[t].Clips);
 
     Result := True;
   finally
@@ -1000,11 +1198,14 @@ var
   Sample: TSample;
   MasterBuf: PSingle;
   TrackBuffers: array[0..Project.MaxTracks - 1] of PSingle;
-  TrackEffectState: array[0..Project.MaxTracks - 1, 0..Effects.MaxEffectsPerTrack - 1] of
-    Effects.TEffectState;
+  { On the heap, not the stack, and indexed exactly as the fixed arrays they
+    replaced were. TEffectState is 3.5KB, so at MaxTracks x
+    MaxEffectsPerTrack these three are ~2.9MB between them - fine as an
+    allocation, not fine as one stack frame on the render thread. }
+  TrackEffectState: array of array of Effects.TEffectState;
   Frame, OutIdx, SampleIdx: Int64;
   SP1200St: TSP1200State;
-  MasterEffectState: array[0..Effects.MaxEffectsPerTrack - 1] of Effects.TEffectState;
+  MasterEffectState: array of Effects.TEffectState;
   L, R, MonoSample: Single;
   e, sIdx: Integer;
   RenderBeatFrames, SwungPos: Int64;
@@ -1012,8 +1213,7 @@ var
     one scratch buffer per bus, now one BLOCK long rather than one timeline
     long, refilled every block }
   SendBuffers: array[0..Project.SendCount - 1] of PSingle;
-  SendEffectState: array[0..Project.SendCount - 1, 0..Effects.MaxEffectsPerTrack - 1] of
-    Effects.TEffectState;
+  SendEffectState: array of array of Effects.TEffectState;
   SendAmount, PreFaderL, PreFaderR, TrackVol: Single;
   BlockStart, BlockLen, FirstAbs, LastAbs, AbsFrame, ClipFrame: Int64;
   W: TWavWriter;
@@ -1088,6 +1288,10 @@ begin
     for t := 0 to Project.TrackCount - 1 do
       if Project.TrackEnabled[t] then
         GetMem(TrackBuffers[t], RenderBlockFrames * OutChannels * SizeOf(Single));
+
+    SetLength(TrackEffectState, Project.MaxTracks, Effects.MaxEffectsPerTrack);
+    SetLength(SendEffectState, Project.SendCount, Effects.MaxEffectsPerTrack);
+    SetLength(MasterEffectState, Effects.MaxEffectsPerTrack);
 
     { Every chain's state is reset ONCE, here, and then carried across every
       block - which is what the whole-timeline version got for free by making

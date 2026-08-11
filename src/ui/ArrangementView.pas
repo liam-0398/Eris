@@ -211,6 +211,7 @@ type
   public
     constructor Create(AOwner: TComponent); override;
     procedure RefreshTrack(ATrackIndex: Integer);
+    procedure RefreshAllTracks;
     procedure PushTrackToEngine(ATrackIndex: Integer);
     procedure SetCursorFrame(AFrameOffset: Int64);
     procedure ClearSelection;
@@ -1409,6 +1410,25 @@ end;
 procedure TArrangementView.RefreshTrack(ATrackIndex: Integer);
 begin
   PushTrackToEngine(ATrackIndex);
+  UpdateScrollBarRange;
+  UpdateVScrollBarRange;
+  Invalidate;
+end;
+
+{ Whole-project version of the above, for the "everything changed" callers
+  (project open, New, tempo rescale). Calling RefreshTrack in a loop instead
+  is quadratic in the thing that matters most on a project open: its
+  UpdateScrollBarRange asks ContentEndFrame for the end of the arrangement,
+  and that walks EVERY clip on EVERY track - so a 32-track loop re-walked
+  the entire project's clip list 32 times over to arrive at the same number
+  each time. The engine push is genuinely per-track and stays in the loop;
+  the two range updates and the repaint are project-wide and happen once. }
+procedure TArrangementView.RefreshAllTracks;
+var
+  t: Integer;
+begin
+  for t := 0 to Project.TrackCount - 1 do
+    PushTrackToEngine(t);
   UpdateScrollBarRange;
   UpdateVScrollBarRange;
   Invalidate;
