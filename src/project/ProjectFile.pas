@@ -724,13 +724,15 @@ begin
     power loss/disk-full mid-write leaves a harmless .tmp behind instead of
     deleting the last good save before its replacement is known to exist }
   TmpPath := APath + '.tmp';
+  { qualified because the Windows unit in this unit's uses clause also
+    exports a DeleteFile, taking a PChar rather than a string }
   if FileExists(TmpPath) then
-    DeleteFile(TmpPath);
+    SysUtils.DeleteFile(TmpPath);
   if CreateTarFromDirectory(Dir, TmpPath) then
     Result := ReplaceFile(TmpPath, APath)
   else
   begin
-    DeleteFile(TmpPath);
+    SysUtils.DeleteFile(TmpPath);
     Result := False;
   end;
   DeleteDirectory(Dir, False);
