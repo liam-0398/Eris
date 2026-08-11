@@ -25,7 +25,7 @@ unit Theme;
 interface
 
 uses
-  Graphics;
+  Graphics, Controls;
 
 { Modes are Config's ThemeSystem / ThemeLight / ThemeDark values - the same
   integers that get persisted - rather than a private enum, so nothing has to
@@ -43,6 +43,15 @@ procedure ThemeSetMode(AMode: Integer);
 function ThemeGetMode: Integer;
 function ThemeIsDark: Boolean;
 
+{ Recolours the native LCL widgets, which never see the painting code the six
+  functions below serve - a TComboBox is a real GTK/Win32 widget and draws
+  itself. Walks AControl and everything parented beneath it, so one call on a
+  form covers every control on it whenever they happen to have been created.
+
+  Does nothing at all in System mode: passthrough means leaving the widgets to
+  the desktop theme, and pinning colours on them would be the opposite. }
+procedure ThemeApply(AControl: TControl);
+
 { Deliberately shadowing Graphics' constants of the same name - see above. }
 function clBtnFace: TColor;
 function clWindow: TColor;
@@ -54,7 +63,7 @@ function clWindowFrame: TColor;
 implementation
 
 uses
-  SysUtils, Config;
+  SysUtils, Forms, StdCtrls, ExtCtrls, Buttons, Config;
 
 var
   FMode: Integer = ThemeSystem;
@@ -198,6 +207,85 @@ begin
     ThemeDark: Result := RGBToColor(16, 16, 16);
   else
     Result := Graphics.clWindowFrame;
+  end;
+end;
+
+{ ---------------------------------------------------------------------------
+  The native-widget walk.
+
+  An allow-list, not a sweep: a class that is not named here is recursed into
+  but left alone. That is the conservative choice on purpose - the classes
+  below are the ones both GTK2 and Win32 actually honour a Color on, and the
+  ones left out fall into two groups.
+
+  Cannot be themed, on either platform, so setting anything is at best wasted
+  and at worst an artefact: TButton and TComboBox's dropdown list are drawn by
+  the GTK2 theme engine and by UxTheme respectively; TTrackBar's trough and
+  thumb are entirely theme-drawn; menus are native GTK menus that the LCL
+  cannot reach at all. This is the known ceiling - some light chrome survives
+  in Dark mode, and the honest fix is System mode or a dark desktop theme, not
+  a fight with the widget toolkit. TScrollBar is in this group too, until it
+  is replaced with a drawn one.
+
+  Do not NEED theming: the custom-painted controls - the arrangement, the
+  effects rack, the editors - paint every pixel themselves through the six
+  shadowed colours above, so they are already themed by the time this runs.
+
+  Casts are explicit rather than going through TControl because Color and Font
+  are not published at that level for every descendant. }
+procedure ThemeApply(AControl: TControl);
+var
+  i: Integer;
+  Parent: TWinControl;
+begin
+  if FMode = ThemeSystem then
+    Exit;
+
+  if AControl is TCustomForm then
+    TCustomForm(AControl).Color := clBtnFace
+  else if AControl is TPanel then
+  begin
+    TPanel(AControl).Color := clBtnFace;
+    TPanel(AControl).Font.Color := clWindowText;
+  end
+  else if AControl is TLabel then
+    { background only ever comes from the parent - a TLabel is transparent on
+      both widgetsets, which is exactly what we want, so only the text moves }
+    TLabel(AControl).Font.Color := clWindowText
+  else if AControl is TEdit then
+  begin
+    TEdit(AControl).Color := clWindow;
+    TEdit(AControl).Font.Color := clWindowText;
+  end
+  else if AControl is TListBox then
+  begin
+    TListBox(AControl).Color := clWindow;
+    TListBox(AControl).Font.Color := clWindowText;
+  end
+  else if AControl is TComboBox then
+  begin
+    { the closed control takes these on both platforms; the popup list it
+      opens is a separate native window and keeps the system's colours }
+    TComboBox(AControl).Color := clWindow;
+    TComboBox(AControl).Font.Color := clWindowText;
+  end
+  else if AControl is TSpeedButton then
+  begin
+    { the one button class that themes, on both platforms - a TGraphicControl
+      with no window handle, so the LCL paints it rather than the widgetset.
+      Anything ArrangementView later lights up (the send buttons) reasserts
+      its own colour on the next refresh. }
+    TSpeedButton(AControl).Color := clBtnFace;
+    TSpeedButton(AControl).Font.Color := clWindowText;
+  end
+  else if AControl is TSplitter then
+    TSplitter(AControl).Color := clBtnFace;
+
+  if AControl is TWinControl then
+  begin
+    Parent := TWinControl(AControl);
+    for i := 0 to Parent.ControlCount - 1 do
+      ThemeApply(Parent.Controls[i]);
   end;
 end;
 

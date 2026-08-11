@@ -353,6 +353,16 @@ begin
     isn't one, so there's no failure to report. Notes are ignored until the
     first RefreshMidiSnapshot arms the snapshot below. }
   MidiInputStart(@MidiNoteReceived);
+
+  {$IFDEF WINDOWS}
+  { Win32 paints the old brush through the default WM_ERASEBKGND during a
+    resize. Against light grey that flash goes unnoticed; against a dark form
+    it reads as the window blinking white. GTK2 does not need it. }
+  DoubleBuffered := True;
+  {$ENDIF}
+  { last, once every control this form owns exists - the walk only sees what
+    is already parented, and in System mode it does nothing at all }
+  ThemeApply(Self);
 end;
 
 destructor TForm1.Destroy;

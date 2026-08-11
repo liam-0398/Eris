@@ -5,7 +5,8 @@ unit PrefsForm;
 interface
 
 uses
-  Classes, SysUtils, Forms, Controls, StdCtrls, ComCtrls, AudioEngine, Config
+  Classes, SysUtils, Forms, Controls, StdCtrls, ComCtrls, AudioEngine, Config,
+  Theme
   {$IFNDEF WINDOWS}, PipeWireBackend{$ENDIF};
 
 {$IFDEF WINDOWS}
@@ -224,6 +225,14 @@ begin
 
   RefreshDeviceLists;
   UpdateRowsForBackend;
+
+  {$IFDEF WINDOWS}
+  { see the matching note in MainForm - dark forms flash white on resize
+    through Win32's default background erase }
+  DoubleBuffered := True;
+  {$ENDIF}
+  { last, once every row exists; a no-op in System mode }
+  ThemeApply(Self);
 end;
 
 { Re-enumerates the PipeWire sinks and sources and reselects whatever the
