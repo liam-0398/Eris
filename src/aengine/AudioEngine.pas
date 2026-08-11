@@ -204,7 +204,7 @@ uses
   {$ELSE}
   ALSABackend, JACKBackend, PipeWireBackend,
   {$ENDIF}
-  Resample, Project, SP1200, Effects;
+  Resample, Project, SP1200, Effects, DenormalGuard;
 
 const
   DefaultBlockFrames = 512;
@@ -304,6 +304,26 @@ var
   PlaybackThread: TPlaybackThread;
   MixBuffer: PSingle;
 
+  { ---- block-major mix scratch -------------------------------------------
+    FillBlock processes a whole block through one stage before handing it to
+    the next, rather than carrying a single frame all the way from clip read
+    to master output. These are the intermediate buffers that shape needs.
+    All are BlockFrames long, mono-per-side (deinterleaved), and allocated
+    once by AllocMixScratch - never on the realtime thread. Reallocated only
+    by AudioEngineSetBufferSize, which stops the playback thread first.
+
+    ScratchL/R hold the track currently being processed; PreFadeL/R its
+    pre-fader copy for the send taps; MasterL/R the running sum; SendBufL/R
+    one accumulator per send bus; CapBufL/R the block's captured input,
+    drained from the ring once and then shared by every monitoring track;
+    RecTapL/R the record tap. }
+  ScratchL, ScratchR: PSingle;
+  PreFadeL, PreFadeR: PSingle;
+  MasterL, MasterR: PSingle;
+  SendBufL, SendBufR: array[0..Project.SendCount - 1] of PSingle;
+  CapBufL, CapBufR: PSingle;
+  RecTapL, RecTapR: PSingle;
+
   InputBufferFrames: Integer;
   CaptureThread: TCaptureThread;
   CaptureAvailable: Boolean;
@@ -375,15 +395,97 @@ var
   SendEffectState: array[0..Project.SendCount - 1, 0..Effects.MaxEffectsPerTrack - 1] of
     Effects.TEffectState;
 
-  { Each track's final (post-own-inserts) peak level for the CURRENT block's
-    frame being processed by FillBlock's "for t" loop below - written once
-    per track per frame, read by any other track's ekSidechain effect. For a
-    source track processed earlier than the reader in that same "for t" pass
-    this is this frame's real value; for a source track processed later it's
-    still last frame's value (one-sample stale). That's inaudible for a
-    ducking envelope follower, so it's not worth the complexity of a second
-    pass over tracks just to avoid it. }
-  TrackTapLevel: array[0..MaxTracks - 1] of Single;
+  { Each track's final (post-own-inserts, post-fader) peak level, one value
+    per frame of the block, read by any other track's ekSidechain effect.
+
+    This was a single Single per track when FillBlock was frame-major: the
+    "for t" loop overwrote it every frame, so a reader saw this frame's value
+    for a source track processed earlier in the pass and last frame's value
+    for one processed later. Block-major processes a whole track at a time,
+    so a scalar would have gone stale by up to a whole block - hence the
+    per-frame buffer. A source track EARLIER in the pass now reads exactly
+    the values the frame-major engine produced, bit for bit.
+
+    A source track LATER in the pass is the one behavioral difference in the
+    restructure: its buffer still holds the PREVIOUS block's frames, so a
+    sidechain keyed off a higher-numbered track lags by one block (~11.6ms at
+    512 frames) instead of one sample. For the envelope follower this feeds -
+    which has an attack measured in milliseconds anyway - that is a shift in
+    ducking onset well under its own time constant, and keying a compressor
+    off a track above it in the mixer is already the unusual direction. Every
+    other routing is unchanged.
+
+    Allocated by AllocMixScratch alongside the mix scratch above. }
+  TrackTapBuf: array[0..MaxTracks - 1] of PSingle;
+
+{ Allocates every block-major scratch buffer at the current BlockFrames, and
+  zeroes them - the tap buffers in particular are read across blocks (see
+  TrackTapBuf), so they must not start as heap garbage. Main thread only,
+  with the playback thread stopped; paired with FreeMixScratch. }
+procedure AllocMixScratch;
+var
+  Bytes: PtrUInt;
+  i: Integer;
+
+  procedure Alloc(out P: PSingle);
+  begin
+    GetMem(P, Bytes);
+    FillChar(P^, Bytes, 0);
+  end;
+
+begin
+  Bytes := PtrUInt(BlockFrames) * SizeOf(Single);
+  Alloc(ScratchL);
+  Alloc(ScratchR);
+  Alloc(PreFadeL);
+  Alloc(PreFadeR);
+  Alloc(MasterL);
+  Alloc(MasterR);
+  Alloc(CapBufL);
+  Alloc(CapBufR);
+  Alloc(RecTapL);
+  Alloc(RecTapR);
+  for i := 0 to Project.SendCount - 1 do
+  begin
+    Alloc(SendBufL[i]);
+    Alloc(SendBufR[i]);
+  end;
+  for i := 0 to MaxTracks - 1 do
+    Alloc(TrackTapBuf[i]);
+end;
+
+procedure FreeMixScratch;
+var
+  i: Integer;
+
+  procedure Release(var P: PSingle);
+  begin
+    if P <> nil then
+    begin
+      FreeMem(P);
+      P := nil;
+    end;
+  end;
+
+begin
+  Release(ScratchL);
+  Release(ScratchR);
+  Release(PreFadeL);
+  Release(PreFadeR);
+  Release(MasterL);
+  Release(MasterR);
+  Release(CapBufL);
+  Release(CapBufR);
+  Release(RecTapL);
+  Release(RecTapR);
+  for i := 0 to Project.SendCount - 1 do
+  begin
+    Release(SendBufL[i]);
+    Release(SendBufR[i]);
+  end;
+  for i := 0 to MaxTracks - 1 do
+    Release(TrackTapBuf[i]);
+end;
 
 { Main-thread-only producer for the command ring. NEVER call this from either
   realtime thread - it can wait.
@@ -1710,86 +1812,158 @@ begin
   end;
 end;
 
+{ ---------------------------------------------------------------------------
+  The block mixer.
+
+  This is BLOCK-MAJOR: each stage processes the whole block before handing it
+  to the next one, so a track's clips are summed across all 512 frames, then
+  its notes, then its inserts, then its fader, and only then does the next
+  track start. The engine used to be frame-major - one frame carried all the
+  way from clip read to master output, then the next - which meant every
+  per-frame iteration re-read Project.TrackEnabled/TrackVolume/
+  TrackEffectCount, re-tested every effect slot's Kind, re-resolved every
+  send's routing and re-took every branch, 44100 times a second per track.
+  All of that is loop-invariant within a block and is hoisted out here.
+
+  What is NOT allowed to change is the arithmetic. Float addition isn't
+  associative, so the mix is only bit-identical to the frame-major engine if
+  every accumulation still happens in the same order AT each frame - clips in
+  active-list order, then notes, then monitoring; tracks in index order into
+  the master; then send returns in bus order; then the click. It does, stage
+  for stage. Effect chains reorder differently but equivalently: running
+  stage 0 across the whole block and then stage 1 across it gives a serial
+  chain of stateful effects exactly the same result as alternating them per
+  frame, because each stage is a function only of its own state and the
+  stream handed to it.
+
+  The two deliberate behavioral differences are documented where they live:
+  sidechain taps keyed off a HIGHER-numbered track (see TrackTapBuf), and the
+  count-in handover, which now lands on a range boundary instead of mid-block
+  (see NextRangeLength).
+  --------------------------------------------------------------------------- }
 procedure FillBlock;
-
-  function SidechainLevelFor(ASourceTrack: Integer): Single;
-  begin
-    if (ASourceTrack < 0) or (ASourceTrack >= MaxTracks) then
-      Result := 0
-    else
-      Result := TrackTapLevel[ASourceTrack];
-  end;
-
 var
-  Frame, t, i, e, s: Integer;
-  GlobalFrame, ClipRelFrame, SwungPos: Int64;
-  Clip: PPlaybackClip;
-  L, R, TrackL, TrackR, RecL, RecR, ClickVal, CapL, CapR: Single;
-  PreFaderL, PreFaderR, SendTapL, SendTapR, SendAmount: Single;
-  SendL, SendR: array[0..Project.SendCount - 1] of Single;
   BeatFrames: Int64;
+  GlobalFrame: Int64;
+  ClipsBuilt: Boolean;
+  RangeStart, RangeLen, f: Integer;
 
-  { Sums one sounding clip into the current track accumulators (declared
-    after them so they are in scope). Shared by the active-list path and
-    the overflow fallback so the two can never drift apart in what they
-    mix. }
-  procedure MixClipInto(AClip: PPlaybackClip; AClipRelFrame: Int64);
+  { Runs ONE effect over a range of an L/R buffer pair. Hoists the sidechain
+    source resolution out of the frame loop; the per-frame ProcessEffect call
+    itself stays, since every effect in this engine is a serial recurrence
+    (biquads, envelope followers, delay lines) with no block form. }
+  procedure RunEffect(var AState: Effects.TEffectState;
+    const AEffect: Effects.TEffect; ABufL, ABufR: PSingle;
+    AStart, ACount: Integer);
   var
-    MonoSample: Single;
+    i, Src: Integer;
+    Tap: PSingle;
   begin
-    if AClip^.Channels = 1 then
+    Src := AEffect.SidechainSourceTrack;
+    if (Src >= 0) and (Src < MaxTracks) then
     begin
-      { ONE call, fanned out to both outputs. DetunedClipSample is by far
-        the most expensive thing in this loop (granular warp, the
-        overlapping-slice sum, interpolation) and is pure in its arguments,
-        so the two identical calls this replaced did all of that twice to
-        arrive at the same number - a flat 2x on every mono clip. }
-      MonoSample := DetunedClipSample(AClip, AClipRelFrame, 0) * AClip^.Gain;
-      TrackL := TrackL + MonoSample;
-      TrackR := TrackR + MonoSample;
+      Tap := TrackTapBuf[Src];
+      for i := AStart to AStart + ACount - 1 do
+        Effects.ProcessEffect(AState, AEffect, ABufL[i], ABufR[i],
+          ProjectSampleRate, Tap[i]);
     end
     else
+      for i := AStart to AStart + ACount - 1 do
+        Effects.ProcessEffect(AState, AEffect, ABufL[i], ABufR[i],
+          ProjectSampleRate, 0);
+  end;
+
+  { Sums one sounding clip across a range into ScratchL/R.
+
+    Carries its own copy of the transport position, advanced with exactly the
+    loop-wrap rule the tail bookkeeping below uses, so a block that crosses
+    the loop end reads the same source frames the frame-major engine did -
+    BuildActiveClips already admits clips around the loop point for that. }
+  procedure MixClipRange(AClip: PPlaybackClip; ASwung: Int64;
+    AStart, ACount: Integer);
+  var
+    i: Integer;
+    g, Rel: Int64;
+    Mono: Single;
+  begin
+    g := GlobalFrame;
+    for i := AStart to AStart + ACount - 1 do
     begin
-      TrackL := TrackL + DetunedClipSample(AClip, AClipRelFrame, 0) * AClip^.Gain;
-      TrackR := TrackR + DetunedClipSample(AClip, AClipRelFrame, 1) * AClip^.Gain;
+      Rel := g - ASwung;
+      if (Rel >= 0) and (Rel < AClip^.Length) then
+      begin
+        if AClip^.Channels = 1 then
+        begin
+          { ONE call, fanned out to both outputs. DetunedClipSample is by far
+            the most expensive thing in this loop (granular warp, the
+            overlapping-slice sum, interpolation) and is pure in its
+            arguments, so two identical calls would do all of that twice to
+            arrive at the same number - a flat 2x on every mono clip. }
+          Mono := DetunedClipSample(AClip, Rel, 0) * AClip^.Gain;
+          ScratchL[i] := ScratchL[i] + Mono;
+          ScratchR[i] := ScratchR[i] + Mono;
+        end
+        else
+        begin
+          ScratchL[i] := ScratchL[i] +
+            DetunedClipSample(AClip, Rel, 0) * AClip^.Gain;
+          ScratchR[i] := ScratchR[i] +
+            DetunedClipSample(AClip, Rel, 1) * AClip^.Gain;
+        end;
+      end;
+
+      { no Playing test: this is only ever reached from inside ProcessRange's
+        "if Playing" clip branch, and Playing cannot change during the track
+        pass - NextRangeLength guarantees it }
+      Inc(g);
+      if LoopActive and (g >= LoopEnd) then
+        g := LoopStart;
     end;
   end;
 
-begin
-  FillChar(MixBuffer^, BlockFrames * OutputChannels * SizeOf(Single), 0);
-  BeatFrames := Round((ProjectSampleRate * 60) / Project.TempoBPM);
-  GlobalFrame := Playhead;
-  if Playing then
-    BuildActiveClips(BeatFrames);
-
-  for Frame := 0 to BlockFrames - 1 do
+  { Mixes frames [AStart, AStart + ACount) of the block. Called once for a
+    normal block, twice when a count-in hands over inside it. }
+  procedure ProcessRange(AStart, ACount: Integer);
+  var
+    t, i, e, s, Last: Integer;
+    Clip: PPlaybackClip;
+    Swung: Int64;
+    Vol, Amount, aL, aR, ClickVal: Single;
+    Tap: PSingle;
+    NeedPreFade: Boolean;
   begin
-    L := 0;
-    R := 0;
-    RecL := 0;
-    RecR := 0;
-    for s := 0 to Project.SendCount - 1 do
+    Last := AStart + ACount - 1;
+
+    for i := AStart to Last do
     begin
-      SendL[s] := 0;
-      SendR[s] := 0;
+      MasterL[i] := 0;
+      MasterR[i] := 0;
     end;
-    { popped once per frame (not once per track) so every monitoring track
-      hears the identical live sample this frame, instead of each track
-      draining its own share of the ring - see PopCaptureFrame }
-    PopCaptureFrame(CapL, CapR);
+    for s := 0 to Project.SendCount - 1 do
+      for i := AStart to Last do
+      begin
+        SendBufL[s][i] := 0;
+        SendBufR[s][i] := 0;
+      end;
 
     for t := 0 to MaxTracks - 1 do
     begin
+      Tap := TrackTapBuf[t];
+
       if not Project.TrackEnabled[t] then
       begin
         { a muted track can't be the thing a kick hits - stop any
           ekSidechain keyed off it from ducking on a stale, frozen level }
-        TrackTapLevel[t] := 0;
+        for i := AStart to Last do
+          Tap[i] := 0;
         Continue;
       end;
 
-      TrackL := 0;
-      TrackR := 0;
+      for i := AStart to Last do
+      begin
+        ScratchL[i] := 0;
+        ScratchR[i] := 0;
+      end;
 
       if Playing then
       begin
@@ -1799,80 +1973,103 @@ begin
           for i := 0 to TrackClips[t].Count - 1 do
           begin
             Clip := @(TrackClips[t].Items[i]);
-            SwungPos := SwungPosition(Clip^.Position, Project.TrackSwingPercent[t],
+            Swung := SwungPosition(Clip^.Position, Project.TrackSwingPercent[t],
               Project.TrackSwingDivision[t], BeatFrames);
-            ClipRelFrame := GlobalFrame - SwungPos;
-            if (ClipRelFrame < 0) or (ClipRelFrame >= Clip^.Length) then
-              Continue;
-            MixClipInto(Clip, ClipRelFrame);
+            MixClipRange(Clip, Swung, AStart, ACount);
           end
         else
           { the common path: only clips BuildActiveClips found overlapping
             this block, with their swing already resolved }
           for i := 0 to ActiveClipCount[t] - 1 do
-          begin
-            Clip := @(TrackClips[t].Items[ActiveClipIdx[t][i]]);
-            ClipRelFrame := GlobalFrame - ActiveClipSwung[t][i];
-            if (ClipRelFrame < 0) or (ClipRelFrame >= Clip^.Length) then
-              Continue;
-            MixClipInto(Clip, ClipRelFrame);
-          end;
+            MixClipRange(@(TrackClips[t].Items[ActiveClipIdx[t][i]]),
+              ActiveClipSwung[t][i], AStart, ACount);
       end;
 
-      MixNoteVoice(LiveNotes[t], 1.0, TrackL, TrackR);
-      if FadingNotes[t].Active then
-      begin
-        MixNoteVoice(FadingNotes[t], FadingNotes[t].FadeGain, TrackL, TrackR);
-        FadingNotes[t].FadeGain := FadingNotes[t].FadeGain - FadingNotes[t].FadeStep;
-        if FadingNotes[t].FadeGain <= 0 then
-          FadingNotes[t].Active := False;
-      end;
+      { Both voices advance one frame per iteration and deactivate themselves
+        on the frame they run out, exactly as when this ran inside the frame
+        loop. Skipped wholesale when neither is sounding, which is the case
+        on nearly every track of nearly every block. }
+      if LiveNotes[t].Active or FadingNotes[t].Active then
+        for i := AStart to Last do
+        begin
+          MixNoteVoice(LiveNotes[t], 1.0, ScratchL[i], ScratchR[i]);
+          if FadingNotes[t].Active then
+          begin
+            MixNoteVoice(FadingNotes[t], FadingNotes[t].FadeGain,
+              ScratchL[i], ScratchR[i]);
+            FadingNotes[t].FadeGain := FadingNotes[t].FadeGain -
+              FadingNotes[t].FadeStep;
+            if FadingNotes[t].FadeGain <= 0 then
+              FadingNotes[t].Active := False;
+          end;
+        end;
 
       { input monitoring: mixes the live captured signal straight into this
         track's audible output with no playhead movement/recording required
         - independent of the record tap just below, so monitoring can stay
         on (or off) throughout a take with no change in what gets recorded }
       if Project.TrackIsInput[t] and Project.TrackMonitorEnabled[t] then
-      begin
-        TrackL := TrackL + CapL;
-        TrackR := TrackR + CapR;
-      end;
+        for i := AStart to Last do
+        begin
+          ScratchL[i] := ScratchL[i] + CapBufL[i];
+          ScratchR[i] := ScratchR[i] + CapBufR[i];
+        end;
 
-      if (RecordState = RecordStateRecording) and (t = RecordTrackIndex) then
+      { Record tap, taken here so a take is recorded DRY - before the insert
+        chain below, after monitoring.
+
+        Taken for the whole range whenever this is the armed track and the
+        recorder is live at all, without narrowing to RecordStateRecording:
+        the tail loop applies the per-frame RecordState gate when it writes.
+        The frame-major engine tested RecordStateRecording here and could
+        then flip it later in the same frame, which put one frame of silence
+        at the head of every count-in take. Testing "not Idle" is still
+        enough to skip the copy entirely when nothing is armed, since the
+        only transition into Recording is out of CountIn. }
+      if (t = RecordTrackIndex) and (RecordState <> RecordStateIdle) then
       begin
         if Project.TrackIsInput[t] then
-        begin
-          { tapped straight from the capture ring, not TrackL/TrackR - an
-            Input Track's take must be captured regardless of whether this
-            track's own "M" monitor toggle happens to be on, matching
-            regular tracks' "recorded dry" tap just below }
-          RecL := CapL;
-          RecR := CapR;
-        end
+          { an Input Track's take must be captured regardless of whether
+            this track's own "M" monitor toggle happens to be on, matching
+            regular tracks' dry tap }
+          for i := AStart to Last do
+          begin
+            RecTapL[i] := CapBufL[i];
+            RecTapR[i] := CapBufR[i];
+          end
         else
-        begin
-          RecL := TrackL;
-          RecR := TrackR;
-        end;
+          for i := AStart to Last do
+          begin
+            RecTapL[i] := ScratchL[i];
+            RecTapR[i] := ScratchR[i];
+          end;
       end;
 
-      { per-track insert effects chain - applied after the record tap, so a
-        take is recorded dry even if the track's monitored/played-back
-        output is being filtered/EQ'd. Entirely separate from the SP1200
+      { per-track insert effects chain. Entirely separate from the SP1200
         master-bus emulation, which runs once on the final mix. }
       for e := 0 to Project.TrackEffectCount[t] - 1 do
         if Project.TrackEffects[t][e].Kind <> Effects.ekNone then
-          Effects.ProcessEffect(TrackEffectState[t][e], Project.TrackEffects[t][e],
-            TrackL, TrackR, ProjectSampleRate,
-            SidechainLevelFor(Project.TrackEffects[t][e].SidechainSourceTrack));
+          RunEffect(TrackEffectState[t][e], Project.TrackEffects[t][e],
+            ScratchL, ScratchR, AStart, ACount);
 
       { Pre-fader send tap: taken here, after the inserts but before the
         fader below. That ordering is the whole reason pre-fader exists -
         pull a track's fader to nothing and its contribution to the bus
         (and so the reverb tail it is feeding) carries on regardless, which
-        is how a break dissolves into the wash instead of just stopping. }
-      PreFaderL := TrackL;
-      PreFaderR := TrackR;
+        is how a break dissolves into the wash instead of just stopping.
+        Only worth copying when some enabled send on this track is actually
+        pre-fader; post-fader sends read the faded buffer directly. }
+      NeedPreFade := False;
+      for s := 0 to Project.SendCount - 1 do
+        if Project.SendEnabled[s] and Project.TrackSendEnabled[t][s] and
+          Project.SendPreFader[s] then
+          NeedPreFade := True;
+      if NeedPreFade then
+        for i := AStart to Last do
+        begin
+          PreFadeL[i] := ScratchL[i];
+          PreFadeR[i] := ScratchR[i];
+        end;
 
       { The track fader. This used to be pre-multiplied into every clip's
         Gain by ArrangementView.PushTrackToEngine and into note gains by
@@ -1880,36 +2077,47 @@ begin
         left no point in the chain where a pre-fader anything could be
         tapped, and quietly meant a "recorded dry" take was in fact
         recorded through the fader. It is applied here now instead. }
-      TrackL := TrackL * Project.TrackVolume[t];
-      TrackR := TrackR * Project.TrackVolume[t];
+      Vol := Project.TrackVolume[t];
+      for i := AStart to Last do
+      begin
+        ScratchL[i] := ScratchL[i] * Vol;
+        ScratchR[i] := ScratchR[i] * Vol;
+      end;
 
       for s := 0 to Project.SendCount - 1 do
         if Project.SendEnabled[s] and Project.TrackSendEnabled[t][s] then
         begin
-          SendAmount := Project.TrackSendLevel[t][s];
+          Amount := Project.TrackSendLevel[t][s];
           if Project.SendPreFader[s] then
-          begin
-            SendL[s] := SendL[s] + PreFaderL * SendAmount;
-            SendR[s] := SendR[s] + PreFaderR * SendAmount;
-          end
+            for i := AStart to Last do
+            begin
+              SendBufL[s][i] := SendBufL[s][i] + PreFadeL[i] * Amount;
+              SendBufR[s][i] := SendBufR[s][i] + PreFadeR[i] * Amount;
+            end
           else
-          begin
-            SendL[s] := SendL[s] + TrackL * SendAmount;
-            SendR[s] := SendR[s] + TrackR * SendAmount;
-          end;
+            for i := AStart to Last do
+            begin
+              SendBufL[s][i] := SendBufL[s][i] + ScratchL[i] * Amount;
+              SendBufR[s][i] := SendBufR[s][i] + ScratchR[i] * Amount;
+            end;
         end;
 
-      { this track's final, post-insert-FX, post-fader level for the frame -
-        see TrackTapLevel's declaration for why a source track processed
-        later in this same "for t" pass reads one frame stale here, not
-        zero. }
-      if Abs(TrackL) > Abs(TrackR) then
-        TrackTapLevel[t] := Abs(TrackL)
-      else
-        TrackTapLevel[t] := Abs(TrackR);
-
-      L := L + TrackL;
-      R := R + TrackR;
+      { this track's final, post-insert-FX, post-fader level per frame - see
+        TrackTapBuf's declaration for what a sidechain keyed off a track
+        LATER in this same pass reads. Summed into the master in the same
+        pass, in track index order, which is what keeps the master sum
+        bit-identical to the frame-major engine's. }
+      for i := AStart to Last do
+      begin
+        aL := Abs(ScratchL[i]);
+        aR := Abs(ScratchR[i]);
+        if aL > aR then
+          Tap[i] := aL
+        else
+          Tap[i] := aR;
+        MasterL[i] := MasterL[i] + ScratchL[i];
+        MasterR[i] := MasterR[i] + ScratchR[i];
+      end;
     end;
 
     { Send-bus returns. Each bus runs its chain ONCE on the sum of every
@@ -1927,76 +2135,93 @@ begin
     begin
       if not Project.SendEnabled[s] then
         Continue;
-      SendTapL := SendL[s];
-      SendTapR := SendR[s];
       for e := 0 to Project.SendEffectCount[s] - 1 do
         if Project.SendEffects[s][e].Kind <> Effects.ekNone then
-          Effects.ProcessEffect(SendEffectState[s][e], Project.SendEffects[s][e],
-            SendTapL, SendTapR, ProjectSampleRate,
-            SidechainLevelFor(Project.SendEffects[s][e].SidechainSourceTrack));
-      L := L + SendTapL * Project.SendReturnLevel[s];
-      R := R + SendTapR * Project.SendReturnLevel[s];
+          RunEffect(SendEffectState[s][e], Project.SendEffects[s][e],
+            SendBufL[s], SendBufR[s], AStart, ACount);
+      Amount := Project.SendReturnLevel[s];
+      for i := AStart to Last do
+      begin
+        MasterL[i] := MasterL[i] + SendBufL[s][i] * Amount;
+        MasterR[i] := MasterR[i] + SendBufR[s][i] * Amount;
+      end;
     end;
 
-    { metronome count-in: 4 clicks spaced one beat apart (at the current
-      tempo), then hand off to recording }
-    if RecordState = RecordStateCountIn then
+    { Per-frame transport bookkeeping - the click voice, the recorder and
+      the playhead. Genuinely serial (each frame's state depends on the one
+      before), so this stays a frame loop; it is a handful of integer tests
+      per frame with no DSP in it. }
+    for i := AStart to Last do
     begin
-      if CountInFramesUntilNextBeat <= 0 then
+      { metronome count-in: 4 clicks spaced one beat apart (at the current
+        tempo), then hand off to recording }
+      if RecordState = RecordStateCountIn then
       begin
-        if CountInBeatsRemaining > 0 then
+        if CountInFramesUntilNextBeat <= 0 then
         begin
-          { plays this beat's click; recording starts a full beat after
-            the 4th one, not on the same frame as it - matching a normal
-            1-2-3-4 count-in where the take begins on the beat after "4" }
-          ClickPlayPos := 0;
-          Dec(CountInBeatsRemaining);
-          CountInFramesUntilNextBeat := BeatFrames;
+          if CountInBeatsRemaining > 0 then
+          begin
+            { plays this beat's click; recording starts a full beat after
+              the 4th one, not on the same frame as it - matching a normal
+              1-2-3-4 count-in where the take begins on the beat after "4" }
+            ClickPlayPos := 0;
+            Dec(CountInBeatsRemaining);
+            CountInFramesUntilNextBeat := BeatFrames;
+          end
+          else
+          begin
+            { NextRangeLength normally consumes this handover at a range
+              boundary, so the track pass above never runs at a transport
+              state the tail is about to change. Getting here would take a
+              beat shorter than one block (some thousands of BPM); handled
+              anyway rather than left to wedge the count-in. }
+            RecordState := RecordStateRecording;
+            RecordWritePos := 0;
+            Playing := True;
+          end;
         end
         else
-        begin
-          RecordState := RecordStateRecording;
-          RecordWritePos := 0;
-          { arrangement playback starts on the exact same frame as
-            recording, both from wherever the playhead already sits (it
-            hasn't moved since Playing was False throughout count-in) }
-          Playing := True;
-        end;
-      end
-      else
-        Dec(CountInFramesUntilNextBeat);
-    end;
+          Dec(CountInFramesUntilNextBeat);
+      end;
 
-    { tempo-aware metronome during normal playback - reuses the exact same
-      click sound/voice as the count-in above. The two never collide: this
-      only fires once Playing is True, and count-in only runs before Playing
-      becomes True. Driven off the absolute playback position (not a running
-      countdown) so it stays beat-aligned to frame 0 through seeks/loops
-      instead of drifting. }
-    if Playing and MetronomeEnabled and (ClickPlayPos < 0) and
-      (GlobalFrame mod BeatFrames = 0) then
-      ClickPlayPos := 0;
+      { tempo-aware metronome during normal playback - reuses the exact same
+        click sound/voice as the count-in above. The two never collide: this
+        only fires once Playing is True, and count-in only runs before Playing
+        becomes True. Driven off the absolute playback position (not a running
+        countdown) so it stays beat-aligned to frame 0 through seeks/loops
+        instead of drifting. }
+      if Playing and MetronomeEnabled and (ClickPlayPos < 0) and
+        (GlobalFrame mod BeatFrames = 0) then
+        ClickPlayPos := 0;
 
-    if (ClickPlayPos >= 0) and (ClickPlayPos < Length(ClickSamples)) then
-    begin
-      ClickVal := ClickSamples[ClickPlayPos];
-      L := L + ClickVal;
-      R := R + ClickVal;
-      Inc(ClickPlayPos);
-    end
-    else
-      ClickPlayPos := -1;
-
-    if RecordState = RecordStateRecording then
-    begin
-      if RecordWritePos < RecordCapacityFrames then
+      if (ClickPlayPos >= 0) and (ClickPlayPos < Length(ClickSamples)) then
       begin
-        RecordBuffer[RecordWritePos * 2] := RecL;
-        RecordBuffer[RecordWritePos * 2 + 1] := RecR;
-        Inc(RecordWritePos);
+        ClickVal := ClickSamples[ClickPlayPos];
+        MasterL[i] := MasterL[i] + ClickVal;
+        MasterR[i] := MasterR[i] + ClickVal;
+        Inc(ClickPlayPos);
       end
       else
-        RecordState := RecordStateIdle; { hit the cap - auto-stop }
+        ClickPlayPos := -1;
+
+      if RecordState = RecordStateRecording then
+      begin
+        if RecordWritePos < RecordCapacityFrames then
+        begin
+          RecordBuffer[RecordWritePos * 2] := RecTapL[i];
+          RecordBuffer[RecordWritePos * 2 + 1] := RecTapR[i];
+          Inc(RecordWritePos);
+        end
+        else
+          RecordState := RecordStateIdle; { hit the cap - auto-stop }
+      end;
+
+      if Playing then
+      begin
+        Inc(GlobalFrame);
+        if LoopActive and (GlobalFrame >= LoopEnd) then
+          GlobalFrame := LoopStart;
+      end;
     end;
 
     { master bus insert chain - applied to the summed mix after every track's
@@ -2005,20 +2230,84 @@ begin
       in TPlaybackThread.Execute on the whole finished block. }
     for e := 0 to Project.MasterEffectCount - 1 do
       if Project.MasterEffects[e].Kind <> Effects.ekNone then
-        Effects.ProcessEffect(MasterEffectState[e], Project.MasterEffects[e], L, R,
-          ProjectSampleRate, SidechainLevelFor(Project.MasterEffects[e].SidechainSourceTrack));
+        RunEffect(MasterEffectState[e], Project.MasterEffects[e],
+          MasterL, MasterR, AStart, ACount);
 
-    if L > 1.0 then L := 1.0 else if L < -1.0 then L := -1.0;
-    if R > 1.0 then R := 1.0 else if R < -1.0 then R := -1.0;
-    MixBuffer[Frame * OutputChannels] := L;
-    MixBuffer[Frame * OutputChannels + 1] := R;
-
-    if Playing then
+    for i := AStart to Last do
     begin
-      Inc(GlobalFrame);
-      if LoopActive and (GlobalFrame >= LoopEnd) then
-        GlobalFrame := LoopStart;
+      if MasterL[i] > 1.0 then
+        MasterL[i] := 1.0
+      else if MasterL[i] < -1.0 then
+        MasterL[i] := -1.0;
+      if MasterR[i] > 1.0 then
+        MasterR[i] := 1.0
+      else if MasterR[i] < -1.0 then
+        MasterR[i] := -1.0;
+      MixBuffer[i * OutputChannels] := MasterL[i];
+      MixBuffer[i * OutputChannels + 1] := MasterR[i];
     end;
+  end;
+
+  { How many frames from AStart may be mixed at one consistent transport
+    state, and applies any handover that falls exactly on AStart.
+
+    Only one thing changes Playing/RecordState mid-block: the count-in's last
+    beat elapsing. Frame-major could absorb that anywhere, because it re-read
+    both every frame; block-major decides them once per range, so the range
+    has to END where the handover is due and the NEXT one starts with it
+    already applied. Everything else the tail loop mutates (the click voice,
+    the record write position, the cap auto-stop) is invisible to the track
+    pass and needs no split. }
+  function NextRangeLength(AStart: Integer): Integer;
+  begin
+    Result := BlockFrames - AStart;
+    if (RecordState <> RecordStateCountIn) or (CountInBeatsRemaining > 0) then
+      Exit;
+
+    if CountInFramesUntilNextBeat <= 0 then
+    begin
+      RecordState := RecordStateRecording;
+      RecordWritePos := 0;
+      { arrangement playback starts on the exact same frame as recording,
+        both from wherever the playhead already sits (it hasn't moved since
+        Playing was False throughout count-in) }
+      Playing := True;
+    end
+    else if CountInFramesUntilNextBeat < Result then
+      Result := CountInFramesUntilNextBeat;
+  end;
+
+begin
+  BeatFrames := Round((ProjectSampleRate * 60) / Project.TempoBPM);
+  GlobalFrame := Playhead;
+  ClipsBuilt := False;
+
+  FillChar(MixBuffer^, BlockFrames * OutputChannels * SizeOf(Single), 0);
+  { so a block where nothing is armed, or the armed track is muted, records
+    silence rather than the previous block's tap }
+  FillChar(RecTapL^, BlockFrames * SizeOf(Single), 0);
+  FillChar(RecTapR^, BlockFrames * SizeOf(Single), 0);
+
+  { drained once for the whole block, up front, so every monitoring track
+    hears the identical live sample on a given frame instead of each draining
+    its own share of the ring - see PopCaptureFrame }
+  for f := 0 to BlockFrames - 1 do
+    PopCaptureFrame(CapBufL[f], CapBufR[f]);
+
+  RangeStart := 0;
+  while RangeStart < BlockFrames do
+  begin
+    RangeLen := NextRangeLength(RangeStart);
+    if Playing and not ClipsBuilt then
+    begin
+      { once per block, as before - but also right after a count-in hands
+        over partway through one, where the frame-major engine went on using
+        whatever active list the last playing block happened to leave behind }
+      BuildActiveClips(BeatFrames);
+      ClipsBuilt := True;
+    end;
+    ProcessRange(RangeStart, RangeLen);
+    Inc(RangeStart, RangeLen);
   end;
 
   if Playing then
@@ -2027,6 +2316,11 @@ end;
 
 procedure TPlaybackThread.Execute;
 begin
+  { MXCSR is per-thread, so this has to be set here rather than at start-up -
+    see DenormalGuard. This is the thread that runs every effect's feedback
+    path, so it is the one that matters most. }
+  EnableFlushDenormals;
+
   while not Terminated do
   begin
     DrainCommands;
@@ -2070,6 +2364,7 @@ procedure TCaptureThread.Execute;
 var
   TempBuf: PSingle;
 begin
+  EnableFlushDenormals; { per-thread - see DenormalGuard }
   GetMem(TempBuf, InputBufferFrames * OutputChannels * SizeOf(Single));
   try
     while not Terminated do
@@ -2185,12 +2480,14 @@ begin
     TrackClips[i].Count := 0;
     LiveNotes[i].Active := False;
     FadingNotes[i].Active := False;
-    TrackTapLevel[i] := 0;
   end;
   AudioEngineResetEffectState;
 
   BlockFrames := DefaultBlockFrames;
   GetMem(MixBuffer, BlockFrames * OutputChannels * SizeOf(Single));
+  { zeroes the sidechain tap buffers too, which the mixer reads across block
+    boundaries - see TrackTapBuf }
+  AllocMixScratch;
 
   RecordCapacityFrames := MaxRecordSeconds * ProjectSampleRate;
   GetMem(RecordBuffer, RecordCapacityFrames * OutputChannels * SizeOf(Single));
@@ -2246,6 +2543,7 @@ begin
     FreeMem(MixBuffer);
     MixBuffer := nil;
   end;
+  FreeMixScratch;
 
   if RecordBuffer <> nil then
   begin
@@ -2475,8 +2773,13 @@ begin
   Backend.Close;
 
   FreeMem(MixBuffer);
+  FreeMixScratch;
   BlockFrames := ANewBufferSize;
   GetMem(MixBuffer, BlockFrames * OutputChannels * SizeOf(Single));
+  { every block-major scratch buffer is BlockFrames long, so they all have to
+    be resized with it - safe here only because the playback thread is fully
+    stopped above }
+  AllocMixScratch;
 
   Backend.Open(ProjectSampleRate, OutputChannels, BlockFrames);
 

@@ -92,7 +92,7 @@ implementation
 uses
   SysUtils, IniFiles, FileUtil, SampleTypes, Project, WavDecoder,
   AudioEngine, Resample, Waveform, SP1200, TarArchive, Effects, Quadraverb,
-  Alesis3630, BossFZ2, ThreadUtil;
+  Alesis3630, BossFZ2, ThreadUtil, DenormalGuard;
 
 constructor TProjectLoadThread.Create(const APath: string; AOnTerminate: TNotifyEvent);
 begin
@@ -130,6 +130,10 @@ end;
 
 procedure TProjectRenderThread.Execute;
 begin
+  { same per-thread denormal mode the realtime playback thread runs in, so a
+    bounce can't diverge from what was heard live - and so a long reverb tail
+    doesn't make the render itself crawl. See DenormalGuard. }
+  EnableFlushDenormals;
   FSuccess := RenderProjectToWav(FPath);
 end;
 
