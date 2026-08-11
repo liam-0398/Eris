@@ -65,6 +65,15 @@ var
   SamplePeriods: array of Integer;
   TempoBPM: Single = DefaultTempoBPM;
 
+  { True while the open project is a standalone (.ers) one - every sample it
+    references lives inside its own archive rather than out on disk, so it
+    survives the kits folder moving or the network drive being down. Set by
+    LoadProject/SaveProject from the file being read/written, never by the
+    editing code; it exists so the UI can say so and so Save keeps writing
+    the same kind of file it opened. A project only ever becomes standalone,
+    never stops being one, unless the user explicitly saves it back to .er. }
+  Standalone: Boolean = False;
+
   { tracks that have been deleted are marked as inactive; used to maintain
     track numbering so deleted track numbers are never reused }
   TrackActive: array[0..MaxTracks - 1] of Boolean;
@@ -776,6 +785,7 @@ begin
   for i := 0 to Effects.MaxEffectsPerTrack - 1 do
     MasterEffects[i].Kind := Effects.ekNone;
   TempoBPM := DefaultTempoBPM;
+  Standalone := False;
 end;
 
 function ClipSourceLength(const AClip: TClip): Int64;

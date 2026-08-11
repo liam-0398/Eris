@@ -83,9 +83,28 @@ type
     property SampleID: Integer read FSampleID;
   end;
 
+const
+  { normal project - the ini references samples by their path out on disk }
+  ProjectExt = '.er';
+  { "Eris Standalone Project" - same archive, except every sample the project
+    uses is copied INTO it, so the file is self-contained and opens with its
+    audio intact wherever it ends up. Which of the two a save produces is
+    decided by the extension of the path being written, so Save (which reuses
+    the open project's own path) keeps writing whatever kind was opened, with
+    nothing to confirm. }
+  StandaloneProjectExt = '.ers';
+
+{ True for a path this build would write as a standalone bundle }
+function IsStandalonePath(const APath: string): Boolean;
+
 function SaveProject(const APath: string): Boolean;
 function LoadProject(const APath: string): Boolean;
 function RenderProjectToWav(const AOutputPath: string): Boolean;
+
+{ Drops the extracted copy of the open standalone project kept alive by
+  LoadProject (see FBundleDir) - call when the project it belongs to is
+  abandoned without another being loaded, i.e. File > New. }
+procedure ReleaseBundleDir;
 
 implementation
 
@@ -111,6 +130,37 @@ begin
   {$ELSE}
   Result := RenameFile(AFrom, ATo);
   {$ENDIF}
+end;
+
+var
+  { Where the open standalone project was unpacked, kept alive for as long as
+    it stays open instead of being deleted at the end of the load like a
+    normal project's scratch copy is.
+
+    It is the only surviving copy of that project's audio as FILES: a
+    standalone bundle stores each sample under a bare name inside itself, so
+    once the load finishes, Project.SamplePaths holds names that resolve
+    nowhere on disk. Without this, the next Save would have nothing to copy
+    and would fall back to re-encoding each sample out of the pool - which
+    still saves a valid standalone project, but writes 16-bit
+    canonical-rate WAVs (see WavWriteBegin/ResampleToCanonical), so a
+    24-bit kit would quietly lose its depth on the first round trip.
+    Holding the extracted copy lets Save byte-copy the originals instead,
+    however many times the project is saved and reopened.
+
+    '' when no standalone project is open. }
+  FBundleDir: string = '';
+
+function IsStandalonePath(const APath: string): Boolean;
+begin
+  Result := LowerCase(ExtractFileExt(APath)) = StandaloneProjectExt;
+end;
+
+procedure ReleaseBundleDir;
+begin
+  if (FBundleDir <> '') and DirectoryExists(FBundleDir) then
+    DeleteDirectory(FBundleDir, False);
+  FBundleDir := '';
 end;
 
 constructor TProjectLoadThread.Create(const APath: string; AOnTerminate: TNotifyEvent);
@@ -545,17 +595,77 @@ begin
   end;
 end;
 
+{ Where sample i's audio can be read as a file right now, or '' if it can't
+  be. The stored path if it still resolves, otherwise the same name inside
+  the extracted copy of the standalone bundle this project was opened from -
+  which is where it lives after such a project is loaded (see FBundleDir). }
+function ResolveSampleSource(AIndex: Integer): string;
+begin
+  Result := Project.SamplePaths[AIndex];
+  if Result = '' then
+    Exit;
+  if FileExists(Result) then
+    Exit;
+  { only a bare name can have come out of a bundle, and only that can be
+    joined to one - a stale absolute path from some other machine must not
+    be turned into a bundle-relative lookup that happens to hit }
+  if (FBundleDir <> '') and (ExtractFilePath(Result) = '') then
+  begin
+    Result := IncludeTrailingPathDelimiter(FBundleDir) + Result;
+    if FileExists(Result) then
+      Exit;
+  end;
+  Result := '';
+end;
+
+function CopyFileTo(const ASource, ADest: string): Boolean;
+var
+  Src, Dst: TFileStream;
+begin
+  Result := False;
+  try
+    Src := TFileStream.Create(ASource, fmOpenRead or fmShareDenyNone);
+    try
+      Dst := TFileStream.Create(ADest, fmCreate);
+      try
+        Dst.CopyFrom(Src, Src.Size);
+        Result := True;
+      finally
+        Dst.Free;
+      end;
+    finally
+      Src.Free;
+    end;
+  except
+    { an unreadable source or a full disk is not fatal to the save - the
+      caller falls back to writing the sample out of the pool instead }
+    Result := False;
+  end;
+end;
+
 function SaveProject(const APath: string): Boolean;
 var
   Dir, IniPath, Section, Prefix, EmbeddedName, TmpPath, StoredPath: string;
+  SourcePath: string;
   Ini: TIniFile;
-  t, i, e: Integer;
+  t, i, e, j: Integer;
+  { .ers rather than .er - see StandaloneProjectExt. Decided once, here, from
+    the path being written, so Save and Save As go through exactly the same
+    logic and neither needs to ask the user anything. }
+  Standalone: Boolean;
+  { what each pool slot ended up stored as, so a sample used by two slots is
+    copied into the bundle once rather than twice }
+  Stored: array of string;
+  { the source each of those came from, for that same comparison - two slots
+    are the same file only if they resolved to the same place }
+  Sources: array of string;
   { every track's packed clip text, kept so the cache written below can be
     stamped with a hash of exactly the text that went into the ini }
   PackedText: array of string;
   Cache: TProjectCacheData;
 begin
   Result := False;
+  Standalone := IsStandalonePath(APath);
 
   { build the bundle in a scratch directory, then pack it into a single
     .er tar file - a real file (not a directory) is what makes a standard
@@ -581,6 +691,10 @@ begin
     Ini.WriteFloat('Project', 'Tempo', Project.TempoBPM);
     Ini.WriteInteger('Project', 'TrackCount', Project.TrackCount);
     Ini.WriteBool('Project', 'SP1200Enabled', AudioEngineGetSP1200Enabled);
+    { recorded so a bundle still says what it is after being renamed, and so
+      the UI can show it - what the save actually DOES is driven by the
+      extension above, not by this key }
+    Ini.WriteBool('Project', 'Standalone', Standalone);
 
     Ini.WriteInteger('Master', 'EffectCount', Project.MasterEffectCount);
     for e := 0 to Project.MasterEffectCount - 1 do
@@ -602,6 +716,8 @@ begin
 
     Ini.WriteInteger('Samples', 'Count', Length(Project.SamplePool));
     SetLength(Cache.Samples, Length(Project.SamplePool));
+    SetLength(Stored, Length(Project.SamplePool));
+    SetLength(Sources, Length(Project.SamplePool));
     for i := 0 to High(Project.SamplePool) do
     begin
       { written unconditionally so a sample's display name (e.g. a
@@ -615,22 +731,64 @@ begin
         not by name). }
       Ini.WriteString('Samples', 'Name' + IntToStr(i), Project.SampleNames[i]);
 
-      if not FileExists(Project.SamplePaths[i]) then
+      { A standalone save embeds EVERY sample; a normal one embeds only those
+        with no file left to point at. Both end at the same place - a name
+        inside this bundle, which LoadProject resolves against the bundle
+        before trying it as an absolute path - so the two kinds of project
+        differ only in how much they carry, not in format. That is what lets
+        a sample added to an .ers today be packed in by the very next save
+        with no extra bookkeeping: the decision is re-made per sample, per
+        save, from the path being written. }
+      SourcePath := ResolveSampleSource(i);
+      Sources[i] := SourcePath;
+
+      if (not Standalone) and FileExists(Project.SamplePaths[i]) then
       begin
-        { no real source file to reference - either a recorded clip (never
-          loaded from disk, SamplePaths is '') or a sample that came from a
-          previously embedded recording (a bare filename from an earlier
-          bundle, not a standalone path). Either way, embed its audio as a
-          real WAV right inside THIS bundle instead of writing a path that
-          resolves to nothing once the old bundle is gone. }
+        { a normal project just references it where it sits }
+        StoredPath := Project.SamplePaths[i];
+      end
+      else if SourcePath <> '' then
+      begin
+        { copy the file in BYTE FOR BYTE rather than re-encoding it out of
+          the pool: the pool is 32-bit float resampled to the engine's rate
+          (ResampleToCanonical) and EncodeWav writes 16-bit, so re-encoding a
+          24-bit or 96k source would permanently bake a conversion into the
+          archive. Copying also skips the encode entirely, and keeps the
+          original extension so the right decoder is picked on load. }
+        StoredPath := '';
+        for j := 0 to i - 1 do
+          if (Sources[j] <> '') and (Sources[j] = SourcePath) then
+          begin
+            { the same file backing two pool slots - one copy, two references }
+            StoredPath := Stored[j];
+            Break;
+          end;
+        if StoredPath = '' then
+        begin
+          EmbeddedName := 'sample' + IntToStr(i) +
+            LowerCase(ExtractFileExt(SourcePath));
+          if CopyFileTo(SourcePath, IncludeTrailingPathDelimiter(Dir) + EmbeddedName) then
+            StoredPath := EmbeddedName;
+        end;
+      end
+      else
+        StoredPath := '';
+
+      if StoredPath = '' then
+      begin
+        { nothing readable to copy - either a recorded clip that was never a
+          file at all (SamplePaths is ''), or a source that has since gone
+          missing, or a copy that failed. Write the audio the pool is holding
+          out as a real WAV instead, so the bundle still carries it rather
+          than a path that resolves to nothing. }
         EmbeddedName := 'recorded' + IntToStr(i) + '.wav';
         EncodeWav(IncludeTrailingPathDelimiter(Dir) + EmbeddedName,
           Project.SamplePool[i].Data, Project.SamplePool[i].FrameCount,
           Project.SamplePool[i].Channels, Project.SamplePool[i].SampleRate);
         StoredPath := EmbeddedName;
-      end
-      else
-        StoredPath := Project.SamplePaths[i];
+      end;
+
+      Stored[i] := StoredPath;
       Ini.WriteString('Samples', 'Path' + IntToStr(i), StoredPath);
 
       { the derived analysis this pool slot already holds, banked for the
@@ -738,6 +896,12 @@ begin
     Result := False;
   end;
   DeleteDirectory(Dir, False);
+
+  { the project in memory is now whichever kind was just written - so Save
+    As from .er to .ers makes the open project standalone from here on, and
+    the title bar can say so }
+  if Result then
+    Project.Standalone := Standalone;
 end;
 
 { decode + peak/transient analysis is pure CPU+file-I/O work with no shared
@@ -938,16 +1102,25 @@ var
   SampleJobs: TSampleLoadJobArray;
   Cache: TProjectCacheData;
   HaveCache, UseCachedClips, AllTracksPacked: Boolean;
+  { whether the bundle being read is a standalone one, and so whether the
+    unpacked copy of it below is kept alive after this returns }
+  Standalone, Unpacked: Boolean;
+  KeepDir: string;
   { each track's ClipsPacked text, parsed after the track loop so the cache's
     stamp can be checked against all of it first }
   PackedText: array of string;
 begin
   Result := False;
 
+  { scratch only, and deliberately NOT the directory a standalone project's
+    unpacked copy ends up living in (that gets its own name below) - so
+    wiping it here can never destroy the audio backing a project that is
+    already open, however this load then goes }
   Dir := IncludeTrailingPathDelimiter(GetTempDir(False)) + 'eris_load_tmp';
   if DirectoryExists(Dir) then
     DeleteDirectory(Dir, False);
 
+  Unpacked := False;
   if DirectoryExists(APath) then
     { backward compatible with older projects saved as a loose directory
       bundle rather than a packed .er tar file }
@@ -956,6 +1129,7 @@ begin
   begin
     if not ExtractTarToDirectory(APath, Dir) then
       Exit;
+    Unpacked := True;
   end
   else
     Exit;
@@ -981,6 +1155,15 @@ begin
     else if Project.TrackCount > Project.MaxTracks then
       Project.TrackCount := Project.MaxTracks;
     AudioEngineSetSP1200Enabled(Ini.ReadBool('Project', 'SP1200Enabled', False));
+
+    { the key is what a standalone bundle says about itself; the extension is
+      the fallback for one that predates the key or was renamed. Either way
+      this only decides whether the unpacked copy is KEPT below - the samples
+      load from wherever their stored paths resolve regardless, which is why
+      both kinds of project open through this one path with nothing special
+      about either. }
+    Standalone := Ini.ReadBool('Project', 'Standalone', IsStandalonePath(APath));
+    Project.Standalone := Standalone;
 
     Project.MasterEffectCount := Ini.ReadInteger('Master', 'EffectCount', 0);
     if Project.MasterEffectCount > Effects.MaxEffectsPerTrack then
@@ -1195,7 +1378,41 @@ begin
     Ini.Free;
   end;
 
-  if not DirectoryExists(APath) then
+  { Whatever project was open is gone, so the unpacked copy held for ITS sake
+    must go too - and must go before the new one is kept, because a bundle's
+    samples are stored under bare names: leaving the old directory in place
+    would let a bare name belonging to this project resolve inside the
+    previous project's bundle and pick up the wrong audio entirely.
+    Deliberately not done on the failure paths above, which leave the open
+    project untouched and so must leave its bundle alone as well. }
+  if Result then
+    ReleaseBundleDir;
+
+  if not Unpacked then
+    { loaded in place from a loose directory - no scratch copy to keep or
+      delete, and its samples are already where they'll be at save time }
+    Exit;
+
+  { A standalone project's samples exist ONLY inside the bundle, so throwing
+    the unpacked copy away here would leave the pool's paths resolving
+    nowhere - see FBundleDir for what that would cost the next save. }
+  if Result and Standalone then
+  begin
+    KeepDir := IncludeTrailingPathDelimiter(GetTempDir(False)) +
+      'eris_bundle_' + IntToStr(GetProcessID);
+    if DirectoryExists(KeepDir) then
+      DeleteDirectory(KeepDir, False);
+    { a rename within one filesystem, not a copy of every sample. Moving it
+      off the fixed scratch name is the whole point: that name is wiped at
+      the START of every load, including one that then fails and leaves this
+      project open. If the rename somehow fails, the scratch name still
+      holds the right files, so keep it rather than lose the audio. }
+    if RenameFile(Dir, KeepDir) then
+      FBundleDir := KeepDir
+    else
+      FBundleDir := Dir;
+  end
+  else
     DeleteDirectory(Dir, False);
 end;
 
@@ -1586,5 +1803,12 @@ begin
       FreeMem(MasterBuf);
   end;
 end;
+
+finalization
+  { a standalone project's unpacked copy is as large as its audio, so it is
+    given back on the way out rather than left in the temp directory. A hard
+    crash still leaks one such directory (named for the process that made
+    it), which is why it lives under GetTempDir in the first place. }
+  ReleaseBundleDir;
 
 end.

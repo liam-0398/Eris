@@ -1126,7 +1126,13 @@ begin
   if FCurrentProjectPath = '' then
     Caption := 'Eris'
   else
+  begin
     Caption := 'Eris - ' + ChangeFileExt(ExtractFileName(FCurrentProjectPath), '');
+    { worth saying outright: it is the difference between a project that
+      needs the kits folder to be there and one that doesn't }
+    if Project.Standalone then
+      Caption := Caption + ' [standalone]';
+  end;
 end;
 
 { Blocks until the audio thread has actually acted on a queued stop - see the
@@ -1179,6 +1185,10 @@ begin
   end;
   AudioEngineInvalidateGrainCache;
   Project.NewProject;
+  { the unpacked copy of a standalone project is kept alive only for as long
+    as that project is open, and File > New is the one way to close one
+    without opening another in its place (LoadProject releases it itself) }
+  ReleaseBundleDir;
   { NewProject clears the effect CHAINS, but the engine's live effect state -
     reverb tails, delay lines, filter memory - belongs to the audio engine and
     survived the stop above, so the new project would otherwise start by
@@ -1203,7 +1213,12 @@ begin
   Dlg := TOpenDialog.Create(Self);
   try
     Dlg.Title := 'Open Eris Project';
-    Dlg.Filter := 'Eris Project (*.er)|*.er';
+    { one entry covering both kinds, because opening them is the same
+      operation - LoadProject tells them apart from the bundle's own contents,
+      not from what was picked here }
+    Dlg.Filter := 'Eris Project (*.er, *.ers)|*.er;*.ers|' +
+      'Eris Project (*.er)|*.er|' +
+      'Eris Standalone Project (*.ers)|*.ers';
     if not Dlg.Execute then
       Exit;
 
@@ -1260,21 +1275,44 @@ end;
 procedure TForm1.FileSaveAsClick(Sender: TObject);
 var
   Dlg: TSaveDialog;
-  Path: string;
+  Path, Ext: string;
 begin
   if FBackgroundBusy then
     Exit;
   Dlg := TSaveDialog.Create(Self);
   try
     Dlg.Title := 'Save Eris Project As';
-    Dlg.Filter := 'Eris Project (*.er)|*.er';
-    Dlg.DefaultExt := '.er';
+    { the file type IS the choice - a standalone project is just this same
+      bundle with every sample copied inside it, so picking the second entry
+      is all there is to making one. Nothing else about saving changes, here
+      or afterwards. }
+    Dlg.Filter := 'Eris Project (*.er)|*.er|' +
+      'Eris Standalone Project - samples included (*.ers)|*.ers';
+    { a project that is already standalone offers to stay that way }
+    if Project.Standalone then
+      Dlg.FilterIndex := 2
+    else
+      Dlg.FilterIndex := 1;
+    if Dlg.FilterIndex = 2 then
+      Dlg.DefaultExt := StandaloneProjectExt
+    else
+      Dlg.DefaultExt := ProjectExt;
     if not Dlg.Execute then
       Exit;
 
     Path := Dlg.FileName;
-    if LowerCase(ExtractFileExt(Path)) <> '.er' then
-      Path := Path + '.er';
+    Ext := LowerCase(ExtractFileExt(Path));
+    { an extension typed by hand wins - it says what the user wants as
+      plainly as the filter does, and SaveProject reads the same extension
+      to decide what to write, so honouring it here is what keeps the name
+      and the contents from disagreeing }
+    if (Ext <> ProjectExt) and (Ext <> StandaloneProjectExt) then
+    begin
+      if Dlg.FilterIndex = 2 then
+        Path := Path + StandaloneProjectExt
+      else
+        Path := Path + ProjectExt;
+    end;
 
     StartProjectSave(Path);
   finally
