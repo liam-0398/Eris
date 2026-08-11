@@ -1842,6 +1842,7 @@ procedure BuildActiveClips(ABeatFrames: Int64);
 var
   t, i, n: Integer;
   sp: Int64;
+  SoloActive: Boolean;
   WinAStart, WinAEnd, WinBStart, WinBEnd: Int64;
 
   function Overlaps(ASwung, ALength: Int64): Boolean;
@@ -1865,11 +1866,13 @@ begin
     WinBEnd := LoopStart + BlockFrames;
   end;
 
+  SoloActive := Project.AnyTrackSoloed;
+
   for t := 0 to MaxTracks - 1 do
   begin
     ActiveClipCount[t] := 0;
     ActiveClipOverflow[t] := False;
-    if not Project.TrackEnabled[t] then
+    if not Project.TrackAudible(t, SoloActive) then
       Continue;
 
     n := 0;
@@ -2020,9 +2023,12 @@ var
     Swung: Int64;
     Vol, Amount, ClickVal: Single;
     Tap: PSingle;
-    NeedPreFade: Boolean;
+    NeedPreFade, SoloActive: Boolean;
   begin
     Last := AStart + ACount - 1;
+    { hoisted out of the track loop below like every other loop-invariant
+      here - solo can't change part way through a block }
+    SoloActive := Project.AnyTrackSoloed;
 
     ZeroBytes := ACount * SizeOf(Single);
 
@@ -2038,10 +2044,12 @@ var
     begin
       Tap := TrackTapBuf[t];
 
-      if not Project.TrackEnabled[t] then
+      if not Project.TrackAudible(t, SoloActive) then
       begin
         { a muted track can't be the thing a kick hits - stop any
-          ekSidechain keyed off it from ducking on a stale, frozen level }
+          ekSidechain keyed off it from ducking on a stale, frozen level.
+          A track silenced by someone else's solo is muted in exactly this
+          sense, so it takes the same path. }
         FillChar(Tap[AStart], ZeroBytes, 0);
         Continue;
       end;

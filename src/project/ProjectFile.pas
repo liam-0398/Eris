@@ -660,6 +660,7 @@ begin
       Ini.WriteFloat(Section, 'InstrumentGainDb', Project.TrackInstrumentGainDb[t]);
       Ini.WriteFloat(Section, 'Volume', Project.TrackVolume[t]);
       Ini.WriteBool(Section, 'Enabled', Project.TrackEnabled[t]);
+      Ini.WriteBool(Section, 'Solo', Project.TrackSolo[t]);
       Ini.WriteInt64(Section, 'InstrumentStart', Project.TrackInstrumentStart[t]);
       Ini.WriteInt64(Section, 'InstrumentEnd', Project.TrackInstrumentEnd[t]);
       Ini.WriteFloat(Section, 'SwingPercent', Project.TrackSwingPercent[t]);
@@ -1075,6 +1076,9 @@ begin
       Project.TrackInstrumentGainDb[t] := Ini.ReadFloat(Section, 'InstrumentGainDb', 0);
       Project.TrackVolume[t] := Ini.ReadFloat(Section, 'Volume', 1.0);
       Project.TrackEnabled[t] := Ini.ReadBool(Section, 'Enabled', True);
+      { absent in projects written before solo existed - those load unsoloed,
+        which is the state in which solo changes nothing }
+      Project.TrackSolo[t] := Ini.ReadBool(Section, 'Solo', False);
       Project.TrackSwingPercent[t] := Ini.ReadFloat(Section, 'SwingPercent', 50);
       Project.TrackSwingDivision[t] := Ini.ReadInteger(Section, 'SwingDivision', 16);
       Project.TrackIsInput[t] := Ini.ReadBool(Section, 'IsInput', False);
@@ -1239,6 +1243,10 @@ var
   BlockStart, BlockLen, FirstAbs, LastAbs, AbsFrame, ClipFrame: Int64;
   W: TWavWriter;
   WavStarted: Boolean;
+  { the whole render is one instant as far as solo is concerned - it can't be
+    toggled while it runs - so this is read once and every track gate below
+    goes through Project.TrackAudible with it }
+  SoloActive: Boolean;
 
   { Offline equivalent of AudioEngine.FillBlock's SidechainLevelFor - reads
     straight off the source track's buffer at the current frame rather than
@@ -1277,11 +1285,12 @@ var
 
 begin
   Result := False;
+  SoloActive := Project.AnyTrackSoloed;
   RenderBeatFrames := Round((AudioEngine.ProjectSampleRate * 60) / Project.TempoBPM);
   ProjectLengthFrames := 0;
   for t := 0 to Project.TrackCount - 1 do
   begin
-    if not Project.TrackEnabled[t] then
+    if not Project.TrackAudible(t, SoloActive) then
       Continue;
     for i := 0 to High(Project.Tracks[t].Clips) do
     begin
@@ -1307,7 +1316,7 @@ begin
       if Project.SendEnabled[sIdx] then
         GetMem(SendBuffers[sIdx], RenderBlockFrames * OutChannels * SizeOf(Single));
     for t := 0 to Project.TrackCount - 1 do
-      if Project.TrackEnabled[t] then
+      if Project.TrackAudible(t, SoloActive) then
         GetMem(TrackBuffers[t], RenderBlockFrames * OutChannels * SizeOf(Single));
 
     SetLength(TrackEffectState, Project.MaxTracks, Effects.MaxEffectsPerTrack);
@@ -1350,7 +1359,7 @@ begin
         raw pre-FX audio, exactly as it did when this was whole-timeline. }
       for t := 0 to Project.TrackCount - 1 do
       begin
-        if not Project.TrackEnabled[t] then
+        if not Project.TrackAudible(t, SoloActive) then
           Continue;
 
         FillChar(TrackBuffers[t]^, BlockLen * OutChannels * SizeOf(Single), 0);
@@ -1436,7 +1445,7 @@ begin
 
       for t := 0 to Project.TrackCount - 1 do
       begin
-        if not Project.TrackEnabled[t] then
+        if not Project.TrackAudible(t, SoloActive) then
           Continue;
 
         if Project.TrackEffectCount[t] > 0 then

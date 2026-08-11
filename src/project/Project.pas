@@ -90,6 +90,14 @@ var
   { simple mute toggle, shown on the track header in the arrangement view }
   TrackEnabled: array[0..MaxTracks - 1] of Boolean;
 
+  { solo, the button immediately left of the mute on the track header. Any
+    number of tracks can be soloed at once; while at least one is, every
+    track that isn't soloed is silenced as if muted. Solo never clears a
+    track's own mute, so a muted track stays muted even when soloed - see
+    TrackAudible, which is the single test the mixer and the offline bounce
+    both go through. }
+  TrackSolo: array[0..MaxTracks - 1] of Boolean;
+
   { Input Track: records from the live capture device (ALSA line-in for now)
     instead of from its own keyboard-played/timeline audio - see AudioEngine's
     RecL/RecR record tap and the "M" input-monitor button on the track header.
@@ -195,6 +203,17 @@ function ClipSourceLength(const AClip: TClip): Int64;
 function BusToSendIndex(ATarget: Integer): Integer;
 function SendIndexToBus(ASendIndex: Integer): Integer;
 
+{ True while any track has solo engaged, i.e. while solo is doing anything
+  at all. Callers in the audio path hoist this out of their track loop - it
+  can't change within a block - rather than paying for the scan per track. }
+function AnyTrackSoloed: Boolean;
+{ Whether this track should be heard: not muted, and either soloed or with
+  no solo active anywhere. The one place mute and solo are combined; every
+  mixing path (realtime and bounce) gates on this rather than TrackEnabled.
+  ASoloActive is AnyTrackSoloed, passed in so a loop over tracks evaluates
+  it once. }
+function TrackAudible(ATrackIndex: Integer; ASoloActive: Boolean): Boolean;
+
 procedure PushUndoSnapshot(ATrackIndex: Integer);
 function PopUndo(out ATrackIndex: Integer): Boolean;
 
@@ -286,6 +305,7 @@ begin
     TrackInstrumentStart[i] := 0;
     TrackInstrumentEnd[i] := 0;
     TrackEnabled[i] := True;
+    TrackSolo[i] := False;
     TrackEffectCount[i] := 0;
     TrackSwingPercent[i] := 50;
     TrackSwingDivision[i] := 16;
@@ -359,6 +379,25 @@ end;
 function SendIndexToBus(ASendIndex: Integer): Integer;
 begin
   Result := BusSendFirst - ASendIndex;
+end;
+
+function AnyTrackSoloed: Boolean;
+var
+  t: Integer;
+begin
+  Result := False;
+  { only real tracks: DeleteTrack shifts the flags down and leaves the
+    vacated slot above TrackCount holding whatever the old last track had,
+    which would otherwise be a solo nothing on screen can switch back off }
+  for t := 0 to TrackCount - 1 do
+    if TrackSolo[t] then
+      Exit(True);
+end;
+
+function TrackAudible(ATrackIndex: Integer; ASoloActive: Boolean): Boolean;
+begin
+  Result := TrackEnabled[ATrackIndex] and
+    ((not ASoloActive) or TrackSolo[ATrackIndex]);
 end;
 
 function AddSendEffect(ASendIndex, AKind: Integer): Boolean;
@@ -477,6 +516,7 @@ begin
   TrackInstrumentStart[TrackCount] := 0;
   TrackInstrumentEnd[TrackCount] := 0;
   TrackEnabled[TrackCount] := True;
+  TrackSolo[TrackCount] := False;
   TrackEffectCount[TrackCount] := 0;
   TrackSwingPercent[TrackCount] := 50;
   TrackSwingDivision[TrackCount] := 16;
@@ -547,6 +587,7 @@ begin
     TrackInstrumentStart[t] := TrackInstrumentStart[t + 1];
     TrackInstrumentEnd[t] := TrackInstrumentEnd[t + 1];
     TrackEnabled[t] := TrackEnabled[t + 1];
+    TrackSolo[t] := TrackSolo[t + 1];
     TrackEffectCount[t] := TrackEffectCount[t + 1];
     TrackSwingPercent[t] := TrackSwingPercent[t + 1];
     TrackSwingDivision[t] := TrackSwingDivision[t + 1];
@@ -560,6 +601,10 @@ begin
   end;
 
   Dec(TrackCount);
+  { the slot the shift vacated still holds the old last track's solo, and
+    nothing on screen reaches it any more - clear it so a delete can't leave
+    solo latched on invisibly (AnyTrackSoloed also stops at TrackCount) }
+  TrackSolo[TrackCount] := False;
   Result := True;
 end;
 

@@ -74,6 +74,9 @@ type
       TrackVolumeMax = 2.0;
       MuteButtonSize = 16;
       MuteButtonMargin = 4;
+      { solo sits immediately left of the mute and is deliberately the same
+        box - the pair reads as one two-state strip per track }
+      SoloButtonSize = MuteButtonSize;
       MonitorButtonSize = 16;
       { per-track send strip, on its own line under the volume fader: an
         S1/S2 enable button and a level slider for each }
@@ -163,6 +166,7 @@ type
     function XToVolume(X: Integer): Single;
     function HitTestVolumeSlider(ATrackIndex, Y: Integer): Boolean;
     function MuteButtonRect(ATrackIndex: Integer): TRect;
+    function SoloButtonRect(ATrackIndex: Integer): TRect;
     function MonitorButtonRect(ATrackIndex: Integer): TRect;
     function SendButtonLeft(ASendIndex: Integer): Integer;
     procedure LayoutSendButtons;
@@ -560,18 +564,31 @@ begin
     Width - MuteButtonMargin, y + MuteButtonMargin + MuteButtonSize);
 end;
 
+{ Solo, in the slot immediately left of the mute. Same box, same margin - the
+  only difference is which two colours it takes. }
+function TArrangementView.SoloButtonRect(ATrackIndex: Integer): TRect;
+var
+  y, BoxLeft: Integer;
+begin
+  y := RowTop(ATrackIndex);
+  BoxLeft := Width - MuteButtonSize - MuteButtonMargin * 2 - SoloButtonSize;
+  Result := Rect(BoxLeft, y + MuteButtonMargin,
+    BoxLeft + SoloButtonSize, y + MuteButtonMargin + SoloButtonSize);
+end;
+
 { Input Track only: input-monitoring toggle, sitting immediately left of the
-  mute button - lets the live captured signal through to this track's
+  solo button - lets the live captured signal through to this track's
   audible output with no playhead movement/recording required (see
   AudioEngine.FillBlock's TrackIsInput/TrackMonitorEnabled mix). }
 function TArrangementView.MonitorButtonRect(ATrackIndex: Integer): TRect;
 var
-  y, RightEdge: Integer;
+  y, BoxLeft: Integer;
 begin
   y := RowTop(ATrackIndex);
-  RightEdge := Width - MuteButtonSize - MuteButtonMargin * 2 - MonitorButtonSize;
-  Result := Rect(RightEdge, y + MuteButtonMargin,
-    RightEdge + MonitorButtonSize, y + MuteButtonMargin + MonitorButtonSize);
+  BoxLeft := Width - MuteButtonSize - SoloButtonSize - MonitorButtonSize -
+    MuteButtonMargin * 3;
+  Result := Rect(BoxLeft, y + MuteButtonMargin,
+    BoxLeft + MonitorButtonSize, y + MuteButtonMargin + MonitorButtonSize);
 end;
 
 { --- per-track send strip -------------------------------------------------
@@ -1050,7 +1067,7 @@ end;
 procedure TArrangementView.DrawTrackHeaders;
 var
   i, y, s, SliderY, kx: Integer;
-  MuteRect, MonitorRect: TRect;
+  MuteRect, SoloRect, MonitorRect: TRect;
 begin
   for i := 0 to Project.TrackCount - 1 do
   begin
@@ -1087,6 +1104,16 @@ begin
       wants to stay a hard dark line against it in both palettes }
     Canvas.Pen.Color := clWindowFrame;
     Canvas.Rectangle(MuteRect);
+
+    { solo. Grey unlit, yellow lit - and like the mute it is always one of
+      two fixed accents rather than chrome, so it keeps the hard frame }
+    SoloRect := SoloButtonRect(i);
+    if Project.TrackSolo[i] then
+      Canvas.Brush.Color := clYellow
+    else
+      Canvas.Brush.Color := clGray;
+    Canvas.Pen.Color := clWindowFrame;
+    Canvas.Rectangle(SoloRect);
 
     { Input Track only: "M" input-monitoring toggle }
     if Project.TrackIsInput[i] then
@@ -1735,6 +1762,16 @@ begin
     Exit;
   end;
 
+  if (TrackIndex >= 0) and (X >= HeaderLeft) and
+    PtInRect(SoloButtonRect(TrackIndex), Point(X, Y)) then
+  begin
+    { plain toggle, not radio - solos accumulate, and the mixer silences
+      everything not soloed for as long as any one of them is on }
+    Project.TrackSolo[TrackIndex] := not Project.TrackSolo[TrackIndex];
+    Invalidate;
+    Exit;
+  end;
+
   if (TrackIndex >= 0) and (X >= HeaderLeft) and Project.TrackIsInput[TrackIndex] and
     PtInRect(MonitorButtonRect(TrackIndex), Point(X, Y)) then
   begin
@@ -1768,7 +1805,13 @@ begin
     Exit;
   end;
 
-  if TrackIndex <> FKeyboardTrack then
+  { Selecting a track is a HEADER gesture only. Clicking a clip - or empty
+    lane - in a track's timeline row used to switch the selected track as a
+    side effect, which meant editing a clip on one track silently moved
+    keyboard play, the device panel and the effects rack onto it. The header
+    column is the deliberate way to say "this track now"; the lane is where
+    you work on clips, and the two no longer collide. }
+  if (X >= HeaderLeft) and (TrackIndex <> FKeyboardTrack) then
   begin
     FKeyboardTrack := TrackIndex;
     if Assigned(FOnKeyboardTrackChanged) then

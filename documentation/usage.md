@@ -120,7 +120,7 @@ they play at the right speed and pitch.
 |---|---|
 | `Ctrl+Z` | Undo (multi-level; there is no redo) |
 | `Ctrl+C` | Copy the selected clip, or every clip touched by an active range selection |
-| `Ctrl+V` | Paste at the cursor position, on the track you last clicked |
+| `Ctrl+V` | Paste at the cursor position, on the selected track (see below) |
 | `Ctrl+D` | Duplicate the selection. With a range selected, the duplicate is placed immediately after it and **the selection itself moves along with it** — hitting Ctrl+D repeatedly stacks copies rightward, Ableton-style. |
 | `Ctrl+E` | Split the selected clip at the cursor position |
 | `Ctrl+J` | Consolidate — see below |
@@ -128,6 +128,29 @@ they play at the right speed and pitch.
 
 These all work with the arrangement view focused as well as from the Edit
 menu, but are suspended while you're typing in a text box.
+
+### Where a paste lands
+
+Paste is anchored to **the selected track** — the highlighted row in the
+track header pane on the right. Clicking around in the timeline does *not*
+change it; only clicking a track's header does.
+
+That matters for a multi-track copy. A range dragged across, say, tracks 1
+to 6 is stored relative to the **top** track of the range, and paste rebuilds
+it downward from the selected track. So select the track you want the top row
+to land on, then paste:
+
+- Copied tracks 1–6, track 1 selected → pastes back onto tracks 1–6.
+- Copied tracks 1–6, track 3 selected → pastes onto tracks 3–8.
+
+Rows that would fall past the last track are silently dropped — nothing
+wraps around, and you get no warning. Copy six tracks in an eight-track
+project with track 5 selected and only the first four rows arrive.
+
+Horizontally the block lands at the playback cursor, so left-click empty
+lane space to place the cursor first. And note paste **overwrites** whatever
+already occupies that window on the destination tracks, exactly like
+dropping a clip on top of another one does.
 
 ### Consolidate (`Ctrl+J`)
 
@@ -205,10 +228,17 @@ not deletable.
 ### Track headers & the Master row
 
 - **Click a track's header** to select it (for keyboard-play, for the
-  swing/instrument widgets, and for the effects rack below). The focused
-  track's header is drawn grey.
+  swing/instrument widgets, for record-arming, for where a paste lands, and
+  for the effects rack below). The focused track's header is drawn grey.
+  This is the *only* way to change the selected track — clicking a clip or
+  empty lane out in the timeline never switches it, so you can edit clips on
+  one track without the device panel and effects rack jumping to it.
 - **Click the small square in the corner of a track header** to mute/unmute
   it (lime = on, red = off).
+- **Click the square immediately left of the mute** to solo the track (grey =
+  off, yellow = on). Any number of tracks can be soloed at once; while at
+  least one is, every track that isn't soloed is silenced. Solo doesn't clear
+  a track's own mute — a muted track stays muted even when soloed.
 - **Click-drag the horizontal line below the track name** to set that
   track's volume.
 - **Click the "Master" row at the bottom of the track list** to select the
