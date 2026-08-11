@@ -6,7 +6,7 @@ interface
 
 uses
   Classes, SysUtils, Math, Types, Forms, Controls, Graphics, LCLType, LCLIntf,
-  Buttons, FileBrowser, SampleTypes, Project, AudioEngine, Waveform,
+  Buttons, StdCtrls, FileBrowser, SampleTypes, Project, AudioEngine, Waveform,
   ThemeScrollBar,
   { last on purpose - Theme shadows Graphics' clBtnFace/clWindow/... with the
     themed palette, and only wins if it is resolved after Graphics }
@@ -78,6 +78,17 @@ type
         box - the pair reads as one two-state strip per track }
       SoloButtonSize = MuteButtonSize;
       MonitorButtonSize = 16;
+      { Per-track pan, as a typed number rather than a slider: it reads
+        -100 hard left / 0 centre / +100 hard right, and the value most
+        wanted from a pan is an exact one ("put it at 30") that a 60-pixel
+        slider cannot be dragged to. Sits on the top line of the header, in
+        the gap between the "Track N" label and the solo box - the only
+        space there that is not already spoken for. }
+      PanEditWidth = 38;
+      PanEditHeight = 18;
+      { clearance between the pan box and whichever button is to its right -
+        solo normally, the "M" monitor toggle on an Input Track }
+      PanEditGap = 6;
       { per-track send strip, on its own line under the volume fader: an
         S1/S2 enable button and a level slider for each }
       SendRowY = 60;
@@ -134,6 +145,12 @@ type
         it just means the widgetset routes the click instead of this unit
         doing its own arithmetic to decide whether one landed. }
       FSendButtons: array[0..Project.MaxTracks - 1, 0..Project.SendCount - 1] of TSpeedButton;
+      { and for the same reason the pan boxes are real TEdits - one per track
+        slot, created once, only ever moved and shown/hidden afterwards.
+        A TEdit is a TWinControl so these do cost a window handle each,
+        unlike the send buttons; at MaxTracks = 32 that is not worth the
+        alternative of a single shared box chased around on click. }
+      FPanEdits: array[0..Project.MaxTracks - 1] of TEdit;
       FGridDivision: Integer; { divisions per bar, e.g. 16 = 1/16th notes }
       FRangeSelectActive: Boolean;
       FRangeDragStartFrame: Int64;
@@ -168,6 +185,10 @@ type
     function MuteButtonRect(ATrackIndex: Integer): TRect;
     function SoloButtonRect(ATrackIndex: Integer): TRect;
     function MonitorButtonRect(ATrackIndex: Integer): TRect;
+    function PanEditRect(ATrackIndex: Integer): TRect;
+    procedure LayoutPanEdits;
+    procedure PanEditEditingDone(Sender: TObject);
+    procedure PanEditKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
     function SendButtonLeft(ASendIndex: Integer): Integer;
     procedure LayoutSendButtons;
     procedure SendButtonClick(Sender: TObject);
@@ -312,6 +333,24 @@ begin
       FSendButtons[i][j].Hint := Format('Send this track to S%d', [j + 1]);
       FSendButtons[i][j].OnClick := @SendButtonClick;
     end;
+
+  { one pan box per track slot, on the same create-once principle }
+  for i := 0 to Project.MaxTracks - 1 do
+  begin
+    FPanEdits[i] := TEdit.Create(Self);
+    FPanEdits[i].Parent := Self;
+    { AutoSize off or the widgetset picks the height back from the font and
+      LayoutPanEdits' SetBounds stops holding }
+    FPanEdits[i].AutoSize := False;
+    FPanEdits[i].Alignment := taCenter;
+    FPanEdits[i].Text := '0';
+    FPanEdits[i].Tag := i;
+    FPanEdits[i].Visible := False;
+    FPanEdits[i].ShowHint := True;
+    FPanEdits[i].Hint := 'Pan: -100 hard left, 0 centre, 100 hard right';
+    FPanEdits[i].OnEditingDone := @PanEditEditingDone;
+    FPanEdits[i].OnKeyDown := @PanEditKeyDown;
+  end;
 
   FHScrollBar := TThemeScrollBar.Create(Self);
   FHScrollBar.Parent := Self;
@@ -591,6 +630,27 @@ begin
     BoxLeft + MonitorButtonSize, y + MuteButtonMargin + MonitorButtonSize);
 end;
 
+{ Where the pan box goes: hard against the left edge of whatever button
+  starts the toggle strip on this row, so it stays clear of the strip when
+  an Input Track's extra "M" button widens it. Anchored to that rather than
+  to a fixed offset from the label, because the label is the side that can
+  grow ("Input 10" is wider than "Track 1") and it is better for a long
+  label to crowd the box than for the box to overlap a button. }
+function TArrangementView.PanEditRect(ATrackIndex: Integer): TRect;
+var
+  y, RightEdge: Integer;
+begin
+  y := RowTop(ATrackIndex);
+  if Project.TrackIsInput[ATrackIndex] then
+    RightEdge := MonitorButtonRect(ATrackIndex).Left - PanEditGap
+  else
+    RightEdge := SoloButtonRect(ATrackIndex).Left - PanEditGap;
+  { the box is two pixels taller than the 16px buttons, so it starts one
+    pixel higher to keep the row optically centred on the same line }
+  Result := Rect(RightEdge - PanEditWidth, y + MuteButtonMargin - 1,
+    RightEdge, y + MuteButtonMargin - 1 + PanEditHeight);
+end;
+
 { --- per-track send strip -------------------------------------------------
   Each send gets a fixed-width group of (enable button, level slider) laid
   out left to right on one line under the volume fader. The button is the
@@ -649,6 +709,98 @@ begin
         FSendButtons[i][s].Font.Color := clWindowText;
       end;
     end;
+end;
+
+{ Same job as LayoutSendButtons, for the pan boxes: move them onto their
+  row, hide the ones whose row is not fully visible, and refresh their text
+  from the project. Every assignment is guarded by a comparison because this
+  runs on each paint, and assigning Text unconditionally would reset the
+  caret of a box being typed into. }
+procedure TArrangementView.LayoutPanEdits;
+var
+  i: Integer;
+  R: TRect;
+  Shown: Boolean;
+  Wanted: string;
+begin
+  for i := 0 to Project.MaxTracks - 1 do
+  begin
+    R := PanEditRect(i);
+    Shown := (i < Project.TrackCount) and (RowTop(i) >= RulerHeight) and
+      (RowTop(i) + TrackHeight <= ContentHeight) and
+      (R.Bottom <= SendRowTop(0));
+    if FPanEdits[i].Visible <> Shown then
+      { hiding a focused box fires its OnEditingDone first, so a value typed
+        and then scrolled away commits rather than being dropped }
+      FPanEdits[i].Visible := Shown;
+    if not Shown then
+      Continue;
+
+    if (FPanEdits[i].Left <> R.Left) or (FPanEdits[i].Top <> R.Top) then
+      FPanEdits[i].SetBounds(R.Left, R.Top, R.Right - R.Left, R.Bottom - R.Top);
+
+    { the box being typed into is left alone - it is mid-edit and the project
+      does not hold its value yet }
+    if not FPanEdits[i].Focused then
+    begin
+      Wanted := IntToStr(Round(Project.TrackPan[i] * 100));
+      if FPanEdits[i].Text <> Wanted then
+        FPanEdits[i].Text := Wanted;
+    end;
+  end;
+end;
+
+procedure TArrangementView.PanEditEditingDone(Sender: TObject);
+var
+  Idx, Value: Integer;
+begin
+  Idx := TEdit(Sender).Tag;
+  if (Idx < 0) or (Idx >= Project.MaxTracks) then
+    Exit;
+
+  if TryStrToInt(Trim(TEdit(Sender).Text), Value) then
+  begin
+    Value := EnsureRange(Value, -100, 100);
+    { no PushTrackToEngine, for the same reason the volume fader does not
+      need one: FillBlock reads Project.TrackPan directly every block }
+    Project.TrackPan[Idx] := Value / 100.0;
+  end
+  else
+    { unparseable - put back what the project still holds rather than
+      guessing at a number, so a stray keystroke cannot move a track }
+    Value := Round(Project.TrackPan[Idx] * 100);
+
+  { echo the accepted value back, which is also what clamps "500" to "100"
+    visibly instead of leaving the box disagreeing with the mixer }
+  TEdit(Sender).Text := IntToStr(Value);
+  Invalidate;
+end;
+
+procedure TArrangementView.PanEditKeyDown(Sender: TObject; var Key: Word;
+  Shift: TShiftState);
+var
+  Idx: Integer;
+begin
+  Idx := TEdit(Sender).Tag;
+  if (Idx < 0) or (Idx >= Project.MaxTracks) then
+    Exit;
+
+  if Key = VK_RETURN then
+  begin
+    Key := 0;
+    PanEditEditingDone(Sender);
+    { focus goes back to the arrangement, or the next keyboard-play note
+      types a letter into the pan box instead of sounding }
+    if CanFocus then
+      SetFocus;
+  end
+  else if Key = VK_ESCAPE then
+  begin
+    Key := 0;
+    TEdit(Sender).Text := IntToStr(Round(Project.TrackPan[Idx] * 100));
+    if CanFocus then
+      SetFocus;
+  end;
 end;
 
 procedure TArrangementView.SendButtonClick(Sender: TObject);
@@ -1436,9 +1588,11 @@ begin
   { last, so the pinned send rows sit over whichever track headers have
     scrolled under them }
   DrawSendRows;
-  { the S1/S2 toggles are real controls and paint themselves after this
-    returns; all this does is put them where their row currently is }
+  { the S1/S2 toggles and the pan boxes are real controls and paint
+    themselves after this returns; all this does is put them where their row
+    currently is }
   LayoutSendButtons;
+  LayoutPanEdits;
 end;
 
 procedure TArrangementView.Resize;

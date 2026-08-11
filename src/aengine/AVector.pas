@@ -27,7 +27,28 @@ interface
       nonlinear or stateful stage.
     - FMA: a*b+c fused rounds ONCE instead of twice, so it is genuinely a
       different number. Never used here, even though every CPU that has AVX2
-      also has FMA. Multiplies and adds stay separate instructions.
+      also has FMA3. Multiplies and adds stay separate instructions.
+
+  On adding an FMA3 path later. It is a real option, but it does not fit
+  under VectorPathIsAVX2 and cannot be bolted on without three things:
+
+    - Its own flag. FMA3 changes results, so it has to be separately
+      switchable from AVX2 rather than riding the same boolean. Detection is
+      not the hard part: AVX2 implies FMA3 on every shipping x86-64 part
+      (Haswell onward, Excavator/Zen onward), and the RTL exposes FMASupport
+      anyway if belt and braces is wanted.
+    - Its own self-test. SelfTestPasses below is CompareMem, and an FMA path
+      fails that BY DESIGN - being a different number is the whole point. It
+      would need a second tier comparing against the scalar result within a
+      tolerance (1 ULP, or an absolute epsilon well under -140 dBFS) instead
+      of byte-for-byte, which is a materially weaker guarantee than what the
+      rest of this unit gives.
+    - A decision about old projects. The only routine here with anything to
+      fuse is VAddScaled - VScale and VScale2 are pure multiplies with no
+      addend - and VAddScaled is what the send taps and send returns run
+      through. Switching it changes those sums, so a bounce stops matching
+      the same project bounced by an earlier build. That is the actual cost;
+      the assembly is the easy half.
 
   MaxAbs is the one reduction present, and it is safe: max is exact and
   associative, and the operand order below reproduces the scalar
@@ -67,6 +88,15 @@ procedure VAdd(ADst, ASrc: PSingle; ACount: PtrInt);
 procedure VAddScaled(ADst, ASrc: PSingle; AScale: Single; ACount: PtrInt);
 { ADst[i] := ADst[i] * AScale }
 procedure VScale(ADst: PSingle; AScale: Single; ACount: PtrInt);
+{ ADstL[i] := ADstL[i] * AScaleL and ADstR[i] := ADstR[i] * AScaleR
+
+  Two VScale calls fused into one pass. Not a new operation - it is exactly
+  the pair it replaces, elementwise and bit-identical to each - but the two
+  buffers are always walked together at the same length by the caller (a
+  stereo track's fader and pan), so doing them in one loop halves the loop
+  overhead and interleaves two independent dependency chains, which is free
+  throughput on any out-of-order core. }
+procedure VScale2(ADstL, ADstR: PSingle; AScaleL, AScaleR: Single; ACount: PtrInt);
 { ADst[i] := max(abs(ASrcA[i]), abs(ASrcB[i])) }
 procedure VMaxAbs2(ADst, ASrcA, ASrcB: PSingle; ACount: PtrInt);
 { ADst[i] := clamp(ADst[i], -1.0, +1.0) }
@@ -116,6 +146,17 @@ var
 begin
   for i := 0 to ACount - 1 do
     ADst[i] := ADst[i] * AScale;
+end;
+
+procedure VScale2Pas(ADstL, ADstR: PSingle; AScaleL, AScaleR: Single; ACount: PtrInt);
+var
+  i: PtrInt;
+begin
+  for i := 0 to ACount - 1 do
+  begin
+    ADstL[i] := ADstL[i] * AScaleL;
+    ADstR[i] := ADstR[i] * AScaleR;
+  end;
 end;
 
 procedure VMaxAbs2Pas(ADst, ASrcA, ASrcB: PSingle; ACount: PtrInt);
@@ -296,6 +337,57 @@ begin
 @done:
     vzeroupper
   end ['rax', 'rcx', 'rdx'];
+end;
+
+{ The one routine here that writes two buffers. Both scale factors are
+  broadcast up front (ymm2 for L, ymm3 for R) and the body issues the two
+  load/mul/store chains back to back - they touch different registers and
+  different memory, so they dual-issue rather than queue. rax and r10 are the
+  two destinations; the index and count registers are shared, which is only
+  sound because the caller guarantees both buffers are ACount long. }
+procedure VScale2Avx(ADstL, ADstR: PSingle; AScaleL, AScaleR: Single; ACount: PtrInt);
+var
+  SL, SR: Single;
+begin
+  SL := AScaleL;
+  SR := AScaleR;
+  asm
+    mov  rax, ADstL
+    mov  r10, ADstR
+    mov  rcx, ACount
+    xor  rdx, rdx
+    vmovss  xmm2, SL
+    vbroadcastss ymm2, xmm2
+    vmovss  xmm3, SR
+    vbroadcastss ymm3, xmm3
+    sub  rcx, 8
+    jl   @tail_setup
+@loop8:
+    vmovups ymm0, [rax+rdx*4]
+    vmovups ymm1, [r10+rdx*4]
+    vmulps  ymm0, ymm0, ymm2
+    vmulps  ymm1, ymm1, ymm3
+    vmovups [rax+rdx*4], ymm0
+    vmovups [r10+rdx*4], ymm1
+    add  rdx, 8
+    cmp  rdx, rcx
+    jle  @loop8
+@tail_setup:
+    add  rcx, 8
+@tail:
+    cmp  rdx, rcx
+    jge  @done
+    vmovss  xmm0, [rax+rdx*4]
+    vmovss  xmm1, [r10+rdx*4]
+    vmulss  xmm0, xmm0, xmm2
+    vmulss  xmm1, xmm1, xmm3
+    vmovss  [rax+rdx*4], xmm0
+    vmovss  [r10+rdx*4], xmm1
+    add  rdx, 1
+    jmp  @tail
+@done:
+    vzeroupper
+  end ['rax', 'rcx', 'rdx', 'r10'];
 end;
 
 procedure VMaxAbs2Avx(ADst, ASrcA, ASrcB: PSingle; ACount: PtrInt);
@@ -481,6 +573,20 @@ begin
   VScalePas(ADst, AScale, ACount);
 end;
 
+procedure VScale2(ADstL, ADstR: PSingle; AScaleL, AScaleR: Single; ACount: PtrInt);
+begin
+  if ACount <= 0 then
+    Exit;
+{$IFDEF CPUX86_64}
+  if VectorPathIsAVX2 then
+  begin
+    VScale2Avx(ADstL, ADstR, AScaleL, AScaleR, ACount);
+    Exit;
+  end;
+{$ENDIF}
+  VScale2Pas(ADstL, ADstR, AScaleL, AScaleR, ACount);
+end;
+
 procedure VMaxAbs2(ADst, ASrcA, ASrcB: PSingle; ACount: PtrInt);
 begin
   if ACount <= 0 then
@@ -538,6 +644,9 @@ const
   N = 61; { 7 vector iterations + a 5-element tail }
 var
   Src, RefBuf, TstBuf, SrcB: array[0..N - 1] of Single;
+  { second destination pair, used only by VScale2 - the one routine here
+    that writes two buffers, so one Ref/Tst pair cannot cover it }
+  RefBuf2, TstBuf2: array[0..N - 1] of Single;
   S16Src: array[0..N - 1] of SmallInt;
   Seed: LongWord;
   i: Integer;
@@ -590,6 +699,16 @@ begin
   VScalePas(@RefBuf[0], 0.71, N);
   VScaleAvx(@TstBuf[0], 0.71, N);
   if not Same then Exit;
+
+  { two different scales on purpose: equal ones would still pass if the R
+    broadcast were wrong and picked up L's register }
+  Reset;
+  Move(SrcB, RefBuf2, SizeOf(SrcB));
+  Move(SrcB, TstBuf2, SizeOf(SrcB));
+  VScale2Pas(@RefBuf[0], @RefBuf2[0], 0.71, -1.31, N);
+  VScale2Avx(@TstBuf[0], @TstBuf2[0], 0.71, -1.31, N);
+  if not Same then Exit;
+  if not CompareMem(@RefBuf2[0], @TstBuf2[0], SizeOf(RefBuf2)) then Exit;
 
   Reset;
   VMaxAbs2Pas(@RefBuf[0], @Src[0], @SrcB[0], N);

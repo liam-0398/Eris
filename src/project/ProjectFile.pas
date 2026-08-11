@@ -659,6 +659,7 @@ begin
       Ini.WriteInteger(Section, 'Octave', Project.TrackOctave[t]);
       Ini.WriteFloat(Section, 'InstrumentGainDb', Project.TrackInstrumentGainDb[t]);
       Ini.WriteFloat(Section, 'Volume', Project.TrackVolume[t]);
+      Ini.WriteFloat(Section, 'Pan', Project.TrackPan[t]);
       Ini.WriteBool(Section, 'Enabled', Project.TrackEnabled[t]);
       Ini.WriteBool(Section, 'Solo', Project.TrackSolo[t]);
       Ini.WriteInt64(Section, 'InstrumentStart', Project.TrackInstrumentStart[t]);
@@ -1075,6 +1076,10 @@ begin
       Project.TrackOctave[t] := Ini.ReadInteger(Section, 'Octave', 0);
       Project.TrackInstrumentGainDb[t] := Ini.ReadFloat(Section, 'InstrumentGainDb', 0);
       Project.TrackVolume[t] := Ini.ReadFloat(Section, 'Volume', 1.0);
+      { absent in projects written before pan existed - those load centred,
+        which is the position at which pan multiplies by exactly 1.0 and so
+        changes nothing about how they sound }
+      Project.TrackPan[t] := Ini.ReadFloat(Section, 'Pan', 0.0);
       Project.TrackEnabled[t] := Ini.ReadBool(Section, 'Enabled', True);
       { absent in projects written before solo existed - those load unsoloed,
         which is the state in which solo changes nothing }
@@ -1239,7 +1244,7 @@ var
     long, refilled every block }
   SendBuffers: array[0..Project.SendCount - 1] of PSingle;
   SendEffectState: array of array of Effects.TEffectState;
-  SendAmount, PreFaderL, PreFaderR, TrackVol: Single;
+  SendAmount, PreFaderL, PreFaderR, TrackVol, TrackPanL, TrackPanR: Single;
   BlockStart, BlockLen, FirstAbs, LastAbs, AbsFrame, ClipFrame: Int64;
   W: TWavWriter;
   WavStarted: Boolean;
@@ -1466,13 +1471,23 @@ begin
           that the fader is applied HERE and not at clip level, keeping the
           ordering identical to FillBlock's. }
         TrackVol := Project.TrackVolume[t];
+        { pan folded into the fader gains exactly as FillBlock does it, and
+          in the same place in the chain - after the pre-fader tap, before
+          the post-fader one. Mirroring it here is not optional: this is the
+          bounce's own copy of the chain, and a difference in gain staging
+          between the two is precisely how a render stops matching what was
+          heard. Pre-multiplied into the same scalar rather than applied as
+          a separate step, so the arithmetic matches too. }
+        Project.TrackPanGains(Project.TrackPan[t], TrackPanL, TrackPanR);
+        TrackPanL := TrackVol * TrackPanL;
+        TrackPanR := TrackVol * TrackPanR;
         for Frame := 0 to BlockLen - 1 do
         begin
           OutIdx := Frame * OutChannels;
           PreFaderL := TrackBuffers[t][OutIdx];
           PreFaderR := TrackBuffers[t][OutIdx + 1];
-          L := PreFaderL * TrackVol;
-          R := PreFaderR * TrackVol;
+          L := PreFaderL * TrackPanL;
+          R := PreFaderR * TrackPanR;
           TrackBuffers[t][OutIdx] := L;
           TrackBuffers[t][OutIdx + 1] := R;
 

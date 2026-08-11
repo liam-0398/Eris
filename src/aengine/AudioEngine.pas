@@ -2028,7 +2028,7 @@ var
     ZeroBytes: PtrUInt;
     Clip: PPlaybackClip;
     Swung: Int64;
-    Vol, Amount, ClickVal: Single;
+    Vol, PanL, PanR, Amount, ClickVal: Single;
     Tap: PSingle;
     NeedPreFade, SoloActive: Boolean;
   begin
@@ -2171,10 +2171,30 @@ var
         MainForm, i.e. applied before the engine ever saw the audio - which
         left no point in the chain where a pre-fader anything could be
         tapped, and quietly meant a "recorded dry" take was in fact
-        recorded through the fader. It is applied here now instead. }
+        recorded through the fader. It is applied here now instead.
+
+        The pan rides along with it: the two collapse into one pair of
+        channel gains, so panning costs an extra multiply per block rather
+        than an extra pass over the buffer, and VScale2 does both channels
+        in a single walk.
+
+        Position in the chain follows Ableton: the pan sits WITH the fader,
+        which puts it before the post-fader send tap below and after the
+        pre-fader one taken above. So a hard-left track's reverb leans left
+        too, while a pre-fader send stays where it was - which is the point
+        of a pre-fader send, it is deliberately upstream of the mixer strip.
+
+        At pan 0 both gains are exactly 1.0, so Vol * 1.0 is Vol and a
+        project with no pan set mixes bit-identically to before pan existed.
+
+        Note the track tap below is taken after this, so a sidechain keyed
+        off this track now follows its pan. VMaxAbs2 takes the louder of the
+        two channels, so a hard-panned source still keys at full strength
+        rather than dropping to whatever the silent side is. }
       Vol := Project.TrackVolume[t];
-      VScale(@ScratchL[AStart], Vol, ACount);
-      VScale(@ScratchR[AStart], Vol, ACount);
+      Project.TrackPanGains(Project.TrackPan[t], PanL, PanR);
+      VScale2(@ScratchL[AStart], @ScratchR[AStart], Vol * PanL, Vol * PanR,
+        ACount);
 
       for s := 0 to Project.SendCount - 1 do
         if Project.SendEnabled[s] and Project.TrackSendEnabled[t][s] then

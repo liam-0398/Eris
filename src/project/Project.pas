@@ -82,6 +82,11 @@ var
   { linear gain multiplier applied on top of each clip's own Gain; 1.0 = unity/default }
   TrackVolume: array[0..MaxTracks - 1] of Single;
 
+  { stereo position, -1.0 hard left through 0.0 centre to +1.0 hard right.
+    The header shows it as a whole number -100..+100; the float is what gets
+    saved and what the mixer reads. See TrackPanGains for the law. }
+  TrackPan: array[0..MaxTracks - 1] of Single;
+
   { trim points (in source sample frames) for the keyboard-play instrument on
     each track; default is the entire sample (Start=0, End=FrameCount) }
   TrackInstrumentStart: array[0..MaxTracks - 1] of Int64;
@@ -214,6 +219,26 @@ function AnyTrackSoloed: Boolean;
   it once. }
 function TrackAudible(ATrackIndex: Integer; ASoloActive: Boolean): Boolean;
 
+{ TrackPan -> the pair of channel gains it means. Every path that pans -
+  FillBlock, the offline bounce - goes through this rather than open-coding
+  the law, so the two cannot drift apart and silently stop matching.
+
+  The law is a linear balance with a UNITY centre, which is what Ableton's
+  track pan does: at 0.0 both channels pass at 1.0, and panning one way
+  attenuates the far channel to silence while the near one stays at unity.
+  Two consequences worth being explicit about:
+
+  - Nothing is ever boosted above 1.0, so turning pan on cannot introduce
+    clipping that was not there before.
+  - Centre is exactly 1.0, not 0.707, so every project written before pan
+    existed loads at pan 0 and multiplies by 1.0 - bit-identical, no
+    file-version bump needed to keep old mixes sounding as they did.
+
+  A constant-power (sin/cos) law would hold perceived loudness constant
+  across the sweep instead, at the cost of +3 dB on a hard-panned track.
+  That trade was considered and declined; see newfeatures.md item 1. }
+procedure TrackPanGains(APan: Single; out AGainL, AGainR: Single);
+
 procedure PushUndoSnapshot(ATrackIndex: Integer);
 function PopUndo(out ATrackIndex: Integer): Boolean;
 
@@ -300,6 +325,7 @@ begin
   TrackOctave[ATrackIndex] := 0;
   TrackInstrumentGainDb[ATrackIndex] := 0;
   TrackVolume[ATrackIndex] := 1.0;
+  TrackPan[ATrackIndex] := 0.0;
   TrackInstrumentStart[ATrackIndex] := 0;
   TrackInstrumentEnd[ATrackIndex] := 0;
   TrackEnabled[ATrackIndex] := True;
@@ -341,6 +367,7 @@ begin
     TrackOctave[i] := 0;
     TrackInstrumentGainDb[i] := 0;
     TrackVolume[i] := 1.0;
+    TrackPan[i] := 0.0;
     TrackInstrumentStart[i] := 0;
     TrackInstrumentEnd[i] := 0;
     TrackEnabled[i] := True;
@@ -437,6 +464,30 @@ function TrackAudible(ATrackIndex: Integer; ASoloActive: Boolean): Boolean;
 begin
   Result := TrackEnabled[ATrackIndex] and
     ((not ASoloActive) or TrackSolo[ATrackIndex]);
+end;
+
+procedure TrackPanGains(APan: Single; out AGainL, AGainR: Single);
+begin
+  { clamped here rather than trusted, because this is also what a hand-edited
+    or corrupt .eris file's Pan value arrives through }
+  if APan < -1.0 then
+    APan := -1.0
+  else if APan > 1.0 then
+    APan := 1.0;
+
+  if APan <= 0.0 then
+  begin
+    { panning left: left stays at unity, right closes down. At exactly 0 both
+      land on 1.0, and 1.0 + 0.0 is exact, so centre really is a no-op
+      multiply rather than one that merely rounds to unity. }
+    AGainL := 1.0;
+    AGainR := 1.0 + APan;
+  end
+  else
+  begin
+    AGainL := 1.0 - APan;
+    AGainR := 1.0;
+  end;
 end;
 
 function AddSendEffect(ASendIndex, AKind: Integer): Boolean;
@@ -663,6 +714,7 @@ begin
     TrackOctave[t] := TrackOctave[t + 1];
     TrackInstrumentGainDb[t] := TrackInstrumentGainDb[t + 1];
     TrackVolume[t] := TrackVolume[t + 1];
+    TrackPan[t] := TrackPan[t + 1];
     TrackInstrumentStart[t] := TrackInstrumentStart[t + 1];
     TrackInstrumentEnd[t] := TrackInstrumentEnd[t + 1];
     TrackEnabled[t] := TrackEnabled[t + 1];
