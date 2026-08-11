@@ -301,7 +301,7 @@ begin
   FDraggingSendTrack := -1;
   FDraggingSendIndex := -1;
   FDraggingReturnSend := -1;
-  FGridDivision := 16;
+  FGridDivision := 4; { 1/4 note - matches the grid trackbar's default position }
   FRangeSelectActive := False;
   FRangeStartTrack := -1;
   FRangeEndTrack := -1;

@@ -536,7 +536,7 @@ begin
   FGridTrackBar.Max := 4;
   FGridTrackBar.Frequency := 1;
   FGridTrackBar.TickStyle := tsAuto;
-  FGridTrackBar.Position := 0; { 1/16, finest - matches ArrangementView's default }
+  FGridTrackBar.Position := 2; { 1/4 note - matches ArrangementView's default }
   FGridTrackBar.Width := Px(140);
   FGridTrackBar.Height := Px(36);
   FGridTrackBar.ShowHint := True;
@@ -545,7 +545,7 @@ begin
 
   FGridLabel := TLabel.Create(Self);
   FGridLabel.Parent := FTransportPanel;
-  FGridLabel.Caption := '1/16';
+  FGridLabel.Caption := '1/4';
 
   { tempo-aware metronome toggle - sits just left of Stop, colored when on }
   FMetronomeToggle := TSpeedButton.Create(Self);
