@@ -283,6 +283,45 @@ begin
   end;
 end;
 
+{ Puts one track slot back to its just-created defaults. Covers EVERY
+  per-track array in this unit, including the two AddTrack used to leave
+  alone - the effect slots sitting behind TrackEffectCount, and the send
+  enable/level pair - which is what let a re-used slot come back holding the
+  previous occupant's inserts and sends. Shared by AddTrack and DeleteTrack
+  so the slot a delete vacates and the slot the next add hands out are the
+  same blank. Deliberately does not touch TrackActive: the two callers want
+  opposite values for it. }
+procedure ResetTrackSlot(ATrackIndex: Integer);
+var
+  e, s: Integer;
+begin
+  Tracks[ATrackIndex].Clips := nil;
+  TrackInstrument[ATrackIndex] := -1;
+  TrackOctave[ATrackIndex] := 0;
+  TrackInstrumentGainDb[ATrackIndex] := 0;
+  TrackVolume[ATrackIndex] := 1.0;
+  TrackInstrumentStart[ATrackIndex] := 0;
+  TrackInstrumentEnd[ATrackIndex] := 0;
+  TrackEnabled[ATrackIndex] := True;
+  TrackSolo[ATrackIndex] := False;
+  TrackSwingPercent[ATrackIndex] := 50;
+  TrackSwingDivision[ATrackIndex] := 16;
+  TrackIsInput[ATrackIndex] := False;
+  TrackMonitorEnabled[ATrackIndex] := False;
+  TrackIsSampler[ATrackIndex] := False;
+  ClearSamplerSlots(ATrackIndex);
+  { blank the slots themselves and not just the count - same reasoning as
+    InitTrackInstruments below }
+  for e := 0 to Effects.MaxEffectsPerTrack - 1 do
+    TrackEffects[ATrackIndex][e].Kind := Effects.ekNone;
+  TrackEffectCount[ATrackIndex] := 0;
+  for s := 0 to SendCount - 1 do
+  begin
+    TrackSendEnabled[ATrackIndex][s] := False;
+    TrackSendLevel[ATrackIndex][s] := 0.5;
+  end;
+end;
+
 procedure InitTrackInstruments;
 var
   i, e: Integer;
@@ -507,23 +546,8 @@ function AddTrack: Boolean;
 begin
   if TrackCount >= MaxTracks then
     Exit(False);
-  Tracks[TrackCount].Clips := nil;
+  ResetTrackSlot(TrackCount);
   TrackActive[TrackCount] := True;
-  TrackInstrument[TrackCount] := -1;
-  TrackOctave[TrackCount] := 0;
-  TrackInstrumentGainDb[TrackCount] := 0;
-  TrackVolume[TrackCount] := 1.0;
-  TrackInstrumentStart[TrackCount] := 0;
-  TrackInstrumentEnd[TrackCount] := 0;
-  TrackEnabled[TrackCount] := True;
-  TrackSolo[TrackCount] := False;
-  TrackEffectCount[TrackCount] := 0;
-  TrackSwingPercent[TrackCount] := 50;
-  TrackSwingDivision[TrackCount] := 16;
-  TrackIsInput[TrackCount] := False;
-  TrackMonitorEnabled[TrackCount] := False;
-  TrackIsSampler[TrackCount] := False;
-  ClearSamplerSlots(TrackCount);
   Inc(TrackCount);
   Inc(NextTrackID);
   Result := True;
@@ -567,6 +591,60 @@ begin
   TrackSamplerSlots[ATrackIndex][AKeyIndex].EndFrame := AEndFrame;
 end;
 
+{ A sidechain names its source as a raw track index, so the shift a delete
+  performs moves the track out from under every chain keyed off one: without
+  this a compressor keyed to track 5 silently starts ducking to whatever
+  moved down into slot 5. Walks every chain in the project - tracks, master
+  and both sends - because any of them can carry an ekSidechain.
+
+  A chain keyed off the track being DELETED has nothing left to follow.
+  There is no "no source" value for this field (the rack's picker is a plain
+  list of tracks, index = track), so it falls back to track 0, exactly where
+  a freshly added sidechain starts. }
+procedure RemapSidechainSourcesForDelete(ADeletedIndex: Integer);
+
+  procedure Remap(var AEffect: Effects.TEffect);
+  begin
+    if AEffect.SidechainSourceTrack > ADeletedIndex then
+      Dec(AEffect.SidechainSourceTrack)
+    else if AEffect.SidechainSourceTrack = ADeletedIndex then
+      AEffect.SidechainSourceTrack := 0;
+  end;
+
+var
+  t, s, e: Integer;
+begin
+  for t := 0 to TrackCount - 1 do
+    for e := 0 to TrackEffectCount[t] - 1 do
+      Remap(TrackEffects[t][e]);
+  for e := 0 to MasterEffectCount - 1 do
+    Remap(MasterEffects[e]);
+  for s := 0 to SendCount - 1 do
+    for e := 0 to SendEffectCount[s] - 1 do
+      Remap(SendEffects[s][e]);
+end;
+
+{ Undo snapshots are stored against a track INDEX, so the same shift leaves
+  every entry above the deleted track pointing one track too high - an Undo
+  after a delete would restore its clips onto a neighbour. Entries belonging
+  to the deleted track itself have nothing to be restored to and are dropped. }
+procedure RemapUndoStackForDelete(ADeletedIndex: Integer);
+var
+  i, k: Integer;
+begin
+  k := 0;
+  for i := 0 to High(UndoStack) do
+  begin
+    if UndoStack[i].TrackIndex = ADeletedIndex then
+      Continue;
+    UndoStack[k] := UndoStack[i];
+    if UndoStack[k].TrackIndex > ADeletedIndex then
+      Dec(UndoStack[k].TrackIndex);
+    Inc(k);
+  end;
+  SetLength(UndoStack, k);
+end;
+
 function DeleteTrack(ATrackIndex: Integer): Boolean;
 var
   t: Integer;
@@ -574,8 +652,9 @@ begin
   if (ATrackIndex < 0) or (ATrackIndex >= TrackCount) or not TrackActive[ATrackIndex] then
     Exit(False);
 
-  TrackActive[ATrackIndex] := False;
-
+  { no "mark this index inactive" step: the shift below overwrites the slot
+    outright, and the slot that ends up genuinely unused is the one at the
+    top, cleared after it }
   for t := ATrackIndex to TrackCount - 2 do
   begin
     Tracks[t] := Tracks[t + 1];
@@ -601,10 +680,20 @@ begin
   end;
 
   Dec(TrackCount);
-  { the slot the shift vacated still holds the old last track's solo, and
-    nothing on screen reaches it any more - clear it so a delete can't leave
-    solo latched on invisibly (AnyTrackSoloed also stops at TrackCount) }
-  TrackSolo[TrackCount] := False;
+  { The shift copied every track down over its predecessor but left the top
+    slot holding a full duplicate of what used to be the last track - its
+    clips, its mute, its solo, its inserts and its sends - and nothing on
+    screen reaches that slot any more. It is not dormant: the mixer walks all
+    MaxTracks slots and gates only on TrackEnabled, so a stale enabled
+    duplicate up there is audio no header can mute (AnyTrackSoloed stops at
+    TrackCount, but nothing else does). Blank it. }
+  ResetTrackSlot(TrackCount);
+  TrackActive[TrackCount] := False;
+
+  { everything else in the project that stores a track index has just been
+    renumbered out from under it }
+  RemapSidechainSourcesForDelete(ATrackIndex);
+  RemapUndoStackForDelete(ATrackIndex);
   Result := True;
 end;
 

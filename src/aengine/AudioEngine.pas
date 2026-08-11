@@ -83,6 +83,13 @@ function AudioEngineIsPlaying: Boolean;
   from under a still-reading fading note is a use-after-free that corrupts
   the heap for the rest of the process, not just that one note. }
 function AudioEngineIsBusy: Boolean;
+{ True while the realtime thread is actually running the mixer, which is a
+  WIDER condition than AudioEngineIsBusy: a monitored input track keeps
+  FillBlock going with the transport stopped and no note sounding. Callers
+  that are about to free something the mixer reads through - most of all
+  AudioEngineResetEffectState, which releases the dynamic buffers inside
+  every effect state - need this one, not the busy test. }
+function AudioEngineProcessingActive: Boolean;
 function AudioEngineHasClip: Boolean;
 { No-op since the Beats warp stopped caching grain lookups - see
   BeatsClipSample, which derives a slice's position from its segment in O(1)
@@ -2753,6 +2760,11 @@ end;
 function AudioEngineIsBusy: Boolean;
 begin
   Result := Playing or AnyLiveNoteActive or (RecordState <> RecordStateIdle);
+end;
+
+function AudioEngineProcessingActive: Boolean;
+begin
+  Result := EngineProcessingActive;
 end;
 
 procedure AudioEngineInvalidateGrainCache;

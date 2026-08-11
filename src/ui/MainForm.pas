@@ -1496,7 +1496,7 @@ end;
 
 procedure TForm1.TrackDeleteClick(Sender: TObject);
 var
-  Track: Integer;
+  Track, t: Integer;
 begin
   { Delete the FOCUSED track - the one whose header was last clicked, which
     is what KeyboardTrack holds and what the whole device panel already
@@ -1514,11 +1514,58 @@ begin
     Exit;
   end;
 
+  { A delete RENUMBERS the project: every track above the deleted one shifts
+    down an index, in the very arrays the realtime mixer reads live
+    (TrackEnabled/TrackVolume/TrackEffects), while the engine holds its own
+    copy of each track's clips indexed the same way. Restructuring that under
+    a running mixer is the stop-then-wait protocol File>New/Open already use,
+    so a delete goes through it too. Finalize first, or a take in progress
+    would be written back to a track index that is about to mean something
+    else. }
+  if AudioEngineRecordState <> RecordStateIdle then
+    FinalizeRecording;
+  AudioEngineStop;
+  if not WaitForEngineIdle then
+  begin
+    ShowMessage('The audio device stopped responding, so the track was not ' +
+      'deleted. Check the device, or pick another one in Preferences.');
+    Exit;
+  end;
+  FPlayPauseButton.Caption := 'Play';
+
   if Project.DeleteTrack(Track) then
   begin
+    { The engine keeps a TPlaybackClip array per track index and NOTHING else
+      re-indexes it, so every track from the deleted one up would go on
+      playing the clips of whatever track used to sit at its index - the
+      deleted track's own audio still sounding from its old slot, unmutable
+      because the header controls at that index now edit a different track's
+      numbers. That is the ghost track. Re-push all of them, then clear the
+      slots past the new track count: FillBlock walks all MaxTracks slots and
+      gates only on Project.TrackEnabled, so the top slot the delete vacated
+      would otherwise keep its clips AND its enabled flag (see
+      RefreshAllTracksUI, which clears them for the same reason after a load). }
+    FArrangementView.RefreshAllTracks;
+    for t := Project.TrackCount to Project.MaxTracks - 1 do
+      AudioEngineSetTrackClips(t, nil, 0);
+    { The chains moved with their tracks, so slot t now runs what was on t+1
+      while the engine's filter/delay/reverb state for that slot still belongs
+      to the old occupant. Only safe to clear while the mixer is definitely
+      not running: EffectStateReset FREES the dynamic buffers inside a state
+      (reverb tanks, chorus/flanger lines), and an input track left monitoring
+      keeps FillBlock going straight through the stop above. Stale state is a
+      filter/tail mismatch that decays out on its own; a free under a live
+      mixer is a use-after-free - so with monitoring up we keep the mismatch. }
+    if not AudioEngineProcessingActive then
+      AudioEngineResetEffectState;
+
     FArrangementView.ClearSelection;
     { every later track just shifted down one index - see ClearKeyboardTrack }
     FArrangementView.ClearKeyboardTrack;
+    { and the rack is still showing the chain of whatever track it had
+      targeted, which is now a different track's chain (or none) }
+    FLastEffectsRackTrack := InvalidEffectsRackTrack;
+    UpdateDevicePanel;
     FArrangementView.Invalidate;
   end;
 end;
