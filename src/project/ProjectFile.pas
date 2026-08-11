@@ -820,6 +820,7 @@ begin
       Ini.WriteFloat(Section, 'Pan', Project.TrackPan[t]);
       Ini.WriteBool(Section, 'Enabled', Project.TrackEnabled[t]);
       Ini.WriteBool(Section, 'Solo', Project.TrackSolo[t]);
+      Ini.WriteBool(Section, 'Collapsed', Project.TrackCollapsed[t]);
       Ini.WriteInt64(Section, 'InstrumentStart', Project.TrackInstrumentStart[t]);
       Ini.WriteInt64(Section, 'InstrumentEnd', Project.TrackInstrumentEnd[t]);
       Ini.WriteFloat(Section, 'SwingPercent', Project.TrackSwingPercent[t]);
@@ -1267,6 +1268,9 @@ begin
       { absent in projects written before solo existed - those load unsoloed,
         which is the state in which solo changes nothing }
       Project.TrackSolo[t] := Ini.ReadBool(Section, 'Solo', False);
+      { how the track is drawn, not how it sounds - absent in projects written
+        before collapsing existed, and those load fully expanded }
+      Project.TrackCollapsed[t] := Ini.ReadBool(Section, 'Collapsed', False);
       Project.TrackSwingPercent[t] := Ini.ReadFloat(Section, 'SwingPercent', 50);
       Project.TrackSwingDivision[t] := Ini.ReadInteger(Section, 'SwingDivision', 16);
       Project.TrackIsInput[t] := Ini.ReadBool(Section, 'IsInput', False);

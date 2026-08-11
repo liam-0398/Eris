@@ -106,6 +106,15 @@ type
         defeat them. They occupy the header column only and never extend
         left into the timeline. }
       SendRowHeight = 40;
+      { A collapsed track row (right-click its header to toggle - see
+        MouseDown). Deliberately the same height as one of the pinned send
+        rows above: that is the shortest row this view already draws, it is
+        known to hold a label and a 16px button strip on one line, and making
+        the two match means a stack of collapsed tracks reads as the same kind
+        of row as the S1/S2 pair at the bottom. Everything below that first
+        line - the volume fader, the send strip, the pan box - is not drawn at
+        all, and the track's clips squash into what is left. }
+      CollapsedTrackHeight = SendRowHeight;
     var
       FOnFileDrop: TFileDropEvent;
       FOnSeek: TSeekEvent;
@@ -168,8 +177,14 @@ type
     function ContentHeight: Integer;
     function ContentEndFrame: Int64;
     function TrackIndexAtY(Y: Integer): Integer;
+    function NearestTrackIndexAtY(Y: Integer): Integer;
     function MasterRowTop: Integer;
     function RowTop(AIndex: Integer): Integer;
+    function TrackRowHeight(AIndex: Integer): Integer;
+    function HeaderLineTop(AIndex: Integer): Integer;
+    function TrackIsCollapsed(AIndex: Integer): Boolean;
+    function AllRowsHeight: Integer;
+    procedure ToggleTrackCollapsed(AIndex: Integer);
     function FrameToAbsoluteX(AFrame: Int64): Integer;
     function FrameToX(AFrame: Int64): Integer;
     function XToFrame(AX: Integer): Int64;
@@ -406,22 +421,113 @@ begin
   Result := RowTop(Project.TrackCount);
 end;
 
+{ True while this track is drawn as a single-line row. Guarded rather than
+  indexing straight into Project.TrackCollapsed because the layout passes
+  walk all MaxTracks slots and the Master row asks about index TrackCount. }
+function TArrangementView.TrackIsCollapsed(AIndex: Integer): Boolean;
+begin
+  Result := (AIndex >= 0) and (AIndex < Project.TrackCount) and
+    Project.TrackCollapsed[AIndex];
+end;
+
+{ How tall row AIndex is. The Master row (AIndex = Project.TrackCount) never
+  collapses, so it falls through to the full height like any expanded track. }
+function TArrangementView.TrackRowHeight(AIndex: Integer): Integer;
+begin
+  if TrackIsCollapsed(AIndex) then
+    Result := CollapsedTrackHeight
+  else
+    Result := TrackHeight;
+end;
+
+{ Y the top line of a header - label, pan box, monitor/solo/mute strip -
+  starts at. On a full-height row that is the top of the row itself, with
+  everything below it still to come; on a collapsed row that line is all
+  there is, so it is centred in the row instead of clinging to the top edge
+  with dead space underneath. Both the painting and the hit-testing of that
+  strip go through here, so the two cannot drift apart. }
+function TArrangementView.HeaderLineTop(AIndex: Integer): Integer;
+begin
+  Result := RowTop(AIndex);
+  if TrackIsCollapsed(AIndex) then
+    Inc(Result, (CollapsedTrackHeight - (MuteButtonMargin * 2 + MuteButtonSize)) div 2);
+end;
+
 { Y where track row AIndex (or, with AIndex = Project.TrackCount, the Master
   row) starts, net of the current vertical scroll offset - every row-Y
   computation in this unit goes through here so FVScrollOffset only has to
-  be threaded through in one place. }
+  be threaded through in one place.
+
+  Rows are summed rather than multiplied out now that any of them can be
+  collapsed to CollapsedTrackHeight. That makes this O(AIndex) where it used
+  to be a multiply; with MaxTracks = 32 and the callers being paint/hit-test
+  passes that already walk every row, the difference does not show up. }
 function TArrangementView.RowTop(AIndex: Integer): Integer;
+var
+  i: Integer;
 begin
-  Result := RulerHeight + AIndex * TrackHeight - FVScrollOffset;
+  Result := RulerHeight - FVScrollOffset;
+  for i := 0 to AIndex - 1 do
+    Result := Result + TrackRowHeight(i);
+end;
+
+{ Total pixels of scrollable row content: every track row plus the Master row
+  below them. The vertical scrollbar's range and clamp are both this. }
+function TArrangementView.AllRowsHeight: Integer;
+var
+  i: Integer;
+begin
+  Result := TrackRowHeight(Project.TrackCount); { the Master row }
+  for i := 0 to Project.TrackCount - 1 do
+    Result := Result + TrackRowHeight(i);
 end;
 
 function TArrangementView.TrackIndexAtY(Y: Integer): Integer;
+var
+  i, RowY: Integer;
 begin
+  Result := -1;
   if (Y < RulerHeight) or (Y >= ContentHeight) then
-    Exit(-1);
-  Result := (Y - RulerHeight + FVScrollOffset) div TrackHeight;
-  if Result >= Project.TrackCount then
-    Result := -1;
+    Exit;
+  RowY := RulerHeight - FVScrollOffset;
+  for i := 0 to Project.TrackCount - 1 do
+  begin
+    if (Y >= RowY) and (Y < RowY + TrackRowHeight(i)) then
+      Exit(i);
+    RowY := RowY + TrackRowHeight(i);
+  end;
+end;
+
+{ Same walk as TrackIndexAtY, but clamped to a real track instead of
+  answering -1: what a drag that has run off the top or bottom of the row
+  stack wants, where "no row here" is not a usable answer. }
+function TArrangementView.NearestTrackIndexAtY(Y: Integer): Integer;
+var
+  i, RowY: Integer;
+begin
+  if Project.TrackCount <= 0 then
+    Exit(0);
+  RowY := RulerHeight - FVScrollOffset;
+  for i := 0 to Project.TrackCount - 1 do
+  begin
+    if Y < RowY + TrackRowHeight(i) then
+      Exit(i);
+    RowY := RowY + TrackRowHeight(i);
+  end;
+  Result := Project.TrackCount - 1;
+end;
+
+{ The collapse toggle itself. Row heights changing moves every row below this
+  one, so the scroll offset has to be re-clamped (a collapse can leave it past
+  the new bottom) and the scrollbar re-ranged before anything repaints. }
+procedure TArrangementView.ToggleTrackCollapsed(AIndex: Integer);
+begin
+  if (AIndex < 0) or (AIndex >= Project.TrackCount) then
+    Exit;
+  Project.TrackCollapsed[AIndex] := not Project.TrackCollapsed[AIndex];
+  SetVScrollOffset(FVScrollOffset);
+  UpdateVScrollBarRange;
+  Invalidate;
 end;
 
 function TArrangementView.FrameToAbsoluteX(AFrame: Int64): Integer;
@@ -491,8 +597,10 @@ var
   y: Integer;
 begin
   y := RowTop(ATrackIndex);
+  { the same 4px inset top and bottom whatever the row height is, so a
+    collapsed track's clips squash rather than being cropped }
   Result := Rect(FrameToX(AClip.Position), y + 4,
-    FrameToX(AClip.Position + AClip.Length), y + TrackHeight - 4);
+    FrameToX(AClip.Position + AClip.Length), y + TrackRowHeight(ATrackIndex) - 4);
 end;
 
 function TArrangementView.HitTestClip(ATrackIndex: Integer; X: Integer;
@@ -586,10 +694,16 @@ begin
   Result := Frac * TrackVolumeMax;
 end;
 
+{ The grab band is a tolerance around a line, not a rectangle inside the row,
+  so on a collapsed track - whose whole row is shorter than VolumeSliderY -
+  it would sit past the bottom edge and steal clicks from the row below. A
+  collapsed track simply has no fader to hit. Same for the send sliders. }
 function TArrangementView.HitTestVolumeSlider(ATrackIndex, Y: Integer): Boolean;
 var
   SliderY: Integer;
 begin
+  if TrackIsCollapsed(ATrackIndex) then
+    Exit(False);
   SliderY := RowTop(ATrackIndex) + VolumeSliderY;
   Result := Abs(Y - SliderY) <= VolumeSliderGrabPixels;
 end;
@@ -598,7 +712,7 @@ function TArrangementView.MuteButtonRect(ATrackIndex: Integer): TRect;
 var
   y: Integer;
 begin
-  y := RowTop(ATrackIndex);
+  y := HeaderLineTop(ATrackIndex);
   Result := Rect(Width - MuteButtonSize - MuteButtonMargin, y + MuteButtonMargin,
     Width - MuteButtonMargin, y + MuteButtonMargin + MuteButtonSize);
 end;
@@ -609,7 +723,7 @@ function TArrangementView.SoloButtonRect(ATrackIndex: Integer): TRect;
 var
   y, BoxLeft: Integer;
 begin
-  y := RowTop(ATrackIndex);
+  y := HeaderLineTop(ATrackIndex);
   BoxLeft := Width - MuteButtonSize - MuteButtonMargin * 2 - SoloButtonSize;
   Result := Rect(BoxLeft, y + MuteButtonMargin,
     BoxLeft + SoloButtonSize, y + MuteButtonMargin + SoloButtonSize);
@@ -623,7 +737,7 @@ function TArrangementView.MonitorButtonRect(ATrackIndex: Integer): TRect;
 var
   y, BoxLeft: Integer;
 begin
-  y := RowTop(ATrackIndex);
+  y := HeaderLineTop(ATrackIndex);
   BoxLeft := Width - MuteButtonSize - SoloButtonSize - MonitorButtonSize -
     MuteButtonMargin * 3;
   Result := Rect(BoxLeft, y + MuteButtonMargin,
@@ -640,7 +754,7 @@ function TArrangementView.PanEditRect(ATrackIndex: Integer): TRect;
 var
   y, RightEdge: Integer;
 begin
-  y := RowTop(ATrackIndex);
+  y := HeaderLineTop(ATrackIndex);
   if Project.TrackIsInput[ATrackIndex] then
     RightEdge := MonitorButtonRect(ATrackIndex).Left - PanEditGap
   else
@@ -679,8 +793,11 @@ begin
     for s := 0 to Project.SendCount - 1 do
     begin
       by := RowTop(i) + SendRowY - SendButtonHeight div 2;
-      Shown := (i < Project.TrackCount) and (RowTop(i) >= RulerHeight) and
-        (RowTop(i) + TrackHeight <= ContentHeight) and
+      { a collapsed row has no send line to sit on - it stops at the button
+        strip, and SendRowY is below its bottom edge }
+      Shown := (i < Project.TrackCount) and not TrackIsCollapsed(i) and
+        (RowTop(i) >= RulerHeight) and
+        (RowTop(i) + TrackRowHeight(i) <= ContentHeight) and
         (by + SendButtonHeight <= SendRowTop(0));
       if FSendButtons[i][s].Visible <> Shown then
         FSendButtons[i][s].Visible := Shown;
@@ -726,8 +843,11 @@ begin
   for i := 0 to Project.MaxTracks - 1 do
   begin
     R := PanEditRect(i);
-    Shown := (i < Project.TrackCount) and (RowTop(i) >= RulerHeight) and
-      (RowTop(i) + TrackHeight <= ContentHeight) and
+    { the box would still fit on a collapsed row's one line, but that line is
+      meant to carry the label and the solo/mute pair and nothing else }
+    Shown := (i < Project.TrackCount) and not TrackIsCollapsed(i) and
+      (RowTop(i) >= RulerHeight) and
+      (RowTop(i) + TrackRowHeight(i) <= ContentHeight) and
       (R.Bottom <= SendRowTop(0));
     if FPanEdits[i].Visible <> Shown then
       { hiding a focused box fires its OnEditingDone first, so a value typed
@@ -850,6 +970,8 @@ function TArrangementView.HitTestSendSlider(ATrackIndex, ASendIndex, X, Y: Integ
 var
   SliderY, SliderX: Integer;
 begin
+  if TrackIsCollapsed(ATrackIndex) then
+    Exit(False);
   SliderY := RowTop(ATrackIndex) + SendRowY;
   SliderX := SendSliderLeft(ASendIndex);
   Result := (Abs(Y - SliderY) <= SendSliderGrabPixels) and
@@ -1062,13 +1184,13 @@ end;
 
 { mirrors SetScrollFrame/UpdateScrollBarRange/HScrollBarChange above, one
   dimension over - AOffset is in pixels (not frames; there's no zoom-level
-  concept vertically, TrackHeight is a fixed constant) and covers every
+  concept vertically, a row is one of two fixed heights) and covers every
   track row plus the Master row. }
 procedure TArrangementView.SetVScrollOffset(AOffset: Integer);
 var
   MaxOffset: Integer;
 begin
-  MaxOffset := (Project.TrackCount + 1) * TrackHeight - (ContentHeight - RulerHeight);
+  MaxOffset := AllRowsHeight - (ContentHeight - RulerHeight);
   if MaxOffset < 0 then
     MaxOffset := 0;
   if AOffset < 0 then
@@ -1088,7 +1210,7 @@ var
 begin
   if not Assigned(FVScrollBar) then
     Exit;
-  TotalPixels := (Project.TrackCount + 1) * TrackHeight; { +1 for the Master row }
+  TotalPixels := AllRowsHeight; { every track row, plus the Master row }
   Page := ContentHeight - RulerHeight;
   if Page < 1 then
     Page := 1;
@@ -1218,16 +1340,17 @@ end;
 
 procedure TArrangementView.DrawTrackHeaders;
 var
-  i, y, s, SliderY, kx: Integer;
+  i, y, h, s, SliderY, kx: Integer;
   MuteRect, SoloRect, MonitorRect: TRect;
 begin
   for i := 0 to Project.TrackCount - 1 do
   begin
     y := RowTop(i);
+    h := TrackRowHeight(i);
     { row scrolled fully or partially out of the visible band - full-row
       cull rather than clip, so nothing bleeds into the ruler above or the
       horizontal scrollbar's margin below }
-    if (y < RulerHeight) or (y + TrackHeight > ContentHeight) then
+    if (y < RulerHeight) or (y + h > ContentHeight) then
       Continue;
     { the focused row is button face pushed one step away from the rest -
       down on a light palette, up on a dark one, which is the direction
@@ -1236,14 +1359,14 @@ begin
       Canvas.Brush.Color := clBtnShadow
     else
       Canvas.Brush.Color := clBtnFace;
-    Canvas.FillRect(Rect(HeaderLeft, y, Width, y + TrackHeight));
+    Canvas.FillRect(Rect(HeaderLeft, y, Width, y + h));
     Canvas.Pen.Color := clBtnShadow;
-    Canvas.Rectangle(HeaderLeft, y, Width, y + TrackHeight);
+    Canvas.Rectangle(HeaderLeft, y, Width, y + h);
     Canvas.Brush.Style := bsClear;
     if Project.TrackIsInput[i] then
-      Canvas.TextOut(HeaderLeft + 8, y + 8, 'Input ' + IntToStr(i + 1))
+      Canvas.TextOut(HeaderLeft + 8, HeaderLineTop(i) + 8, 'Input ' + IntToStr(i + 1))
     else
-      Canvas.TextOut(HeaderLeft + 8, y + 8, 'Track ' + IntToStr(i + 1));
+      Canvas.TextOut(HeaderLeft + 8, HeaderLineTop(i) + 8, 'Track ' + IntToStr(i + 1));
     Canvas.Brush.Style := bsSolid;
 
     { simple on/off mute toggle }
@@ -1284,6 +1407,13 @@ begin
       Canvas.TextOut(MonitorRect.Left + 4, MonitorRect.Top - 1, 'M');
       Canvas.Brush.Style := bsSolid;
     end;
+
+    { a collapsed row ends here: the label and the toggle strip above are the
+      whole of it, and everything below - the fader and the send strip - lives
+      in the height that was taken away. The values themselves are untouched;
+      only the controls that would set them are gone until it expands again. }
+    if TrackIsCollapsed(i) then
+      Continue;
 
     { simple volume slider - a plain line with a draggable knob, no readout }
     SliderY := y + VolumeSliderY;
@@ -1334,15 +1464,16 @@ begin
   { master bus row, always the last row, below every real track - no clips,
     mute, or volume slider, just a click target for the master effects chain }
   y := MasterRowTop;
-  if (y >= RulerHeight) and (y + TrackHeight <= ContentHeight) then
+  h := TrackRowHeight(Project.TrackCount);
+  if (y >= RulerHeight) and (y + h <= ContentHeight) then
   begin
     if FKeyboardTrack = -2 then
       Canvas.Brush.Color := clBtnShadow
     else
       Canvas.Brush.Color := clBtnFace;
-    Canvas.FillRect(Rect(HeaderLeft, y, Width, y + TrackHeight));
+    Canvas.FillRect(Rect(HeaderLeft, y, Width, y + h));
     Canvas.Pen.Color := clBtnShadow;
-    Canvas.Rectangle(HeaderLeft, y, Width, y + TrackHeight);
+    Canvas.Rectangle(HeaderLeft, y, Width, y + h);
     Canvas.Brush.Style := bsClear;
     Canvas.Font.Style := [fsBold];
     Canvas.TextOut(HeaderLeft + 8, y + 8, 'Master');
@@ -1442,6 +1573,7 @@ procedure TArrangementView.DrawOneClip(ATrack: Integer; const AClip: TClip;
 var
   R: TRect;
   ClipName: string;
+  WaveTop: Integer;
 begin
   R := ClipPixelRect(ATrack, AClip);
   if (R.Right < 0) or (R.Left > LaneWidth) then
@@ -1459,8 +1591,16 @@ begin
     taking the waveform's legibility with it. }
   Canvas.Brush.Color := clBlack;
   Canvas.FillRect(R);
+  { on a full-height row the top 14px are reserved for the clip's name; a
+    collapsed row has no room to spare for it (see the name below, which is
+    skipped there), so the waveform takes the whole box instead of being
+    squashed into what a caption would have left }
+  if TrackIsCollapsed(ATrack) then
+    WaveTop := R.Top + 1
+  else
+    WaveTop := R.Top + 14;
   if AClip.SampleID <= High(Project.SamplePeaks) then
-    DrawWaveform(Canvas, Rect(R.Left, R.Top + 14, R.Right, R.Bottom),
+    DrawWaveform(Canvas, Rect(R.Left, WaveTop, R.Right, R.Bottom),
       Project.SamplePeaks[AClip.SampleID],
       Project.SamplePool[AClip.SampleID].FrameCount, AClip.Offset,
       AClip.Offset + AClip.Length, AClip.WarpMarkers, FTrackColors[ATrack],
@@ -1475,6 +1615,9 @@ begin
   Canvas.Pen.Width := 2;
   Canvas.Frame(R);
   Canvas.Pen.Width := 1;
+
+  if TrackIsCollapsed(ATrack) then
+    Exit;
 
   Canvas.Brush.Style := bsClear;
   { on the always-dark clip interior above, so it stays white in every mode }
@@ -1803,14 +1946,24 @@ begin
       Exit;
     end;
 
+    { In the header column the right button is the collapse toggle: over
+      exactly the rows (and the same bounds) a left-click selects a track in,
+      it folds that track down to its top line - and its timeline row with it -
+      or puts it back. The pinned S1/S2 rows and the Master row are not tracks
+      and keep no collapsed state, so they are left alone. }
+    if X >= HeaderLeft then
+    begin
+      if SendRowIndexAtY(Y) < 0 then
+        ToggleTrackCollapsed(TrackIndexAtY(Y));
+      Exit;
+    end;
+
     { Right-drag anywhere in the lane area draws a time-range selection -
       clips included. This used to be the left-button gesture, but a left
       press that landed on a clip was always a clip move/resize grab, so a
       drag that started over (or near) any clip selected and dragged that
       clip instead of drawing a range. On the right button nothing else
       competes for the press, so the drag can start from anywhere. }
-    if X >= HeaderLeft then
-      Exit;
 
     TrackIndex := TrackIndexAtY(Y);
     if TrackIndex < 0 then
@@ -1878,7 +2031,8 @@ begin
     end;
   end;
 
-  if (X >= HeaderLeft) and (Y >= MasterRowTop) and (Y < MasterRowTop + TrackHeight) then
+  if (X >= HeaderLeft) and (Y >= MasterRowTop) and
+    (Y < MasterRowTop + TrackRowHeight(Project.TrackCount)) then
   begin
     SelectClip(-1, -1);
     if FKeyboardTrack <> Project.BusMaster then
@@ -2154,11 +2308,7 @@ begin
         if FRangeEndFrame < 0 then
           FRangeEndFrame := 0;
 
-        Row := (Y - RulerHeight + FVScrollOffset) div TrackHeight;
-        if Row < 0 then
-          Row := 0;
-        if Row > Project.TrackCount - 1 then
-          Row := Project.TrackCount - 1;
+        Row := NearestTrackIndexAtY(Y);
         FRangeStartTrack := FRangeDragStartTrack;
         FRangeEndTrack := Row;
 

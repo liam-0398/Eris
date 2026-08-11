@@ -112,6 +112,14 @@ var
     both go through. }
   TrackSolo: array[0..MaxTracks - 1] of Boolean;
 
+  { Purely how tall the track draws: a collapsed track keeps its full header
+    row's worth of controls in the project, but the arrangement gives it only
+    the top line of them (label, solo, mute) and squashes its clips into what
+    is left. Lives here rather than in ArrangementView because DeleteTrack
+    renumbers every per-track array below it, and a flag held privately by the
+    view would stay behind on the wrong track. }
+  TrackCollapsed: array[0..MaxTracks - 1] of Boolean;
+
   { Input Track: records from the live capture device (ALSA line-in for now)
     instead of from its own keyboard-played/timeline audio - see AudioEngine's
     RecL/RecR record tap and the "M" input-monitor button on the track header.
@@ -339,6 +347,7 @@ begin
   TrackInstrumentEnd[ATrackIndex] := 0;
   TrackEnabled[ATrackIndex] := True;
   TrackSolo[ATrackIndex] := False;
+  TrackCollapsed[ATrackIndex] := False;
   TrackSwingPercent[ATrackIndex] := 50;
   TrackSwingDivision[ATrackIndex] := 16;
   TrackIsInput[ATrackIndex] := False;
@@ -381,6 +390,7 @@ begin
     TrackInstrumentEnd[i] := 0;
     TrackEnabled[i] := True;
     TrackSolo[i] := False;
+    TrackCollapsed[i] := False;
     TrackEffectCount[i] := 0;
     TrackSwingPercent[i] := 50;
     TrackSwingDivision[i] := 16;
@@ -728,6 +738,7 @@ begin
     TrackInstrumentEnd[t] := TrackInstrumentEnd[t + 1];
     TrackEnabled[t] := TrackEnabled[t + 1];
     TrackSolo[t] := TrackSolo[t + 1];
+    TrackCollapsed[t] := TrackCollapsed[t + 1];
     TrackEffectCount[t] := TrackEffectCount[t + 1];
     TrackSwingPercent[t] := TrackSwingPercent[t + 1];
     TrackSwingDivision[t] := TrackSwingDivision[t + 1];
