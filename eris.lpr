@@ -10,7 +10,7 @@ uses
   athreads,
   {$ENDIF}
   Interfaces, // this includes the LCL widgetset
-  Forms, MainForm
+  Forms, Config, MainForm
   { you can add units after this };
 
 {$R *.res}
@@ -26,6 +26,12 @@ begin
   Application.MainFormOnTaskbar:=True;
   {$POP}
   Application.Initialize;
+  { Before the form exists, because creating it runs AudioEngineInit (see
+    MainForm) and that reads Cfg to decide which backend to open and at what
+    buffer size. Loading afterwards and applying would mean every launch
+    opened the default device only to immediately stop and reopen the
+    configured one - an audible glitch and a device cycle for nothing. }
+  ConfigLoad;
   Application.CreateForm(TForm1, Form1);
   Application.Run;
 end.

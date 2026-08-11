@@ -5,7 +5,7 @@ unit PrefsForm;
 interface
 
 uses
-  Classes, SysUtils, Forms, Controls, StdCtrls, ComCtrls, AudioEngine
+  Classes, SysUtils, Forms, Controls, StdCtrls, ComCtrls, AudioEngine, Config
   {$IFNDEF WINDOWS}, PipeWireBackend{$ENDIF};
 
 {$IFDEF WINDOWS}
@@ -70,7 +70,7 @@ end;
 
 procedure TPrefsForm.BuildLayout;
 var
-  CurrentBufferSizeIdx, CurrentInputBufferSizeIdx: Integer;
+  CurrentBufferSizeIdx, CurrentInputBufferSizeIdx, CurrentSampleRateIdx: Integer;
   { the two row captions nothing ever greys - AddRow hands every label back,
     and these are the ones with no field to keep them in }
   BackendLabel, SP1200Label: TLabel;
@@ -142,7 +142,15 @@ begin
   FSampleRateCombo.Items.Add('44100');
   FSampleRateCombo.Items.Add('48000');
   FSampleRateCombo.Items.Add('96000');
-  FSampleRateCombo.ItemIndex := 0;
+  { The one row on this form that reflects eris.conf rather than the engine,
+    because the engine has no rate to report - it is fixed at compile time by
+    ProjectSampleRate. The value round-trips through the config file so the
+    choice is already being carried by the time a backend can act on it. }
+  CurrentSampleRateIdx := FSampleRateCombo.Items.IndexOf(IntToStr(Cfg.SampleRate));
+  if CurrentSampleRateIdx >= 0 then
+    FSampleRateCombo.ItemIndex := CurrentSampleRateIdx
+  else
+    FSampleRateCombo.ItemIndex := 0;
 
   FBufferSizeCombo := AddRow('Buffer size:', 160, FBufferSizeLabel);
   FBufferSizeCombo.Items.Add('128');
@@ -361,6 +369,25 @@ begin
   if FInputBufferSizeCombo.Enabled and
     TryStrToInt(FInputBufferSizeCombo.Text, NewInputBufferSize) then
     AudioEngineSetInputBufferSize(NewInputBufferSize);
+
+  { Read back from the engine rather than from the controls, so what lands in
+    eris.conf is what actually took effect. The two are not always the same:
+    under JACK the buffer rows are greyed and never applied above, and saving
+    the numbers still sitting in those dropdowns would persist settings this
+    session never ran with, then restore them on the next launch.
+
+    Sample rate is the exception - nothing applies it, so the combo is the
+    only source there. Theme is carried through untouched; no UI writes it
+    yet, and re-saving what was loaded keeps the key from being dropped. }
+  Cfg.BackendName := AudioEngineBackendNameFromKind(AudioEngineGetBackend);
+  Cfg.OutputDevice := AudioEngineGetPipeWireOutputDevice;
+  Cfg.InputDevice := AudioEngineGetPipeWireInputDevice;
+  Cfg.BufferSize := AudioEngineGetBufferSize;
+  Cfg.InputBufferSize := AudioEngineGetInputBufferSize;
+  Cfg.InputGainDb := Round(AudioEngineGetInputGainDb);
+  if not TryStrToInt(FSampleRateCombo.Text, Cfg.SampleRate) then
+    Cfg.SampleRate := 0;
+  ConfigSave;
 end;
 
 end.

@@ -140,6 +140,19 @@ const
 function AudioEngineGetBackend: Integer;
 procedure AudioEngineSetBackend(ABackendKind: Integer);
 
+{ Name <-> ordinal for the AudioBackend* constants above, so eris.conf can
+  store a backend by name. It has to: the ordinals are platform-relative -
+  kind 0 is ALSA on Linux and DirectSound on Windows - so a config file
+  carrying a bare 2 would mean PipeWire on one target and nothing at all on
+  the other, and these files get shared between builds of the same source
+  tree.
+
+  FromName yields -1 for '' and for any name this platform cannot provide
+  (a Linux-written 'pipewire' opened on Windows), which every caller reads as
+  "no usable preference, decide the way you would have anyway". }
+function AudioEngineBackendNameFromKind(AKind: Integer): string;
+function AudioEngineBackendKindFromName(const AName: string): Integer;
+
 { PipeWire-only device selection, by node name ('' = let PipeWire use the
   system default). Every other backend opens its own default device and
   ignores these. Applying them reopens the backend (both directions), same
@@ -204,7 +217,7 @@ uses
   {$ELSE}
   ALSABackend, JACKBackend, PipeWireBackend,
   {$ENDIF}
-  Resample, Project, SP1200, Effects, DenormalGuard, AVector;
+  Resample, Project, SP1200, Effects, DenormalGuard, AVector, Config;
 
 const
   DefaultBlockFrames = 512;
@@ -2507,6 +2520,7 @@ end;
 procedure AudioEngineInit;
 var
   i, e: Integer;
+  StoredKind: Integer;
 begin
   RingHead := 0;
   RingTail := 0;
@@ -2521,8 +2535,15 @@ begin
   RecordState := RecordStateIdle;
   RecordWritePos := 0;
   ClickPlayPos := -1;
+  { Each of these keeps the engine's own default unless eris.conf actually
+    carries a value - an absent or first-run config leaves start-up behaving
+    exactly as it did before Config existed, rather than clamping to zero. }
   InputBufferFrames := DefaultInputBufferFrames;
+  if Cfg.InputBufferSize > 0 then
+    InputBufferFrames := Cfg.InputBufferSize;
   InputGainLinear := 1.0;
+  if Cfg.InputGainDb <> 0 then
+    AudioEngineSetInputGainDb(Cfg.InputGainDb);
   AudioEngineInvalidateGrainCache;
   for i := 0 to MaxTracks - 1 do
   begin
@@ -2534,6 +2555,8 @@ begin
   AudioEngineResetEffectState;
 
   BlockFrames := DefaultBlockFrames;
+  if Cfg.BufferSize > 0 then
+    BlockFrames := Cfg.BufferSize;
   GetMem(MixBuffer, BlockFrames * OutputChannels * SizeOf(Single));
   { zeroes the sidechain tap buffers too, which the mixer reads across block
     boundaries - see TrackTapBuf }
@@ -2544,13 +2567,32 @@ begin
 
   PrecomputeClick;
 
-  { Startup default: PipeWire when it's genuinely there (library loads AND a
-    server socket exists - see PwServerPresent), otherwise the platform
-    native one. Nothing persists preferences yet, so this runs every start
-    rather than only the first. }
+  { A backend stored in eris.conf wins outright - it is an explicit choice
+    someone made in Preferences, and second-guessing it with a probe would
+    make the setting look like it had been ignored.
+
+    Failing that (first run, or a name this platform cannot provide) the old
+    behaviour stands: PipeWire when it is genuinely there - library loads AND
+    a server socket exists, see PwServerPresent - otherwise the platform
+    native one. Note this deliberately does not verify a stored JACK choice
+    either, exactly as AudioEngineSetBackend does not; an unavailable backend
+    simply never opens, which is silent but stable.
+
+    The device names are pushed straight at PipeWireBackend rather than
+    through AudioEngineSetPipeWireDevices, because that one cycles a live
+    device to apply them - here nothing is open yet, so recording the choice
+    before the first Open is all that is needed. }
   {$IFNDEF WINDOWS}
-  if PipeWireAvailable then
+  StoredKind := AudioEngineBackendKindFromName(Cfg.BackendName);
+  if StoredKind >= 0 then
+    CurrentBackendKind := StoredKind
+  else if PipeWireAvailable then
     CurrentBackendKind := AudioBackendPipeWire;
+
+  PipeWireSetOutputDevice(Cfg.OutputDevice);
+  PipeWireSetInputDevice(Cfg.InputDevice);
+  {$ELSE}
+  StoredKind := -1;
   {$ENDIF}
 
   SelectBackendRecord;
@@ -2860,6 +2902,36 @@ end;
 function AudioEngineGetBackend: Integer;
 begin
   Result := CurrentBackendKind;
+end;
+
+function AudioEngineBackendNameFromKind(AKind: Integer): string;
+begin
+  {$IFDEF WINDOWS}
+  Result := 'directsound';
+  {$ELSE}
+  case AKind of
+    AudioBackendJACK: Result := 'jack';
+    AudioBackendPipeWire: Result := 'pipewire';
+  else
+    Result := 'alsa';
+  end;
+  {$ENDIF}
+end;
+
+function AudioEngineBackendKindFromName(const AName: string): Integer;
+begin
+  Result := -1;
+  {$IFDEF WINDOWS}
+  if SameText(AName, 'directsound') then
+    Result := AudioBackendNative;
+  {$ELSE}
+  if SameText(AName, 'alsa') then
+    Result := AudioBackendNative
+  else if SameText(AName, 'jack') then
+    Result := AudioBackendJACK
+  else if SameText(AName, 'pipewire') then
+    Result := AudioBackendPipeWire;
+  {$ENDIF}
 end;
 
 procedure AudioEngineSetBackend(ABackendKind: Integer);
