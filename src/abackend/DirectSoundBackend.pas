@@ -47,6 +47,16 @@ var
   BytesPerFrame: Integer = 4; { channels * 16-bit }
   BufferSizeBytes: DWord = 0;
   WriteCursorBytes: DWord = 0;
+  { the ring's fill level cannot be derived from (write - play) mod size: every
+    write is exactly one block and the ring is a whole number of blocks, so the
+    write cursor lands exactly on the play cursor whenever the ring is FULL -
+    and the modulo reads that as 0, i.e. empty. The wait below then skips its
+    backpressure, the engine renders blocks at CPU speed over unplayed audio,
+    and the playhead lurches forward. These unwrapped byte totals make full and
+    empty distinguishable. Only the playback thread updates them. }
+  WrittenTotal: QWord = 0;
+  PlayBase: QWord = 0;
+  LastPlayCursor: DWord = 0;
   Started: Boolean = False;
   ConvertBuffer: PSmallInt = nil;
   TimerPeriodSet: Boolean = False;
@@ -80,6 +90,9 @@ var
 begin
   Result := False;
   WriteCursorBytes := 0;
+  WrittenTotal := 0;
+  PlayBase := 0;
+  LastPlayCursor := 0;
   Started := False;
 
   Hr := DirectSoundCreate(nil, DS, nil);
@@ -142,7 +155,8 @@ function DirectSoundWriteBlock(ABuffer: PSingle; AFrameCount: Integer): Boolean;
 var
   i, SampleCount, BytesNeeded: Integer;
   Value: Single;
-  PlayCursor, WriteCursorHw, Used, Free: DWord;
+  PlayCursor, WriteCursorHw: DWord;
+  Used, Free: Int64;
   Ptr1, Ptr2: Pointer;
   Bytes1, Bytes2: DWord;
   Hr: HRESULT;
@@ -187,9 +201,17 @@ begin
       Sleep(BlockMs);
       Exit;
     end;
-    Used := (WriteCursorBytes - PlayCursor + BufferSizeBytes) mod BufferSizeBytes;
-    Free := BufferSizeBytes - Used;
-    if Free >= DWord(BytesNeeded) then
+    { unwrap the hardware cursor into the same monotonic space as WrittenTotal }
+    if PlayCursor < LastPlayCursor then
+      Inc(PlayBase, BufferSizeBytes);
+    LastPlayCursor := PlayCursor;
+    Used := Int64(WrittenTotal) - Int64(PlayBase + PlayCursor);
+    if Used < 0 then { underrun: the device played past everything we wrote }
+      Used := 0
+    else if Used > Int64(BufferSizeBytes) then
+      Used := Int64(BufferSizeBytes);
+    Free := Int64(BufferSizeBytes) - Used;
+    if Free >= BytesNeeded then
       Break;
     Sleep(1);
     Inc(Attempts);
@@ -213,6 +235,9 @@ begin
     end;
     Started := False;
     WriteCursorBytes := 0;
+    WrittenTotal := 0;
+    PlayBase := 0;
+    LastPlayCursor := 0;
     Hr := DSBuffer.Lock(WriteCursorBytes, DWord(BytesNeeded), Ptr1, Bytes1,
       Ptr2, Bytes2, 0);
   end;
@@ -229,7 +254,8 @@ begin
 
   DSBuffer.Unlock(Ptr1, Bytes1, Ptr2, Bytes2);
 
-  WriteCursorBytes := (WriteCursorBytes + DWord(BytesNeeded)) mod BufferSizeBytes;
+  Inc(WrittenTotal, QWord(BytesNeeded));
+  WriteCursorBytes := DWord(WrittenTotal mod BufferSizeBytes);
 
   if not Started then
   begin
@@ -247,15 +273,25 @@ end;
 
 function DirectSoundQueuedFrames: Integer;
 var
-  PlayCursor, WriteCursorHw, Used: DWord;
+  PlayCursor, WriteCursorHw: DWord;
+  Used: Int64;
 begin
   Result := 0;
   if (DSBuffer = nil) or not Started then
     Exit;
   if DSBuffer.GetCurrentPosition(PlayCursor, WriteCursorHw) <> DS_OK then
     Exit;
-  Used := (WriteCursorBytes - PlayCursor + BufferSizeBytes) mod BufferSizeBytes;
-  Result := Used div DWord(BytesPerFrame);
+  { called from the UI thread, so it must not touch the unwrap state the
+    playback thread owns: read it, and fold in a wrap the playback thread has
+    not seen yet. The clamp also covers reading mid-update. }
+  Used := Int64(WrittenTotal) - Int64(PlayBase + PlayCursor);
+  if Used > Int64(BufferSizeBytes) then
+    Dec(Used, Int64(BufferSizeBytes));
+  if Used < 0 then
+    Used := 0
+  else if Used > Int64(BufferSizeBytes) then
+    Used := Int64(BufferSizeBytes);
+  Result := Integer(Used div Int64(BytesPerFrame));
 end;
 
 procedure DirectSoundClose;
