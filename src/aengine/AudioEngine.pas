@@ -835,16 +835,16 @@ begin
 
   if ANote.Channels = 1 then
   begin
-    s := Interpolate(ANote.Data, ANote.FrameCount, ANote.Channels, 0, ANote.Position) *
+    s := LinearInterpolate(ANote.Data, ANote.FrameCount, ANote.Channels, 0, ANote.Position) *
       ANote.Gain * AFadeGain;
     L := L + s;
     R := R + s;
   end
   else
   begin
-    L := L + Interpolate(ANote.Data, ANote.FrameCount, ANote.Channels, 0,
+    L := L + LinearInterpolate(ANote.Data, ANote.FrameCount, ANote.Channels, 0,
       ANote.Position) * ANote.Gain * AFadeGain;
-    R := R + Interpolate(ANote.Data, ANote.FrameCount, ANote.Channels, 1,
+    R := R + LinearInterpolate(ANote.Data, ANote.FrameCount, ANote.Channels, 1,
       ANote.Position) * ANote.Gain * AFadeGain;
   end;
 
@@ -1072,7 +1072,7 @@ var
     if (AbsPos < 0) or (AbsPos >= Clip^.FrameCount) then
       Result := 0
     else
-      Result := Interpolate(Clip^.Data, Clip^.FrameCount, Clip^.Channels,
+      Result := LinearInterpolate(Clip^.Data, Clip^.FrameCount, Clip^.Channels,
         AChannel, AbsPos);
   end;
 
@@ -1457,7 +1457,7 @@ var
     if (AbsPos < 0) or (AbsPos >= Clip^.FrameCount) then
       Result := 0
     else
-      Result := Interpolate(Clip^.Data, Clip^.FrameCount, Clip^.Channels,
+      Result := LinearInterpolate(Clip^.Data, Clip^.FrameCount, Clip^.Channels,
         AChannel, AbsPos);
   end;
 
@@ -1704,7 +1704,7 @@ begin
   if (AbsPos < 0) or (AbsPos >= Clip^.FrameCount) then
     Result := 0
   else
-    Result := Interpolate(Clip^.Data, Clip^.FrameCount, Clip^.Channels,
+    Result := LinearInterpolate(Clip^.Data, Clip^.FrameCount, Clip^.Channels,
       AChannel, AbsPos);
 end;
 
@@ -1746,7 +1746,7 @@ var
     if (AbsPos < 0) or (AbsPos >= Clip^.FrameCount) then
       Result := 0
     else
-      Result := Interpolate(Clip^.Data, Clip^.FrameCount, Clip^.Channels, AChannel, AbsPos);
+      Result := LinearInterpolate(Clip^.Data, Clip^.FrameCount, Clip^.Channels, AChannel, AbsPos);
   end;
 
 begin

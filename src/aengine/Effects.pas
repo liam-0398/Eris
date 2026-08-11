@@ -5,7 +5,7 @@ unit Effects;
 interface
 
 uses
-  Math, BiquadFilters, Quadraverb, BBE422A, Alesis3630, BossFZ2;
+  Math, BiquadFilters, Quadraverb, BBE422A, Alesis3630, BossFZ2, AVector;
 
 const
   { Per-chain insert slots (a track's, the master's, or a send bus's). Raised
@@ -861,16 +861,19 @@ end;
   ProcessEffect for the decimation and windowing that feed it. }
 procedure TunerDetect(var AState: TEffectState; AAnalysisRate: Double);
 var
-  HalfW, Tau, j, BestTau: Integer;
-  Diff, Delta, RunningSum, Cmnd, BestCmnd: Double;
+  HalfW, Tau, BestTau: Integer;
+  Diff, RunningSum, Cmnd, BestCmnd: Double;
   Rms, dPrev, dHere, dNext, Denom, Shift, Period, Freq, Ratio: Double;
   Found: Boolean;
+  Buf: PSingle;
 begin
   HalfW := TunerWindowSamples div 2;
+  { hoisted once: a dynamic array element is a pointer load plus an index on
+    every access, and the two reductions below are the whole cost of this
+    procedure }
+  Buf := @AState.TunerBuf[0];
 
-  Rms := 0;
-  for j := 0 to TunerWindowSamples - 1 do
-    Rms := Rms + AState.TunerBuf[j] * AState.TunerBuf[j];
+  Rms := VDotSum(Buf, Buf, TunerWindowSamples);
   Rms := Sqrt(Rms / TunerWindowSamples);
   if Rms < TunerGateRms then
   begin
@@ -892,12 +895,20 @@ begin
   Found := False;
   for Tau := 1 to HalfW do
   begin
-    Diff := 0;
-    for j := 0 to HalfW - 1 do
-    begin
-      Delta := AState.TunerBuf[j] - AState.TunerBuf[j + Tau];
-      Diff := Diff + Delta * Delta;
-    end;
+    { The whole cost of the tuner, and it runs on the PLAYBACK thread. HalfW
+      lags x HalfW samples is up to 262k iterations inside one audio callback
+      - and the Break below only spares that on a clean note, so the full
+      quadratic burst lands exactly when the input is noise, a chord or a
+      muted string and there is nothing to report anyway.
+
+      VDiffSqSum reassociates the sum and, where FMA3 is live, fuses it. Both
+      are forbidden on the mix path and both are fine here: Diff becomes a
+      frequency READOUT and never a sample. See AVector's analysis-tier note.
+
+      The window is the front HalfW samples against the same buffer offset by
+      Tau, so the two operands overlap. That is harmless - both are read-only
+      to the routine. }
+    Diff := VDiffSqSum(Buf, Buf + Tau, HalfW);
     RunningSum := RunningSum + Diff;
     if RunningSum <= 0 then
       Cmnd := 1

@@ -88,7 +88,18 @@ uses
 
 const
   CacheMagic: array[0..7] of AnsiChar = 'ERISCACH';
-  CacheVersion = 1;
+  { 2: Waveform.DetectFundamentalPeriod changed shape - its inner reductions
+    are reassociated (and FMA-fused where the CPU allows), and ELag is now
+    slid from lag to lag instead of recomputed. The answer it produces is a
+    lag in samples and is overwhelmingly likely to be identical, but it is
+    not GUARANTEED identical, and that is enough to matter here: an entry
+    written by an older build would be trusted on a cache hit while a
+    re-import of the same audio recomputed it, so one sample could end up
+    warping two ways depending on nothing but cache state. Bumping forces
+    every existing entry to be recomputed once, after which hits and misses
+    agree again. Raise this whenever any of the three cached analyses
+    changes its output for the same input, for the same reason. }
+  CacheVersion = 2;
 
   FnvOffset: QWord = QWord(14695981039346656037);
   FnvPrime: QWord = QWord(1099511628211);

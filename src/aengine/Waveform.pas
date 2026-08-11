@@ -5,7 +5,7 @@ unit Waveform;
 interface
 
 uses
-  Graphics, Types, SampleTypes, Resample;
+  Graphics, Types, SampleTypes, Resample, AVector;
 
 const
   MaxWaveformBins = 4096;
@@ -262,6 +262,7 @@ var
   MinLag, MaxLag, Lag, i, Need, Start, BestStart: Integer;
   ch: Integer;
   Mono: array of Single;
+  MonoP: PSingle;
   Sum, E0, ELag, Score, BestScore, Rms, BestRms, v: Double;
 begin
   Result := 0;
@@ -310,24 +311,49 @@ begin
     Mono[i] := v / AChannels;
   end;
 
-  E0 := 0;
-  for i := 0 to WindowFrames - 1 do
-    E0 := E0 + Mono[i] * Mono[i];
+  MonoP := @Mono[0];
+
+  E0 := VDotSum(MonoP, MonoP, WindowFrames);
   if E0 <= 0 then
     Exit;
+
+  { ELag is the energy of the window STARTING at Lag, so consecutive lags
+    share all but one sample at each end of it:
+
+      ELag(k+1) = ELag(k) - Mono[k]^2 + Mono[k + WindowFrames]^2
+
+    Recomputing it from scratch per lag was half the total work of this
+    function - MaxLag - MinLag is around 2350 lags at 48k, each summing 2048
+    squares to get a number 2046 of whose terms it already had. Seeded once
+    here for MinLag and slid at the top of the loop after that, which leaves
+    one genuine reduction per lag instead of two.
+
+    Both index reads stay in range: the update at lag k+1 reads Mono[k] and
+    Mono[k + WindowFrames], and k tops out at MaxLag - 1, so the highest
+    index touched is MaxLag - 1 + WindowFrames = Need - 1.
+
+    Accumulated drift is the thing to check with a subtractive sliding sum,
+    and it is nothing here: ELag is Double, the terms are bounded by 1, and
+    2350 updates at 1e-16 relative each land around 1e-13 - against a
+    BestScore gate of 0.6 and score gaps between competing lags in the 1e-3
+    range. }
+  ELag := VDotSum(MonoP + MinLag, MonoP + MinLag, WindowFrames);
 
   BestScore := 0;
   for Lag := MinLag to MaxLag do
   begin
-    Sum := 0;
-    ELag := 0;
-    for i := 0 to WindowFrames - 1 do
-    begin
-      Sum := Sum + Mono[i] * Mono[i + Lag];
-      ELag := ELag + Mono[i + Lag] * Mono[i + Lag];
-    end;
+    if Lag > MinLag then
+      ELag := ELag - Sqr(Double(Mono[Lag - 1]))
+        + Sqr(Double(Mono[Lag - 1 + WindowFrames]));
+    { tested before the dot product rather than after it, as the original
+      could not: a silent lag window now costs nothing instead of a full
+      WindowFrames reduction whose result was thrown away }
     if ELag <= 0 then
       Continue;
+    { one dot product over an 8KB window that is entirely L1-resident, so
+      this is compute-bound rather than memory-bound and is the one place in
+      this codebase where FMA3's two-per-cycle throughput fully lands }
+    Sum := VDotSum(MonoP, MonoP + Lag, WindowFrames);
     { normalised, so a long lag isn't penalised purely for covering quieter
       audio - without this the search collapses onto MinLag every time }
     Score := Sum / Sqrt(E0 * ELag);
@@ -346,10 +372,10 @@ end;
 
 function ComputeWaveformPeaks(const ASample: TSample): TWaveformPeaks;
 var
-  BinCount, i, f, ch: Integer;
+  BinCount, i: Integer;
   FramesPerBin: Double;
   StartF, EndF: Integer;
-  MinV, MaxV, V: Single;
+  MinV, MaxV: Single;
 begin
   BinCount := ASample.FrameCount;
   if BinCount > MaxWaveformBins then
@@ -381,15 +407,15 @@ begin
     if EndF > ASample.FrameCount then
       EndF := ASample.FrameCount;
 
-    MinV := ASample.Data[StartF * ASample.Channels];
-    MaxV := MinV;
-    for f := StartF to EndF - 1 do
-      for ch := 0 to ASample.Channels - 1 do
-      begin
-        V := ASample.Data[f * ASample.Channels + ch];
-        if V < MinV then MinV := V;
-        if V > MaxV then MaxV := V;
-      end;
+    { the nested f/ch loops this replaces walked
+      Data[StartF*Channels .. EndF*Channels), one element at a time and in
+      that exact order - the sample data is interleaved, so a bin is already
+      a single contiguous run and there was never anything to gather.
+      VMinMax is bit-identical to the loop it replaces, signed zeros and
+      NaNs included; see its declaration for why that is exact rather than
+      approximate. }
+    VMinMax(@ASample.Data[StartF * ASample.Channels],
+      (EndF - StartF) * ASample.Channels, MinV, MaxV);
 
     Result.Mins[i] := MinV;
     Result.Maxs[i] := MaxV;
@@ -522,7 +548,7 @@ var
     if (AbsPos < 0) or (AbsPos >= AFrameCount) then
       Result := 0
     else
-      Result := Interpolate(AData, AFrameCount, AChannels, AChannel, AbsPos);
+      Result := LinearInterpolate(AData, AFrameCount, AChannels, AChannel, AbsPos);
   end;
 
   function TransAt(AIndex: Integer): Int64;
@@ -775,7 +801,7 @@ var
     if (AbsPos < 0) or (AbsPos >= AFrameCount) then
       Result := 0
     else
-      Result := Interpolate(AData, AFrameCount, AChannels, AChannel, AbsPos);
+      Result := LinearInterpolate(AData, AFrameCount, AChannels, AChannel, AbsPos);
   end;
 
   procedure LoadSegment(AK: Integer);
@@ -1071,7 +1097,7 @@ var
     if (AbsPos < 0) or (AbsPos >= AFrameCount) then
       Result := 0
     else
-      Result := Interpolate(AData, AFrameCount, AChannels, AChannel, AbsPos);
+      Result := LinearInterpolate(AData, AFrameCount, AChannels, AChannel, AbsPos);
   end;
 
 begin

@@ -82,6 +82,10 @@ var
     this unit; exposed so the UI/log can say which path is live. }
   VectorPathIsAVX2: Boolean = False;
 
+  { The FMA3 tier, and a SEPARATE flag on purpose - see "The analysis tier"
+    below. Governs only VDotSum/VDiffSqSum, never anything on the mix path. }
+  VectorPathIsFMA3: Boolean = False;
+
 { ADst[i] := ADst[i] + ASrc[i] }
 procedure VAdd(ADst, ASrc: PSingle; ACount: PtrInt);
 { ADst[i] := ADst[i] + ASrc[i] * AScale }
@@ -112,6 +116,76 @@ procedure VClamp1(ADst: PSingle; ACount: PtrInt);
   appeal to "inaudible". Feeding it a non-power-of-two scale would break that
   and is why it is hard-coded rather than a parameter. }
 procedure VConvertS16(ADst: PSingle; ASrc: PSmallInt; ACount: PtrInt);
+{ AMin/AMax := the smallest and largest of ASrc[0..ACount-1].
+
+  The second reduction in this unit, and like MaxAbs it earns its place by
+  being exact rather than by being inaudible: min and max round nothing, and
+  they are associative, so folding eight lanes gives the identical answer a
+  left-to-right scan gives. Two cases make that a claim worth stating
+  precisely rather than waving at, and both are covered by the self-test:
+
+    - NaN. Every compare here is ordered as "replace the accumulator only if
+      the new value strictly wins", which is what the scalar "if V < MinV"
+      does, and which VMINPS reproduces when the incoming sample is src1 and
+      the accumulator is src2. A NaN therefore never displaces an
+      accumulator and never poisons a lane, so the lanes being folded are
+      always NaN-free and the fold order cannot matter.
+    - Signed zero. -0.0 and +0.0 compare equal, so neither ever strictly
+      wins, so whichever the accumulator was seeded with survives - in every
+      lane, and therefore through the fold too. The scalar loop keeps the
+      same one for the same reason.
+
+  ACount must be at least 1; the seed is ASrc[0]. }
+procedure VMinMax(ASrc: PSingle; ACount: PtrInt; out AMin, AMax: Single);
+
+{ ---------------------------------------------------------------------------
+  The analysis tier. Reductions, reassociated, FMA-fused - everything the
+  routines above are forbidden to do.
+
+  The rule that governs everything above is "each output depends on exactly
+  one input element, so it is bit-identical". These two break it and are
+  still safe, for a reason that is about WHERE THE ANSWER GOES rather than
+  about arithmetic. Both are pitch-detection kernels. Their output is an
+  integer lag or a frequency in Hz, consumed by a tuner readout and by warp
+  grain placement. Neither value is ever a sample. Neither reaches the mix
+  buffer, and neither can affect whether RenderProjectToWav matches
+  FillBlock - which is the actual property the no-FMA rule protects.
+
+  So they get what the header says an FMA path would need:
+
+    - their own flag (VectorPathIsFMA3), switchable independently of AVX2,
+    - their own self-test, comparing to the Pascal oracle within a TIGHT
+      relative tolerance rather than byte for byte. 1e-9 relative is roughly
+      a million times looser than the ~1e-16 an FMA fusion moves a term and
+      roughly a million times tighter than dropping a single element, so it
+      still catches every structural mistake an asm block can make - a wrong
+      lane count, a mis-strided load, a skipped tail - while passing the
+      rounding difference it exists to permit.
+
+  Both accumulate in DOUBLE, in several independent partial sums, then add
+  the partials. That is deliberately not the serial scalar order: one
+  accumulator is a dependency chain of 4-cycle adds and leaves the multiply
+  units idle three cycles in four, which was the actual cost of both loops.
+  The Pascal fallbacks reassociate the same way, so switching paths at
+  runtime does not change the answer by more than the tolerance either.
+
+  Neither has an AVX2-without-FMA variant. FMA3 shipped with AVX2 on every
+  x86-64 part that has ever sold it (Haswell on, Excavator/Zen on), so the
+  case would be dead code; a machine that somehow had one without the other
+  falls back to Pascal, which is correct, just slower. }
+
+{ Sum of AA[i] * AB[i]. }
+function VDotSum(AA, AB: PSingle; ACount: PtrInt): Double;
+{ Sum of (AA[i] - AB[i])^2.
+
+  The difference is taken in SINGLE and only then widened, in both paths.
+  That is not a corner cut. Where these callers care - at the lag that IS the
+  period - the two operands are close, and Sterbenz's lemma makes a
+  same-precision subtraction of nearby values EXACT, so the single subtract
+  loses nothing precisely where the minimum is being resolved. Away from the
+  period the terms are large and a 1e-7 relative wobble on a number the
+  caller only compares against a 0.15 threshold is meaningless. }
+function VDiffSqSum(AA, AB: PSingle; ACount: PtrInt): Double;
 
 implementation
 
@@ -192,6 +266,82 @@ var
 begin
   for i := 0 to ACount - 1 do
     ADst[i] := ASrc[i] / 32768.0;
+end;
+
+procedure VMinMaxPas(ASrc: PSingle; ACount: PtrInt; out AMin, AMax: Single);
+var
+  i: PtrInt;
+  mn, mx, v: Single;
+begin
+  mn := ASrc[0];
+  mx := mn;
+  for i := 0 to ACount - 1 do
+  begin
+    v := ASrc[i];
+    if v < mn then mn := v;
+    if v > mx then mx := v;
+  end;
+  AMin := mn;
+  AMax := mx;
+end;
+
+{ The analysis-tier oracles. Four accumulators rather than one, matching the
+  assembly's shape - see the interface note. Even with no AVX2 in the binary
+  at all this is the faster form, so it is what the callers get either way. }
+
+function VDotSumPas(AA, AB: PSingle; ACount: PtrInt): Double;
+var
+  i: PtrInt;
+  a0, a1, a2, a3: Double;
+begin
+  a0 := 0; a1 := 0; a2 := 0; a3 := 0;
+  i := 0;
+  while i + 3 < ACount do
+  begin
+    a0 := a0 + Double(AA[i]) * AB[i];
+    a1 := a1 + Double(AA[i + 1]) * AB[i + 1];
+    a2 := a2 + Double(AA[i + 2]) * AB[i + 2];
+    a3 := a3 + Double(AA[i + 3]) * AB[i + 3];
+    Inc(i, 4);
+  end;
+  while i < ACount do
+  begin
+    a0 := a0 + Double(AA[i]) * AB[i];
+    Inc(i);
+  end;
+  Result := (a0 + a1) + (a2 + a3);
+end;
+
+function VDiffSqSumPas(AA, AB: PSingle; ACount: PtrInt): Double;
+var
+  i: PtrInt;
+  a0, a1, a2, a3: Double;
+  d0, d1, d2, d3: Single;
+begin
+  a0 := 0; a1 := 0; a2 := 0; a3 := 0;
+  i := 0;
+  while i + 3 < ACount do
+  begin
+    { the Single locals are load-bearing: assigning to one forces the
+      rounding to Single that the assembly's vsubps does, whatever precision
+      FPC evaluated the subtraction in }
+    d0 := AA[i] - AB[i];
+    d1 := AA[i + 1] - AB[i + 1];
+    d2 := AA[i + 2] - AB[i + 2];
+    d3 := AA[i + 3] - AB[i + 3];
+    a0 := a0 + Double(d0) * d0;
+    a1 := a1 + Double(d1) * d1;
+    a2 := a2 + Double(d2) * d2;
+    a3 := a3 + Double(d3) * d3;
+    Inc(i, 4);
+  end;
+  while i < ACount do
+  begin
+    d0 := AA[i] - AB[i];
+    a0 := a0 + Double(d0) * d0;
+    Inc(i);
+  end;
+  Result := (a0 + a1) + (a2 + a3);
 end;
 
 {$IFDEF CPUX86_64}
@@ -523,6 +673,215 @@ begin
     VConvertS16Pas(@ADst[Vec], @ASrc[Vec], ACount - Vec);
 end;
 
+procedure VMinMaxAvx(ASrc: PSingle; ACount: PtrInt; out AMin, AMax: Single);
+var
+  mn, mx: Single;
+begin
+  { through locals rather than writing the out-parameters from inside the asm
+    block: a var/out parameter's NAME in FPC asm is the referent, not the
+    pointer, and there is no need to depend on which of those it resolves to }
+  asm
+    mov  rax, ASrc
+    mov  rcx, ACount
+    xor  rdx, rdx
+    { both accumulators seeded from element 0, exactly as the scalar does }
+    vmovss  xmm2, [rax]
+    vbroadcastss ymm2, xmm2
+    vmovaps ymm3, ymm2
+    sub  rcx, 8
+    jl   @tail_setup
+@loop8:
+    vmovups ymm0, [rax+rdx*4]
+    { incoming value is src1, accumulator src2 - the operand order is the
+      whole NaN and signed-zero argument, see VMinMax's declaration }
+    vminps  ymm2, ymm0, ymm2
+    vmaxps  ymm3, ymm0, ymm3
+    add  rdx, 8
+    cmp  rdx, rcx
+    jle  @loop8
+@tail_setup:
+    add  rcx, 8
+    { fold 8 lanes to 1, same operand order throughout }
+    vextractf128 xmm0, ymm2, 1
+    vminps  xmm2, xmm0, xmm2
+    vshufps xmm0, xmm2, xmm2, $0E
+    vminps  xmm2, xmm0, xmm2
+    vshufps xmm0, xmm2, xmm2, $01
+    vminss  xmm2, xmm0, xmm2
+    vextractf128 xmm1, ymm3, 1
+    vmaxps  xmm3, xmm1, xmm3
+    vshufps xmm1, xmm3, xmm3, $0E
+    vmaxps  xmm3, xmm1, xmm3
+    vshufps xmm1, xmm3, xmm3, $01
+    vmaxss  xmm3, xmm1, xmm3
+@tail:
+    cmp  rdx, rcx
+    jge  @done
+    vmovss  xmm0, [rax+rdx*4]
+    vminss  xmm2, xmm0, xmm2
+    vmaxss  xmm3, xmm0, xmm3
+    add  rdx, 1
+    jmp  @tail
+@done:
+    vmovss  mn, xmm2
+    vmovss  mx, xmm3
+    vzeroupper
+  end ['rax', 'rcx', 'rdx'];
+  AMin := mn;
+  AMax := mx;
+end;
+
+{ ---------------------------------------------------------------------------
+  FMA3. Same house rules as the AVX2 block above - asm body inside a normal
+  procedure so parameters live in the frame, only caller-saved registers,
+  vzeroupper before returning - plus two of its own:
+
+  - Four ymm accumulators of four DOUBLES each, sixteen input floats an
+    iteration. Four is not arbitrary: vfmadd has about four cycles of
+    latency against two issue ports, so fewer than four independent chains
+    leaves the ports idle and more than four buys nothing here, where the
+    working set is a few kilobytes and already in L1.
+  - Every widening goes vmovups-to-xmm then vcvtps2pd-from-REGISTER, never
+    vcvtps2pd straight from memory. The memory form takes a 128-bit operand
+    against a 256-bit destination and FPC sizes memory operands from the
+    destination, so it rejects it - the same trap the vbroadcastss note
+    above describes, in a different instruction.
+
+  The result comes back through a Double local rather than being left in
+  xmm0: FPC owns the function-result register and writing it from inside an
+  asm body would be assuming a calling convention that the rest of this unit
+  is careful not to assume.
+  --------------------------------------------------------------------------- }
+
+function VDotSumFma(AA, AB: PSingle; ACount: PtrInt): Double;
+var
+  Acc: Double;
+begin
+  asm
+    mov  rax, AA
+    mov  r10, AB
+    mov  rcx, ACount
+    xor  rdx, rdx
+    vxorpd ymm4, ymm4, ymm4
+    vxorpd ymm5, ymm5, ymm5
+    vxorpd ymm6, ymm6, ymm6
+    vxorpd ymm7, ymm7, ymm7
+    sub  rcx, 16
+    jl   @tail_setup
+@loop16:
+    vmovups   xmm0, [rax+rdx*4]
+    vmovups   xmm1, [r10+rdx*4]
+    vcvtps2pd ymm0, xmm0
+    vcvtps2pd ymm1, xmm1
+    vfmadd231pd ymm4, ymm0, ymm1
+    vmovups   xmm0, [rax+rdx*4+16]
+    vmovups   xmm1, [r10+rdx*4+16]
+    vcvtps2pd ymm0, xmm0
+    vcvtps2pd ymm1, xmm1
+    vfmadd231pd ymm5, ymm0, ymm1
+    vmovups   xmm0, [rax+rdx*4+32]
+    vmovups   xmm1, [r10+rdx*4+32]
+    vcvtps2pd ymm0, xmm0
+    vcvtps2pd ymm1, xmm1
+    vfmadd231pd ymm6, ymm0, ymm1
+    vmovups   xmm0, [rax+rdx*4+48]
+    vmovups   xmm1, [r10+rdx*4+48]
+    vcvtps2pd ymm0, xmm0
+    vcvtps2pd ymm1, xmm1
+    vfmadd231pd ymm7, ymm0, ymm1
+    add  rdx, 16
+    cmp  rdx, rcx
+    jle  @loop16
+@tail_setup:
+    add  rcx, 16
+    { fold the four accumulators, then the four lanes, into xmm4 low }
+    vaddpd ymm4, ymm4, ymm5
+    vaddpd ymm6, ymm6, ymm7
+    vaddpd ymm4, ymm4, ymm6
+    vextractf128 xmm5, ymm4, 1
+    vaddpd xmm4, xmm4, xmm5
+    vhaddpd xmm4, xmm4, xmm4
+@tail:
+    cmp  rdx, rcx
+    jge  @done
+    { register-form widen, for the operand-sizing reason in the block header }
+    vmovss xmm0, [rax+rdx*4]
+    vmovss xmm1, [r10+rdx*4]
+    vcvtss2sd xmm0, xmm0, xmm0
+    vcvtss2sd xmm1, xmm1, xmm1
+    vmulsd xmm0, xmm0, xmm1
+    vaddsd xmm4, xmm4, xmm0
+    add  rdx, 1
+    jmp  @tail
+@done:
+    vmovsd Acc, xmm4
+    vzeroupper
+  end ['rax', 'rcx', 'rdx', 'r10'];
+  Result := Acc;
+end;
+
+function VDiffSqSumFma(AA, AB: PSingle; ACount: PtrInt): Double;
+var
+  Acc: Double;
+begin
+  asm
+    mov  rax, AA
+    mov  r10, AB
+    mov  rcx, ACount
+    xor  rdx, rdx
+    vxorpd ymm4, ymm4, ymm4
+    vxorpd ymm5, ymm5, ymm5
+    vxorpd ymm6, ymm6, ymm6
+    vxorpd ymm7, ymm7, ymm7
+    sub  rcx, 16
+    jl   @tail_setup
+@loop16:
+    { subtract in SINGLE, widen, then square-accumulate - see VDiffSqSum's
+      declaration for why the narrow subtract is the right one }
+    vmovups   xmm0, [rax+rdx*4]
+    vsubps    xmm0, xmm0, [r10+rdx*4]
+    vcvtps2pd ymm0, xmm0
+    vfmadd231pd ymm4, ymm0, ymm0
+    vmovups   xmm1, [rax+rdx*4+16]
+    vsubps    xmm1, xmm1, [r10+rdx*4+16]
+    vcvtps2pd ymm1, xmm1
+    vfmadd231pd ymm5, ymm1, ymm1
+    vmovups   xmm2, [rax+rdx*4+32]
+    vsubps    xmm2, xmm2, [r10+rdx*4+32]
+    vcvtps2pd ymm2, xmm2
+    vfmadd231pd ymm6, ymm2, ymm2
+    vmovups   xmm3, [rax+rdx*4+48]
+    vsubps    xmm3, xmm3, [r10+rdx*4+48]
+    vcvtps2pd ymm3, xmm3
+    vfmadd231pd ymm7, ymm3, ymm3
+    add  rdx, 16
+    cmp  rdx, rcx
+    jle  @loop16
+@tail_setup:
+    add  rcx, 16
+    vaddpd ymm4, ymm4, ymm5
+    vaddpd ymm6, ymm6, ymm7
+    vaddpd ymm4, ymm4, ymm6
+    vextractf128 xmm5, ymm4, 1
+    vaddpd xmm4, xmm4, xmm5
+    vhaddpd xmm4, xmm4, xmm4
+@tail:
+    cmp  rdx, rcx
+    jge  @done
+    vmovss xmm0, [rax+rdx*4]
+    vsubss xmm0, xmm0, [r10+rdx*4]
+    vcvtss2sd xmm0, xmm0, xmm0
+    vmulsd xmm0, xmm0, xmm0
+    vaddsd xmm4, xmm4, xmm0
+    add  rdx, 1
+    jmp  @tail
+@done:
+    vmovsd Acc, xmm4
+    vzeroupper
+  end ['rax', 'rcx', 'rdx', 'r10'];
+  Result := Acc;
+end;
+
 {$ENDIF}
 
 { ---------------------------------------------------------------------------
@@ -629,6 +988,46 @@ begin
   VConvertS16Pas(ADst, ASrc, ACount);
 end;
 
+procedure VMinMax(ASrc: PSingle; ACount: PtrInt; out AMin, AMax: Single);
+begin
+  if ACount <= 0 then
+  begin
+    AMin := 0;
+    AMax := 0;
+    Exit;
+  end;
+{$IFDEF CPUX86_64}
+  if VectorPathIsAVX2 then
+  begin
+    VMinMaxAvx(ASrc, ACount, AMin, AMax);
+    Exit;
+  end;
+{$ENDIF}
+  VMinMaxPas(ASrc, ACount, AMin, AMax);
+end;
+
+function VDotSum(AA, AB: PSingle; ACount: PtrInt): Double;
+begin
+  if ACount <= 0 then
+    Exit(0);
+{$IFDEF CPUX86_64}
+  if VectorPathIsFMA3 then
+    Exit(VDotSumFma(AA, AB, ACount));
+{$ENDIF}
+  Result := VDotSumPas(AA, AB, ACount);
+end;
+
+function VDiffSqSum(AA, AB: PSingle; ACount: PtrInt): Double;
+begin
+  if ACount <= 0 then
+    Exit(0);
+{$IFDEF CPUX86_64}
+  if VectorPathIsFMA3 then
+    Exit(VDiffSqSumFma(AA, AB, ACount));
+{$ENDIF}
+  Result := VDiffSqSumPas(AA, AB, ACount);
+end;
+
 {$IFDEF CPUX86_64}
 
 { Runs every routine both ways over the same input and compares the RESULT
@@ -649,7 +1048,8 @@ var
   RefBuf2, TstBuf2: array[0..N - 1] of Single;
   S16Src: array[0..N - 1] of SmallInt;
   Seed: LongWord;
-  i: Integer;
+  i, PkN: Integer;
+  RefMin, RefMax, TstMin, TstMax: Single;
 
   function NextVal: Single;
   begin
@@ -740,6 +1140,99 @@ begin
   VConvertS16Avx(@TstBuf[0], @S16Src[0], N);
   if not Same then Exit;
 
+  { MinMax returns scalars rather than filling a buffer, so it compares its
+    two results' BYTES instead of a buffer's - which is the point, since
+    +0.0 and -0.0 are equal under "=" and only a byte compare distinguishes
+    the one this is required to return from the one it must not.
+
+    Src already carries -0.0, a denormal and values outside +/-1. Run it at a
+    length that exercises the vector body and the tail, again at an exact
+    multiple of 8 so a tail bug cannot hide, and once over a single element
+    where the seed IS the answer. }
+  for i := 0 to 2 do
+  begin
+    case i of
+      0: PkN := N;
+      1: PkN := 32;
+    else PkN := 1;
+    end;
+    VMinMaxPas(@Src[0], PkN, RefMin, RefMax);
+    VMinMaxAvx(@Src[0], PkN, TstMin, TstMax);
+    if not CompareMem(@RefMin, @TstMin, SizeOf(Single)) then Exit;
+    if not CompareMem(@RefMax, @TstMax, SizeOf(Single)) then Exit;
+  end;
+
+  Result := True;
+end;
+
+{ The analysis tier's self-test. Separate from SelfTestPasses because it
+  cannot be CompareMem - the FMA path differs from the oracle by design, so
+  byte equality would fail it every time on every machine.
+
+  The tolerance is relative and deliberately tight. Fusing a multiply-add
+  moves a term by around 1e-16 relative, and the two paths also sum their
+  partials in a different order, which over 61 terms is worth a few times
+  that; dropping, double-counting or mis-striding a single element moves the
+  answer by order 1e-2 relative. 1e-9 sits six orders clear of the first and
+  seven clear of the second, so it admits exactly the rounding it is meant
+  to admit and nothing else. The absolute floor keeps a near-zero reference
+  from making the test vacuous.
+
+  Both operand buffers are fed the same values the AVX2 test uses, denormal,
+  signed zero and out-of-range entries included, and the length is the same
+  non-multiple of 16 so the vector body and the scalar remainder are both
+  exercised. }
+function SelfTestFmaPasses: Boolean;
+const
+  N = 61; { 3 vector iterations of 16 + a 13-element tail }
+var
+  A, B: array[0..N - 1] of Single;
+  Seed: LongWord;
+  i: Integer;
+
+  function Close(ARef, ATst: Double): Boolean;
+  begin
+    Result := Abs(ATst - ARef) <= 1.0e-9 * Abs(ARef) + 1.0e-12;
+  end;
+
+begin
+  Result := False;
+  Seed := 22050;
+  for i := 0 to N - 1 do
+  begin
+    Seed := Seed * 1103515245 + 12345;
+    A[i] := ((Integer(Seed shr 8) / 8388608.0) - 1.0) * 3.0;
+    Seed := Seed * 1103515245 + 12345;
+    B[i] := (Integer(Seed shr 8) / 8388608.0) - 1.0;
+  end;
+  A[0] := 0.0;
+  A[1] := -0.0;
+  A[2] := 1.0e-42;  { denormal - and note FTZ/DAZ may be on, on both paths }
+  B[3] := 0.0;
+  B[4] := -0.0;
+  { one exactly-equal pair, so VDiffSqSum has a term that must come out at
+    precisely zero rather than merely small }
+  B[5] := A[5];
+
+  if not Close(VDotSumPas(@A[0], @B[0], N), VDotSumFma(@A[0], @B[0], N)) then
+    Exit;
+  if not Close(VDiffSqSumPas(@A[0], @B[0], N), VDiffSqSumFma(@A[0], @B[0], N)) then
+    Exit;
+
+  { and again at a length that is an exact multiple of 16, so a tail bug
+    cannot hide behind a tail that always runs }
+  if not Close(VDotSumPas(@A[0], @B[0], 32), VDotSumFma(@A[0], @B[0], 32)) then
+    Exit;
+  if not Close(VDiffSqSumPas(@A[0], @B[0], 32), VDiffSqSumFma(@A[0], @B[0], 32)) then
+    Exit;
+
+  { and at a length shorter than one vector iteration, which skips the main
+    loop entirely and must still fold four zeroed accumulators correctly }
+  if not Close(VDotSumPas(@A[0], @B[0], 5), VDotSumFma(@A[0], @B[0], 5)) then
+    Exit;
+  if not Close(VDiffSqSumPas(@A[0], @B[0], 5), VDiffSqSumFma(@A[0], @B[0], 5)) then
+    Exit;
+
   Result := True;
 end;
 
@@ -752,6 +1245,12 @@ initialization
     AVX2 instructions. }
   if AVX2Support then
     VectorPathIsAVX2 := SelfTestPasses;
+  { FMASupport rides the same _AVXSupport (so the same XGETBV check) and adds
+    the FMA3 CPUID bit. AVX2 is required as well because the assembly uses
+    ymm integer-domain forms alongside the FMAs; in practice no shipping part
+    has one without the other. }
+  if AVX2Support and FMASupport then
+    VectorPathIsFMA3 := SelfTestFmaPasses;
 {$ENDIF}
 
 end.
