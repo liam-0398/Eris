@@ -1626,6 +1626,90 @@ begin
     Result := APosition;
 end;
 
+const
+  { Cap on how many of a track's clips may be sounding at once within a
+    single block. Clips on a chopped track sit end to end rather than piled
+    up, so real overlap at one instant is a handful; this is deliberately
+    far above that. A track that somehow exceeds it is flagged and falls
+    back to the original scan-every-clip path in FillBlock, so the cap can
+    never change what is heard - only how fast it is arrived at. }
+  MaxActiveClipsPerTrack = 256;
+
+var
+  { Per-block scratch for BuildActiveClips below. Fixed-size and unit-level
+    (not local to FillBlock) so the audio thread never allocates. }
+  ActiveClipIdx: array[0..MaxTracks - 1, 0..MaxActiveClipsPerTrack - 1] of Integer;
+  ActiveClipSwung: array[0..MaxTracks - 1, 0..MaxActiveClipsPerTrack - 1] of Int64;
+  ActiveClipCount: array[0..MaxTracks - 1] of Integer;
+  ActiveClipOverflow: array[0..MaxTracks - 1] of Boolean;
+
+{ Works out, ONCE per block, which clips can sound during it and where swing
+  puts them.
+
+  FillBlock used to do this per FRAME: for every one of its 512 frames it
+  walked every clip on every track and called SwungPosition on each just to
+  discover that the clip wasn't playing. That is clip-count x 44100 calls a
+  second - fine at a hundred clips, over budget (i.e. dropouts) at a few
+  thousand, which is exactly what this app's chop-heavy workflow produces.
+
+  Nothing SwungPosition depends on - the clip's Position, the track's swing
+  settings, the tempo - changes within a block, so the result is identical
+  for all 512 frames and is computed here instead. The frame loop then only
+  visits clips that genuinely overlap the block. }
+procedure BuildActiveClips(ABeatFrames: Int64);
+var
+  t, i, n: Integer;
+  sp: Int64;
+  WinAStart, WinAEnd, WinBStart, WinBEnd: Int64;
+
+  function Overlaps(ASwung, ALength: Int64): Boolean;
+  begin
+    Result := (WinAEnd > ASwung) and (WinAStart < ASwung + ALength);
+    if (not Result) and (WinBEnd > WinBStart) then
+      Result := (WinBEnd > ASwung) and (WinBStart < ASwung + ALength);
+  end;
+
+begin
+  WinAStart := Playhead;
+  WinAEnd := Playhead + BlockFrames;
+
+  { a block that reaches the loop end carries on from LoopStart partway
+    through, so clips around the loop point are in play for it too }
+  WinBStart := 0;
+  WinBEnd := 0;
+  if LoopActive and (WinAEnd >= LoopEnd) then
+  begin
+    WinBStart := LoopStart;
+    WinBEnd := LoopStart + BlockFrames;
+  end;
+
+  for t := 0 to MaxTracks - 1 do
+  begin
+    ActiveClipCount[t] := 0;
+    ActiveClipOverflow[t] := False;
+    if not Project.TrackEnabled[t] then
+      Continue;
+
+    n := 0;
+    for i := 0 to TrackClips[t].Count - 1 do
+    begin
+      sp := SwungPosition(TrackClips[t].Items[i].Position,
+        Project.TrackSwingPercent[t], Project.TrackSwingDivision[t], ABeatFrames);
+      if not Overlaps(sp, TrackClips[t].Items[i].Length) then
+        Continue;
+      if n >= MaxActiveClipsPerTrack then
+      begin
+        ActiveClipOverflow[t] := True;
+        Break;
+      end;
+      ActiveClipIdx[t][n] := i;
+      ActiveClipSwung[t][n] := sp;
+      Inc(n);
+    end;
+    ActiveClipCount[t] := n;
+  end;
+end;
+
 procedure FillBlock;
 
   function SidechainLevelFor(ASourceTrack: Integer): Single;
@@ -1641,14 +1725,42 @@ var
   GlobalFrame, ClipRelFrame, SwungPos: Int64;
   Clip: PPlaybackClip;
   L, R, TrackL, TrackR, RecL, RecR, ClickVal, CapL, CapR: Single;
-  MonoSample: Single;
   PreFaderL, PreFaderR, SendTapL, SendTapR, SendAmount: Single;
   SendL, SendR: array[0..Project.SendCount - 1] of Single;
   BeatFrames: Int64;
+
+  { Sums one sounding clip into the current track accumulators (declared
+    after them so they are in scope). Shared by the active-list path and
+    the overflow fallback so the two can never drift apart in what they
+    mix. }
+  procedure MixClipInto(AClip: PPlaybackClip; AClipRelFrame: Int64);
+  var
+    MonoSample: Single;
+  begin
+    if AClip^.Channels = 1 then
+    begin
+      { ONE call, fanned out to both outputs. DetunedClipSample is by far
+        the most expensive thing in this loop (granular warp, the
+        overlapping-slice sum, interpolation) and is pure in its arguments,
+        so the two identical calls this replaced did all of that twice to
+        arrive at the same number - a flat 2x on every mono clip. }
+      MonoSample := DetunedClipSample(AClip, AClipRelFrame, 0) * AClip^.Gain;
+      TrackL := TrackL + MonoSample;
+      TrackR := TrackR + MonoSample;
+    end
+    else
+    begin
+      TrackL := TrackL + DetunedClipSample(AClip, AClipRelFrame, 0) * AClip^.Gain;
+      TrackR := TrackR + DetunedClipSample(AClip, AClipRelFrame, 1) * AClip^.Gain;
+    end;
+  end;
+
 begin
   FillChar(MixBuffer^, BlockFrames * OutputChannels * SizeOf(Single), 0);
   BeatFrames := Round((ProjectSampleRate * 60) / Project.TempoBPM);
   GlobalFrame := Playhead;
+  if Playing then
+    BuildActiveClips(BeatFrames);
 
   for Frame := 0 to BlockFrames - 1 do
   begin
@@ -1680,33 +1792,32 @@ begin
       TrackR := 0;
 
       if Playing then
-        for i := 0 to TrackClips[t].Count - 1 do
-        begin
-          Clip := @(TrackClips[t].Items[i]);
-          SwungPos := SwungPosition(Clip^.Position, Project.TrackSwingPercent[t],
-            Project.TrackSwingDivision[t], BeatFrames);
-          ClipRelFrame := GlobalFrame - SwungPos;
-          if (ClipRelFrame < 0) or (ClipRelFrame >= Clip^.Length) then
-            Continue;
-
-          if Clip^.Channels = 1 then
+      begin
+        if ActiveClipOverflow[t] then
+          { more simultaneous clips on this track than the active list can
+            hold - do it the original way so the mix is unaffected }
+          for i := 0 to TrackClips[t].Count - 1 do
           begin
-            { ONE call, fanned out to both outputs. DetunedClipSample is by
-              far the most expensive thing in this loop (granular warp, the
-              overlapping-slice sum, interpolation) and is pure in its
-              arguments, so the two identical calls this replaced did all of
-              that twice to arrive at the same number - a flat 2x on every
-              mono clip, on the audio thread. }
-            MonoSample := DetunedClipSample(Clip, ClipRelFrame, 0) * Clip^.Gain;
-            TrackL := TrackL + MonoSample;
-            TrackR := TrackR + MonoSample;
+            Clip := @(TrackClips[t].Items[i]);
+            SwungPos := SwungPosition(Clip^.Position, Project.TrackSwingPercent[t],
+              Project.TrackSwingDivision[t], BeatFrames);
+            ClipRelFrame := GlobalFrame - SwungPos;
+            if (ClipRelFrame < 0) or (ClipRelFrame >= Clip^.Length) then
+              Continue;
+            MixClipInto(Clip, ClipRelFrame);
           end
-          else
+        else
+          { the common path: only clips BuildActiveClips found overlapping
+            this block, with their swing already resolved }
+          for i := 0 to ActiveClipCount[t] - 1 do
           begin
-            TrackL := TrackL + DetunedClipSample(Clip, ClipRelFrame, 0) * Clip^.Gain;
-            TrackR := TrackR + DetunedClipSample(Clip, ClipRelFrame, 1) * Clip^.Gain;
+            Clip := @(TrackClips[t].Items[ActiveClipIdx[t][i]]);
+            ClipRelFrame := GlobalFrame - ActiveClipSwung[t][i];
+            if (ClipRelFrame < 0) or (ClipRelFrame >= Clip^.Length) then
+              Continue;
+            MixClipInto(Clip, ClipRelFrame);
           end;
-        end;
+      end;
 
       MixNoteVoice(LiveNotes[t], 1.0, TrackL, TrackR);
       if FadingNotes[t].Active then

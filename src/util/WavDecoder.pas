@@ -149,6 +149,15 @@ begin
 
     GetMem(ASample.Data, FrameCount * NumChannels * SizeOf(Single));
 
+    { 16-bit PCM - overwhelmingly the common case, and the one Eris itself
+      writes - gets its own loop. The general loop below re-tests the format
+      and re-enters a case on BitsPerSample for EVERY sample, which for a
+      3-minute stereo file is ~16M redundant branches on values that cannot
+      change mid-file. Same arithmetic, so the decoded floats are identical. }
+    if (AudioFormat = FormatPCM) and (BitsPerSample = 16) then
+      for i := 0 to (FrameCount * NumChannels) - 1 do
+        ASample.Data[i] := PSmallInt(@RawData[i * 2])^ / 32768.0
+    else
     for i := 0 to (FrameCount * NumChannels) - 1 do
     begin
       SrcOffset := i * BytesPerSample;

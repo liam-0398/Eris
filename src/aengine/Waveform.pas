@@ -44,9 +44,21 @@ function DetectFundamentalPeriod(AData: PSingle; AFrameCount, AChannels,
   WarpedSourceSample - so this is for callers that need one answer per frame
   rather than audio: split points, marker placement, waveform drawing. It
   needs no sample data or transients, which is why it no longer takes them. }
+{ AHintK (optional) is an in/out cursor into AMarkers holding the segment
+  index the previous call landed on. Locating the segment is otherwise a
+  linear walk restarted from marker 0 on EVERY call, which for a caller that
+  sweeps monotonically forward (DrawWaveform, one or two calls per pixel
+  column) makes drawing one warped clip O(columns x markers). Passing the
+  same variable back in makes the whole sweep O(columns + markers).
+
+  It is only ever an optimisation, never a behaviour change: the walk below
+  moves forward only, so seeding it at any index at or before the correct
+  one converges on the identical segment. Callers must therefore query in
+  non-decreasing ATimelineFrame order (an out-of-order query is still safe
+  - it is validated and reset - but gains nothing). }
 function WarpedSourcePosition(const AMarkers: TWarpMarkerArray;
   ATimelineFrame: Int64; ASampleRate: Integer = 44100;
-  AWarpMode: Integer = WarpModeBeats): Double;
+  AWarpMode: Integer = WarpModeBeats; AHintK: PInteger = nil): Double;
 
 { The audio-producing warp entry point: Ableton-style Beats (a sum over the
   transient slices sounding at ATimelineFrame - see the implementation) or a
@@ -400,7 +412,8 @@ const
   TonesMaxOnsetWalk = 64;
 
 function WarpedSourcePosition(const AMarkers: TWarpMarkerArray;
-  ATimelineFrame: Int64; ASampleRate: Integer; AWarpMode: Integer): Double;
+  ATimelineFrame: Int64; ASampleRate: Integer; AWarpMode: Integer;
+  AHintK: PInteger): Double;
 var
   k: Integer;
   SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen: Int64;
@@ -411,10 +424,19 @@ begin
   if Length(AMarkers) < 2 then
     Exit(ATimelineFrame);
 
+  { seeded from the caller's cursor when it supplied one - see the header }
   k := 0;
+  if AHintK <> nil then
+  begin
+    k := AHintK^;
+    if (k < 0) or (k > Length(AMarkers) - 2) then
+      k := 0;
+  end;
   while (k < Length(AMarkers) - 2) and
     (ATimelineFrame >= AMarkers[k + 1].TimelineFrame) do
     Inc(k);
+  if AHintK <> nil then
+    AHintK^ := k;
 
   SegStartTimeline := AMarkers[k].TimelineFrame;
   SegStartSource := AMarkers[k].SourceFrame;
@@ -1236,6 +1258,9 @@ var
   Bin0, Bin1, b: Integer;
   MinV, MaxV: Single;
   y0, y1: Integer;
+  XFrom, XTo: Integer;
+  VisRect: TRect;
+  HintK: Integer;
 begin
   BinCount := Length(APeaks.Mins);
   RectWidth := ARect.Right - ARect.Left;
@@ -1248,7 +1273,30 @@ begin
   halfH := (ARect.Bottom - ARect.Top) div 2;
   ACanvas.Pen.Color := AColor;
 
-  for x := ARect.Left to ARect.Right - 1 do
+  { Only the columns that can actually appear on screen. ARect is the clip's
+    UNCLIPPED pixel rect, so at high zoom a long clip's rect is tens of
+    thousands of pixels wide while a few hundred of them are visible - the
+    loop used to run every one of those columns, doing two warp lookups and
+    a fully off-canvas Canvas.Line each, which is the high-zoom paint stall.
+    Narrowing to the canvas' clip box also means a partial repaint (the
+    playhead moving over a couple of columns) costs a couple of columns of
+    work here rather than a full redraw of every clip. The per-column
+    arithmetic below is still keyed off ARect.Left, so which frames a given
+    x maps to is unchanged - this only skips columns that were being drawn
+    where nobody could see them. }
+  XFrom := ARect.Left;
+  XTo := ARect.Right - 1;
+  VisRect := ACanvas.ClipRect;
+  if VisRect.Right > VisRect.Left then
+  begin
+    if XFrom < VisRect.Left then
+      XFrom := VisRect.Left;
+    if XTo > VisRect.Right - 1 then
+      XTo := VisRect.Right - 1;
+  end;
+
+  HintK := 0;
+  for x := XFrom to XTo do
   begin
     TimelineFrame0 := ((x - ARect.Left) * ClipLength) div RectWidth;
     TimelineFrame1 := ((x - ARect.Left + 1) * ClipLength) div RectWidth;
@@ -1260,10 +1308,12 @@ begin
       nominal map (rather than the old per-grain ping-pong positions) is also
       what makes a stretched region read as a smooth stretch on screen instead
       of a scribble. }
+    { x ascends, so TimelineFrame0/1 do too - HintK carries the segment
+      search forward instead of restarting it from marker 0 every column }
     SrcFrame0 := AStartFrame + WarpedSourcePosition(AMarkers, TimelineFrame0,
-      44100, AWarpMode);
+      44100, AWarpMode, @HintK);
     SrcFrame1 := AStartFrame + WarpedSourcePosition(AMarkers, TimelineFrame1,
-      44100, AWarpMode);
+      44100, AWarpMode, @HintK);
     if SrcFrame1 <= SrcFrame0 then
       SrcFrame1 := SrcFrame0 + 1;
 

@@ -5,8 +5,8 @@ unit ArrangementView;
 interface
 
 uses
-  Classes, SysUtils, Math, Types, Forms, Controls, Graphics, LCLType, StdCtrls,
-  Buttons, FileBrowser, SampleTypes, Project, AudioEngine, Waveform,
+  Classes, SysUtils, Math, Types, Forms, Controls, Graphics, LCLType, LCLIntf,
+  StdCtrls, Buttons, FileBrowser, SampleTypes, Project, AudioEngine, Waveform,
   ClipOverwrite;
 
 type
@@ -60,6 +60,9 @@ type
       ScrollBarHeight = 16;
       VScrollBarWidth = 16;
       AutoScrollMarginPixels = 40;
+      { half-width of the strip repainted when the playhead moves - the line
+        itself is 1px, the margin absorbs pen width and rounding }
+      CursorInvalidateMargin = 2;
       ContentEndPaddingSeconds = 10;
       VolumeSliderY = 44;
       VolumeSliderMargin = 10;
@@ -1414,21 +1417,51 @@ end;
 procedure TArrangementView.SetCursorFrame(AFrameOffset: Int64);
 var
   x: Integer;
-  MarginFrames: Int64;
+  MarginFrames, OldFrame: Int64;
+
+  { Marks just the narrow column the playhead line occupies as needing
+    repaint, rather than the whole view. Paint still runs in full, but the
+    canvas' clip box is now that column, which DrawWaveform reads (see
+    there) - so the clip waveforms, by far the most expensive thing Paint
+    does, are skipped for every column outside it. }
+  procedure InvalidateCursorColumn(AFrame: Int64);
+  var
+    cx: Integer;
+    R: TRect;
+  begin
+    if not HandleAllocated then
+      Exit;
+    cx := FrameToX(AFrame);
+    if (cx < -CursorInvalidateMargin) or
+      (cx >= LaneWidth + CursorInvalidateMargin) then
+      Exit;
+    R := Rect(cx - CursorInvalidateMargin, 0,
+      cx + CursorInvalidateMargin + 1, ContentHeight);
+    LCLIntf.InvalidateRect(Handle, @R, False);
+  end;
+
 begin
   if AFrameOffset = FCursorFrame then
     Exit;
+  OldFrame := FCursorFrame;
   FCursorFrame := AFrameOffset;
 
   x := FrameToX(AFrameOffset);
   if (x < 0) or (x >= LaneWidth) then
   begin
+    { the view itself scrolled - everything moved, so everything repaints }
     MarginFrames := Round(Int64(AutoScrollMarginPixels) * AudioEngine.ProjectSampleRate /
       FPixelsPerSecond);
     SetScrollFrame(AFrameOffset - MarginFrames);
+    Invalidate;
+    Exit;
   end;
 
-  Invalidate;
+  { nothing moved except the playhead line: repaint where it was and where
+    it now is. This runs on every playback poll tick (6-7x a second), and
+    used to repaint every lane, header, ruler and clip waveform each time. }
+  InvalidateCursorColumn(OldFrame);
+  InvalidateCursorColumn(FCursorFrame);
 end;
 
 procedure TArrangementView.ClearSelection;
