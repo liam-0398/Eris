@@ -2728,6 +2728,17 @@ end;
 function AudioEngineGetPosition: Int64;
 begin
   Result := Playhead;
+  {$IFDEF WINDOWS}
+  { Playhead is advanced the moment FillBlock hands a block to WriteBlock, but
+    on DirectSound that block then waits in an 8-block ring before anyone hears
+    it - and the ring is refilled in lumps, so the raw value both runs ahead of
+    the audio and moves unevenly. Subtracting what is still queued gives the
+    frame actually being played. ALSA's blocking write paces FillBlock itself,
+    which is why this is Windows only. }
+  Dec(Result, DirectSoundQueuedFrames);
+  if Result < 0 then
+    Result := 0;
+  {$ENDIF}
 end;
 
 function AudioEngineLiveNoteActive(ATrackIndex: Integer): Boolean;

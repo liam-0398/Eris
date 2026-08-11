@@ -16,6 +16,13 @@ uses
 
 function CreateDirectSoundBackend: TAudioBackend;
 
+{ How much already-written audio still sits ahead of the hardware play cursor,
+  in frames. The engine advances its playhead the instant it hands a block to
+  WriteBlock, but that block is not heard until the ring drains down to it, so
+  the UI has to subtract this to show where playback actually is. Callable
+  from any thread; 0 before the buffer is playing. }
+function DirectSoundQueuedFrames: Integer;
+
 implementation
 
 {$IFDEF WINDOWS}
@@ -35,6 +42,18 @@ var
   WriteCursorBytes: DWord = 0;
   Started: Boolean = False;
   ConvertBuffer: PSmallInt = nil;
+  TimerPeriodSet: Boolean = False;
+
+{ Windows' default scheduler tick is ~15.6ms, so the Sleep(1) backpressure in
+  WriteBlock below really sleeps for three or four blocks at a time: the ring
+  gets filled in lumps, and everything paced off it - the playhead the UI
+  reads, the poll timer that reads it - moves in lumps too. Asking for 1ms
+  resolution while a stream is open makes that pacing match the block rate.
+  Declared straight against winmm rather than pulling in MMSystem. }
+function timeBeginPeriod(uPeriod: UINT): UINT; stdcall;
+  external 'winmm.dll' name 'timeBeginPeriod';
+function timeEndPeriod(uPeriod: UINT): UINT; stdcall;
+  external 'winmm.dll' name 'timeEndPeriod';
 
 function DirectSoundOpen(ASampleRate, AChannels, ABufferFrames: Integer): Boolean;
 var
@@ -90,6 +109,11 @@ begin
   end;
 
   GetMem(ConvertBuffer, ABufferFrames * AChannels * SizeOf(SmallInt));
+
+  { see TimerPeriodSet's declaration - held only while a stream is open }
+  if not TimerPeriodSet then
+    TimerPeriodSet := timeBeginPeriod(1) = 0;
+
   Result := True;
 end;
 
@@ -158,8 +182,26 @@ begin
   Result := True;
 end;
 
+function DirectSoundQueuedFrames: Integer;
+var
+  PlayCursor, WriteCursorHw, Used: DWord;
+begin
+  Result := 0;
+  if (DSBuffer = nil) or not Started then
+    Exit;
+  if DSBuffer.GetCurrentPosition(PlayCursor, WriteCursorHw) <> DS_OK then
+    Exit;
+  Used := (WriteCursorBytes - PlayCursor + BufferSizeBytes) mod BufferSizeBytes;
+  Result := Used div DWord(BytesPerFrame);
+end;
+
 procedure DirectSoundClose;
 begin
+  if TimerPeriodSet then
+  begin
+    timeEndPeriod(1);
+    TimerPeriodSet := False;
+  end;
   if DSBuffer <> nil then
   begin
     DSBuffer.Stop;

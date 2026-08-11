@@ -6,7 +6,7 @@ interface
 
 uses
   Classes, SysUtils, Controls, ExtCtrls, StdCtrls, Graphics, UIScale
-  {$IFDEF WINDOWS}, Windows{$ENDIF};
+  {$IFDEF WINDOWS}, Windows, Forms{$ENDIF};
 
 type
   TFileActivateEvent = procedure(Sender: TObject; const AFilePath: string) of object;
@@ -25,14 +25,21 @@ type
     function UserHomeDir: string;
     procedure Populate;
     {$IFDEF WINDOWS}
+    FPendingDir: string;
+    FNavQueued: Boolean;
     procedure PopulateDrives;
     function AtDriveRoot: Boolean;
+    procedure AsyncNavigate(Data: PtrInt);
     {$ENDIF}
+    procedure NavigateTo(const ADir: string);
     procedure ListBoxDblClick(Sender: TObject);
     procedure HomeButtonClick(Sender: TObject);
     procedure RootButtonClick(Sender: TObject);
   public
     constructor Create(AOwner: TComponent); override;
+    {$IFDEF WINDOWS}
+    destructor Destroy; override;
+    {$ENDIF}
     procedure SetDirectory(const ADir: string);
     function SelectedFullPath: string;
     property OnFileActivate: TFileActivateEvent read FOnFileActivate
@@ -121,6 +128,17 @@ begin
   else
     SetDirectory(UserHomeDir);
 end;
+
+{$IFDEF WINDOWS}
+{ a navigation deferred by NavigateTo must not outlive the panel it would
+  repopulate - closing the app between the click and the idle call would
+  otherwise land on a freed object }
+destructor TFileBrowser.Destroy;
+begin
+  Application.RemoveAsyncCalls(Self);
+  inherited Destroy;
+end;
+{$ENDIF}
 
 { What the "H" button means: the user's own top-level folder. }
 function TFileBrowser.UserHomeDir: string;
@@ -229,6 +247,38 @@ begin
   end;
 end;
 
+{$IFDEF WINDOWS}
+procedure TFileBrowser.AsyncNavigate(Data: PtrInt);
+begin
+  FNavQueued := False;
+  SetDirectory(FPendingDir);
+end;
+{$ENDIF}
+
+{ Rebuilding the list is the last thing a double-click does everywhere, but on
+  Windows it was happening *inside* the double-click message, while the list
+  box still holds the mouse capture the dmAutomatic drag tracker took on the
+  preceding button-down. Emptying the list out from under that tracker leaves
+  the capture stuck with no control left to release it, and the whole app stops
+  taking input - the "click .. and it hangs" freeze. So on Windows the drag is
+  stopped first and the repopulate is deferred until the click's message has
+  finished unwinding. GTK2 tracks drags itself and never had the problem, so
+  the other platforms navigate inline exactly as before. }
+procedure TFileBrowser.NavigateTo(const ADir: string);
+begin
+  {$IFDEF WINDOWS}
+  if (DragManager <> nil) and DragManager.IsDragging then
+    DragManager.DragStop(False);
+  FPendingDir := ADir;
+  if FNavQueued then
+    Exit;
+  FNavQueued := True;
+  Application.QueueAsyncCall(@AsyncNavigate, 0);
+  {$ELSE}
+  SetDirectory(ADir);
+  {$ENDIF}
+end;
+
 procedure TFileBrowser.ListBoxDblClick(Sender: TObject);
 var
   Item, NewDir: string;
@@ -242,7 +292,7 @@ begin
     the current directory instead of being appended to it }
   if FCurrentDir = DrivesDir then
   begin
-    SetDirectory(Item);
+    NavigateTo(Item);
     Exit;
   end;
   {$ENDIF}
@@ -253,17 +303,17 @@ begin
     { above a drive root there is only the drive list }
     if AtDriveRoot then
     begin
-      SetDirectory(DrivesDir);
+      NavigateTo(DrivesDir);
       Exit;
     end;
     {$ENDIF}
     NewDir := ExtractFileDir(FCurrentDir);
     if NewDir = '' then
       NewDir := PathDelim;
-    SetDirectory(NewDir);
+    NavigateTo(NewDir);
   end
   else if (Item <> '') and (Item[Length(Item)] = PathDelim) then
-    SetDirectory(IncludeTrailingPathDelimiter(FCurrentDir) + Item)
+    NavigateTo(IncludeTrailingPathDelimiter(FCurrentDir) + Item)
   else if Assigned(FOnFileActivate) then
     FOnFileActivate(Self, IncludeTrailingPathDelimiter(FCurrentDir) + Item);
 end;

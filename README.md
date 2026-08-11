@@ -1,17 +1,17 @@
 # Eris
 
-A linear-timeline, audio-only DAW for jungle/breakbeat production, inspired by
-the early versions of Ableton Live, Player Pro, and OctaMED. Written in
-Object Pascal (Lazarus/FPC).
+It's all just audio at the end of the day, the way it should be.
 
-Native, dependency-light audio path (PipeWire, ALSA or JACK on Linux;
-DirectSound on Windows),
+An audio-only DAW, inspired by the early versions of Ableton Live, Player Pro, and OctaMED. Written in Pascal (Lazarus/FPC).
+
+Native, dependency-free audio path (ALSA, JACK or Pipewire on Linux, DirectSound on Windows),
 non-destructive clip editing with three independent time-warp modes, a
 per-track/master effects chain, SP-1200-style per-track swing, and an SP-1200
 emulation mode baked identically into live monitoring and offline
 export.
 
-DISCLAIMER: HEAVY LLM usage. I know decent Pascal but do not know about audio engineering and decided to just go forth with having an LLM implement what I wanted instead of putting in the years to do it myself. I do plan to rewrite it bit by bit but the focus currently is having a usable DAW that does exactly what I want, written in the language I want and adhering to the constraints I want. Every idea and technical decision is my own but the implementation is brought to you by Claude.  
+# DISCLAIMER
+**HEAVY LLM usage** I know decent Pascal but do not know about audio engineering and decided to just go forth with having an LLM implement what I wanted instead of putting in the years to do it myself. I do plan to rewrite it bit by bit but the focus currently is having a usable DAW that does exactly what I want, written in the language I want and adhering to the constraints I want. Every idea and technical decision is my own but the implementation is brought to you by Claude.  
 
 ## Features
 
@@ -61,14 +61,8 @@ DISCLAIMER: HEAVY LLM usage. I know decent Pascal but do not know about audio en
   the octave shift transposes the whole bank by whole octaves rather than
   pitching each key individually. Created via Track > Add Sampler Track
   (`Ctrl+Alt+N`).
-- **Audio backends**: selectable at runtime in Preferences — **PipeWire**
-  (a real pw_stream client, with per-direction device selection that
-  refreshes whenever Preferences is opened; the default when PipeWire is
-  running), **ALSA**, and **JACK** (registers as a normal JACK client, works
-  against jackd or pipewire-jack). All three hand-written bindings, no
-  third-party packages. Windows uses DirectSound.
 - **Input tracks**: a dedicated track type that records the live capture
-  device (line-in) instead of its own keyboard/timeline audio, with a
+  device (ALSA line-in) instead of its own keyboard/timeline audio, with a
   per-track `M` input-monitor toggle that routes the live signal into the mix
   with no recording and no playhead movement (so it doubles as headphone
   monitoring while tracking). Input buffer size and input gain are set in
@@ -77,22 +71,24 @@ DISCLAIMER: HEAVY LLM usage. I know decent Pascal but do not know about audio en
   arm and record immediately with no count-in. Records straight to a new clip
   at the cursor on the selected track.
 - **Tempo-aware metronome**, independent of count-in, toggled on/off live.
-- **Effects**: insert chains on every track, on the send buses and on a
-  dedicated **Master** row — filters, EQ, modulation (chorus/flanger/phaser),
-  overdrive, compression, limiting, reverb, delay, an exciter, sidechain
-  ducking and a tuner. Several are emulations of the cheap 90s hardware this
-  music was actually made on, aimed at the atmospheric-jungle use of those
-  boxes rather than at being general-purpose plugins. See
-  [`documentation/usage.md`](documentation/usage.md) for the list.
+- **Effects**: per-track and master-bus insert chains — Lowpass, Highpass and
+  Bandpass filters, 4-band EQ, Limiter, Chorus, Flanger, Phaser, Overdrive
+  (band-focused saturation for loudness, 808 mangling or plain crunch),
+  Sidechain (ducking keyed off another track's level), Tuner (a passive
+  note/cents readout that listens to the track without touching it), Basic
+  Reverb, and an experimental Drowning (vocal-wash) effect (see
+  `documentation/usage.md` for every parameter), plus a dedicated **Master**
+  track/bus row for global effects.
 - **Send buses**: two sends (S1/S2) pinned to the bottom of the track pane,
   with a per-track enable button and send-level slider on every track
   header, and per-bus return level, pre/post-fader tap and mute. One effect
   chain serves every track feeding it — so a reverb shared across the break,
   the pads and the stabs is one room they are all in, at one reverb's worth
   of CPU rather than one per track.
-- **SP-1200 emulation**: a separate, always-available master-bus lo-fi mode,
-  baked identically into live playback and rendered/exported audio so they
-  can never drift apart.
+- **SP-1200 emulation**: a separate, always-available master-bus lo-fi
+  decimation mode (sample-and-hold to ~26kHz/12-bit, no anti-aliasing), baked
+  identically into live playback and rendered/exported audio so they can
+  never drift apart.
 - **Save/Load**: `.er` project files are real tar archives (native
   reader/writer, no external `tar` dependency on any platform), backward
   compatible with older loose-directory `.er` bundles. Recorded audio with no
@@ -110,6 +106,9 @@ DISCLAIMER: HEAVY LLM usage. I know decent Pascal but do not know about audio en
 - **Cross-platform UI**: hand-built widgets with DPI-aware scaling
   (Wayland HiDPI and Xorg both handled), and a Windows build using
   DirectSound.
+  **Unbeatable Performance**: Heavily optimized for the lowest latency 
+  and CPU usage possible. Inline assembly for critical components and 
+  auto-detected AVX2 support with deliberate assembly instructions. 
 
 ## Getting the toolchain (fpcupdeluxe)
 
@@ -130,10 +129,6 @@ working, self-contained install of both — without depending on whatever
 3. When both finish, the Lazarus IDE and `lazbuild` (its headless build
    tool) live under that install directory, typically at
    `~/fpcupdeluxe/lazarus/lazbuild`.
-4. **Windows target**: if you want to build/test the DirectSound backend,
-   also install the Windows cross-target packages from fpcupdeluxe's "Cross
-   compile" tab (target `win64`/`win32`) before building with
-   `--os=win64 --cpu=x86_64`.
 
 ## Compiling with lazbuild
 
@@ -147,23 +142,17 @@ From the project root (this directory):
 # or whenever something seems stale
 <path-to-fpcupdeluxe>/lazarus/lazbuild -B eris.lpi
 ```
-
 This produces an `eris` executable in the project root; run it directly
 (`./eris` on Linux). There's no separate install step.
-
-To cross-build for Windows (once the win64 packages are installed via
-fpcupdeluxe):
-
-```sh
-<path-to-fpcupdeluxe>/lazarus/lazbuild --os=win64 --cpu=x86_64 -B eris.lpi
 ```
 
 ## Documentation
 
-See [`documentation/usage.md`](documentation/usage.md) for the user guide —
-every keyboard shortcut and mouse gesture, including the non-obvious ones
+See [`documentation/usage.md`](documentation/usage.md) for the full keyboard
+shortcut and mouse-gesture reference, including non-obvious interactions
 (loop points, warp marker dragging, modifier-key behavior, etc).
 
 ## Status
 
 Under active development. Not yet feature-complete or considered stable.
+Use at your own risk, save format not fully locked in yet.
