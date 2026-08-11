@@ -23,6 +23,13 @@ function CreateDirectSoundBackend: TAudioBackend;
   from any thread; 0 before the buffer is playing. }
 function DirectSoundQueuedFrames: Integer;
 
+{ Makes the WriteBlock currently parked in its backpressure wait give up and
+  return, so the playback thread reaches its next DrainCommands immediately
+  instead of up to two seconds later. One-shot: the next wait clears it.
+  AudioEngineStop raises it, because a UI thread that has queued a stop and is
+  waiting for the engine to go idle is exactly what that delay freezes. }
+procedure DirectSoundCancelWait;
+
 implementation
 
 {$IFDEF WINDOWS}
@@ -43,6 +50,16 @@ var
   Started: Boolean = False;
   ConvertBuffer: PSmallInt = nil;
   TimerPeriodSet: Boolean = False;
+  { how long one block lasts - what to sleep for when a write can't happen, so
+    a failing device paces the playback thread the way a working one does }
+  BlockMs: Integer = 10;
+  CancelWait: LongBool = False;
+
+const
+  { not in the DirectSound unit's constants - the buffer's memory has been
+    handed to another app (exclusive-mode client, device change, resume from
+    sleep) and has to be re-acquired before it can be written again }
+  DSERR_BUFFERLOST = HRESULT($88780096);
 
 { Windows' default scheduler tick is ~15.6ms, so the Sleep(1) backpressure in
   WriteBlock below really sleeps for three or four blocks at a time: the ring
@@ -84,6 +101,10 @@ begin
 
   BytesPerFrame := AChannels * SizeOf(SmallInt);
   BufferSizeBytes := DWord(ABufferFrames * BytesPerFrame * BufferBlocks);
+  BlockMs := Round(1000.0 * ABufferFrames / ASampleRate);
+  if BlockMs < 1 then
+    BlockMs := 1;
+  CancelWait := False;
 
   FillChar(Fmt, SizeOf(Fmt), 0);
   Fmt.wFormatTag := WAVE_FORMAT_PCM;
@@ -149,8 +170,23 @@ begin
     blocks on its own }
   Attempts := 0;
   repeat
+    { see DirectSoundCancelWait - drop this block and let the caller get on
+      with draining its command queue }
+    if CancelWait then
+    begin
+      CancelWait := False;
+      Exit(True);
+    end;
     if DSBuffer.GetCurrentPosition(PlayCursor, WriteCursorHw) <> DS_OK then
+    begin
+      { the cursor query is the first thing a vanished device fails. Returning
+        straight away would leave the playback thread with nothing pacing it
+        at all: it would spin on FillBlock at full tilt, burning a core and
+        running the playhead far ahead of any audio. Sleeping a block keeps
+        the loop at real time until the device comes back or is switched. }
+      Sleep(BlockMs);
       Exit;
+    end;
     Used := (WriteCursorBytes - PlayCursor + BufferSizeBytes) mod BufferSizeBytes;
     Free := BufferSizeBytes - Used;
     if Free >= DWord(BytesNeeded) then
@@ -161,8 +197,30 @@ begin
 
   Hr := DSBuffer.Lock(WriteCursorBytes, DWord(BytesNeeded), Ptr1, Bytes1, Ptr2,
     Bytes2, 0);
+  { a lost buffer is recoverable and, until it is recovered, permanent: every
+    later Lock fails the same way, so without this the engine goes silent for
+    the rest of the session the first time anything takes the device (an
+    exclusive-mode app, a default-device change, waking from sleep). Restore
+    re-acquires the memory - its contents are gone, but we are about to
+    overwrite this block anyway, and Play has to be re-issued since a restored
+    buffer comes back stopped. }
+  if Hr = DSERR_BUFFERLOST then
+  begin
+    if DSBuffer.Restore <> DS_OK then
+    begin
+      Sleep(BlockMs);
+      Exit;
+    end;
+    Started := False;
+    WriteCursorBytes := 0;
+    Hr := DSBuffer.Lock(WriteCursorBytes, DWord(BytesNeeded), Ptr1, Bytes1,
+      Ptr2, Bytes2, 0);
+  end;
   if Hr <> DS_OK then
+  begin
+    Sleep(BlockMs); { same pacing reason as the cursor failure above }
     Exit;
+  end;
 
   if (Ptr1 <> nil) and (Bytes1 > 0) then
     Move(ConvertBuffer^, Ptr1^, Bytes1);
@@ -180,6 +238,11 @@ begin
   end;
 
   Result := True;
+end;
+
+procedure DirectSoundCancelWait;
+begin
+  CancelWait := True;
 end;
 
 function DirectSoundQueuedFrames: Integer;

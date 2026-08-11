@@ -2628,6 +2628,15 @@ var
 begin
   Cmd.Kind := ckStop;
   PushCommand(Cmd);
+  {$IFDEF WINDOWS}
+  { the command is only picked up at the top of the playback loop, and on
+    DirectSound that loop can be parked in WriteBlock's backpressure wait for
+    up to two seconds. Callers that wait for the engine to go idle before
+    freeing sample memory (File>New, File>Open) sit on the UI thread for that
+    whole time, which is a visibly frozen app. ALSA's write returns as soon as
+    the device drains, so it has no equivalent delay to shorten. }
+  DirectSoundCancelWait;
+  {$ENDIF}
 end;
 
 procedure AudioEngineSeek(AFrame: Int64);

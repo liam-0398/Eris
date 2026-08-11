@@ -156,6 +156,7 @@ type
     procedure InstrumentGainSliderChange(Sender: TObject);
     procedure WarpTonesButtonClick(Sender: TObject);
     procedure UpdateWindowTitle;
+    function WaitForEngineIdle: Boolean;
     procedure ClipDetuneSliderChange(Sender: TObject);
     procedure UpdateClipControls;
     procedure MetronomeToggleClick(Sender: TObject);
@@ -1110,6 +1111,38 @@ begin
     Caption := 'Eris - ' + ChangeFileExt(ExtractFileName(FCurrentProjectPath), '');
 end;
 
+{ Blocks until the audio thread has actually acted on a queued stop - see the
+  callers for why nothing may free sample memory before that happens.
+
+  On Windows the wait is bounded. A DirectSound device that has stopped
+  draining (unplugged, taken by an exclusive-mode app, asleep) can hold the
+  playback thread off its command queue indefinitely, and an unbounded spin
+  here turns that into a hung window the user can only kill. Returning False
+  makes the caller abandon the operation instead: the project is left exactly
+  as it was, which is safe precisely because nothing has been freed yet. ALSA
+  writes return when the device drains or errors, so on Linux this is the
+  original unbounded loop, unchanged. }
+function TForm1.WaitForEngineIdle: Boolean;
+{$IFDEF WINDOWS}
+var
+  Deadline: QWord;
+{$ENDIF}
+begin
+  {$IFDEF WINDOWS}
+  Deadline := GetTickCount64 + 5000;
+  while AudioEngineIsBusy do
+  begin
+    if GetTickCount64 > Deadline then
+      Exit(False);
+    Sleep(1);
+  end;
+  {$ELSE}
+  while AudioEngineIsBusy do
+    Sleep(1);
+  {$ENDIF}
+  Result := True;
+end;
+
 procedure TForm1.FileNewClick(Sender: TObject);
 begin
   if FBackgroundBusy then
@@ -1120,8 +1153,12 @@ begin
     read/crash on freed memory (and never touch playback again after that,
     which is exactly "can't play, no sound at all" - not just this project). }
   AudioEngineStop;
-  while AudioEngineIsBusy do
-    Sleep(1);
+  if not WaitForEngineIdle then
+  begin
+    ShowMessage('The audio device stopped responding, so the project was ' +
+      'left open. Check the device, or pick another one in Preferences.');
+    Exit;
+  end;
   AudioEngineInvalidateGrainCache;
   Project.NewProject;
   { NewProject clears the effect CHAINS, but the engine's live effect state -
@@ -1157,8 +1194,12 @@ begin
       frees the old project's sample memory out from under a still-running
       audio thread }
     AudioEngineStop;
-    while AudioEngineIsBusy do
-      Sleep(1);
+    if not WaitForEngineIdle then
+    begin
+      ShowMessage('The audio device stopped responding, so nothing was ' +
+        'opened. Check the device, or pick another one in Preferences.');
+      Exit;
+    end;
     AudioEngineInvalidateGrainCache;
 
     SetBackgroundBusy(True, 'Opening...', True);
