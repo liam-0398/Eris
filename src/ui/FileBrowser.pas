@@ -5,7 +5,8 @@ unit FileBrowser;
 interface
 
 uses
-  Classes, SysUtils, Controls, ExtCtrls, StdCtrls, Graphics, UIScale, Theme
+  Classes, SysUtils, Controls, ExtCtrls, StdCtrls, Graphics, Dialogs, UIScale,
+  Theme, Config
   {$IFDEF WINDOWS}, Windows, Forms{$ENDIF};
 
 type
@@ -17,6 +18,8 @@ type
     FNavPanel: TPanel;
     FHomeButton: TButton;
     FRootButton: TButton;
+    FCustom1Button: TButton;
+    FCustom2Button: TButton;
     FDividerPanel: TPanel;
     FListBox: TListBox;
     FCurrentDir: string;
@@ -34,9 +37,18 @@ type
     procedure AsyncNavigate(Data: PtrInt);
     {$ENDIF}
     procedure NavigateTo(const ADir: string);
+    function CustomDir(AIndex: Integer): string;
+    procedure StoreCustomDir(AIndex: Integer; const ADir: string);
+    function ChooseCustomDir(AIndex: Integer): Boolean;
+    procedure GoCustom(AIndex: Integer);
+    procedure UpdateCustomHints;
     procedure ListBoxDblClick(Sender: TObject);
     procedure HomeButtonClick(Sender: TObject);
     procedure RootButtonClick(Sender: TObject);
+    procedure Custom1ButtonClick(Sender: TObject);
+    procedure Custom2ButtonClick(Sender: TObject);
+    procedure CustomButtonMouseDown(Sender: TObject; Button: TMouseButton;
+      Shift: TShiftState; X, Y: Integer);
   public
     constructor Create(AOwner: TComponent); override;
     {$IFDEF WINDOWS}
@@ -112,6 +124,29 @@ begin
   FRootButton.Hint := 'Go to filesystem root';
   {$ENDIF}
   FRootButton.OnClick := @RootButtonClick;
+
+  { two user-defined roots, e.g. a sample library and a downloads folder. Both
+    start unconfigured: the first click asks for a folder, every click after
+    that jumps straight to it (right-click re-picks). }
+  FCustom1Button := TButton.Create(Self);
+  FCustom1Button.Parent := FNavPanel;
+  FCustom1Button.Caption := 'C1';
+  FCustom1Button.Align := alLeft;
+  FCustom1Button.Width := Px(32);
+  FCustom1Button.ShowHint := True;
+  FCustom1Button.OnClick := @Custom1ButtonClick;
+  FCustom1Button.OnMouseDown := @CustomButtonMouseDown;
+
+  FCustom2Button := TButton.Create(Self);
+  FCustom2Button.Parent := FNavPanel;
+  FCustom2Button.Caption := 'C2';
+  FCustom2Button.Align := alLeft;
+  FCustom2Button.Width := Px(32);
+  FCustom2Button.ShowHint := True;
+  FCustom2Button.OnClick := @Custom2ButtonClick;
+  FCustom2Button.OnMouseDown := @CustomButtonMouseDown;
+
+  UpdateCustomHints;
 
   FDividerPanel := TPanel.Create(Self);
   FDividerPanel.Parent := Self;
@@ -328,6 +363,122 @@ end;
 procedure TFileBrowser.HomeButtonClick(Sender: TObject);
 begin
   SetDirectory(UserHomeDir);
+end;
+
+{ Cfg is the single copy of these paths - the browser deliberately keeps no
+  cached duplicate, so a config reload or a second browser instance can never
+  disagree with what the buttons do. }
+function TFileBrowser.CustomDir(AIndex: Integer): string;
+begin
+  if AIndex = 1 then
+    Result := Cfg.Custom1Dir
+  else
+    Result := Cfg.Custom2Dir;
+end;
+
+procedure TFileBrowser.StoreCustomDir(AIndex: Integer; const ADir: string);
+begin
+  if AIndex = 1 then
+    Cfg.Custom1Dir := ADir
+  else
+    Cfg.Custom2Dir := ADir;
+  { written straight through rather than at shutdown: the choice was an
+    explicit act by the user, and ConfigSave rewrites the whole record from
+    Cfg, so nothing else in the file is disturbed }
+  ConfigSave;
+  UpdateCustomHints;
+end;
+
+{ False if the user cancelled - the caller must then leave the current
+  directory alone rather than navigating anywhere. }
+function TFileBrowser.ChooseCustomDir(AIndex: Integer): Boolean;
+var
+  Dlg: TSelectDirectoryDialog;
+  StartDir: string;
+begin
+  Result := False;
+  Dlg := TSelectDirectoryDialog.Create(nil);
+  try
+    Dlg.Title := Format('Choose the folder for C%d', [AIndex]);
+    { open on the slot's own folder when it has one, otherwise wherever the
+      browser is now - on Windows that can be the DrivesDir sentinel, which
+      DirectoryExists rejects, leaving InitialDir unset as it should }
+    StartDir := CustomDir(AIndex);
+    if not DirectoryExists(StartDir) then
+      StartDir := FCurrentDir;
+    if DirectoryExists(StartDir) then
+      Dlg.InitialDir := StartDir;
+    if not Dlg.Execute then
+      Exit;
+    if not DirectoryExists(Dlg.FileName) then
+      Exit;
+    StoreCustomDir(AIndex, Dlg.FileName);
+    Result := True;
+  finally
+    Dlg.Free;
+  end;
+end;
+
+{ A slot whose folder has since been deleted or unmounted behaves like an
+  unconfigured one and asks again, rather than navigating into nothing. }
+procedure TFileBrowser.GoCustom(AIndex: Integer);
+var
+  Dir: string;
+begin
+  Dir := CustomDir(AIndex);
+  if not DirectoryExists(Dir) then
+  begin
+    if not ChooseCustomDir(AIndex) then
+      Exit;
+    Dir := CustomDir(AIndex);
+  end;
+  SetDirectory(Dir);
+end;
+
+procedure TFileBrowser.UpdateCustomHints;
+
+  function HintFor(AIndex: Integer): string;
+  var
+    Dir: string;
+  begin
+    Dir := CustomDir(AIndex);
+    if Dir = '' then
+      Result := Format('C%d: click to choose a folder', [AIndex])
+    else
+      Result := Dir + ' (right-click to change)';
+  end;
+
+begin
+  FCustom1Button.Hint := HintFor(1);
+  FCustom2Button.Hint := HintFor(2);
+end;
+
+procedure TFileBrowser.Custom1ButtonClick(Sender: TObject);
+begin
+  GoCustom(1);
+end;
+
+procedure TFileBrowser.Custom2ButtonClick(Sender: TObject);
+begin
+  GoCustom(2);
+end;
+
+{ The only way to re-point a slot once it is set: a right-click picks a new
+  folder and goes there. Left-click never re-asks, because that would make the
+  common case - jumping to a folder you use constantly - cost a dialog. }
+procedure TFileBrowser.CustomButtonMouseDown(Sender: TObject;
+  Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
+var
+  Index: Integer;
+begin
+  if Button <> mbRight then
+    Exit;
+  if Sender = FCustom1Button then
+    Index := 1
+  else
+    Index := 2;
+  if ChooseCustomDir(Index) then
+    SetDirectory(CustomDir(Index));
 end;
 
 procedure TFileBrowser.RootButtonClick(Sender: TObject);

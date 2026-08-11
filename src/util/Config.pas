@@ -47,6 +47,11 @@ type
     InputBufferSize: Integer;
     InputGainDb: Integer;
     Theme: Integer;
+    { The two user-chosen roots behind the file browser's C1/C2 buttons. Empty
+      means "never chosen" - which is exactly what makes the first click open a
+      folder picker instead of navigating somewhere arbitrary. }
+    Custom1Dir: string;
+    Custom2Dir: string;
   end;
 
 var
@@ -67,6 +72,7 @@ uses
 const
   SecAudio = 'audio';
   SecUI = 'ui';
+  SecBrowser = 'browser';
 
 { GetAppConfigDir(False) is the per-user location the platform itself
   nominates - ~/.config/eris/ on Linux, %APPDATA%\eris\ on Windows - which is
@@ -121,6 +127,8 @@ begin
       later costs a format bump and nothing else. }
     Cfg.InputGainDb := Ini.ReadInteger(SecAudio, 'input_gain_db', 0);
     Cfg.Theme := ConfigThemeFromName(Ini.ReadString(SecUI, 'theme', 'system'));
+    Cfg.Custom1Dir := Ini.ReadString(SecBrowser, 'custom1_dir', '');
+    Cfg.Custom2Dir := Ini.ReadString(SecBrowser, 'custom2_dir', '');
   finally
     Ini.Free;
   end;
@@ -151,6 +159,8 @@ begin
     Ini.WriteInteger(SecAudio, 'input_buffer_size', Cfg.InputBufferSize);
     Ini.WriteInteger(SecAudio, 'input_gain_db', Cfg.InputGainDb);
     Ini.WriteString(SecUI, 'theme', ConfigThemeToName(Cfg.Theme));
+    Ini.WriteString(SecBrowser, 'custom1_dir', Cfg.Custom1Dir);
+    Ini.WriteString(SecBrowser, 'custom2_dir', Cfg.Custom2Dir);
 
     Ini.UpdateFile;
   finally
