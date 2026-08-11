@@ -99,19 +99,8 @@ begin
   FNavPanel.Height := Px(28);
   FNavPanel.BevelOuter := bvNone;
 
-  FHomeButton := TButton.Create(Self);
-  FHomeButton.Parent := FNavPanel;
-  FHomeButton.Caption := 'H';
-  FHomeButton.Align := alLeft;
-  FHomeButton.Width := Px(32);
-  FHomeButton.ShowHint := True;
-  {$IFDEF WINDOWS}
-  FHomeButton.Hint := 'Go to your user folder';
-  {$ELSE}
-  FHomeButton.Hint := 'Go to home folder';
-  {$ENDIF}
-  FHomeButton.OnClick := @HomeButtonClick;
-
+  { left-to-right order is / H C1 C2, and with alLeft that is simply the order
+    these are created in }
   FRootButton := TButton.Create(Self);
   FRootButton.Parent := FNavPanel;
   FRootButton.Caption := '/';
@@ -124,6 +113,19 @@ begin
   FRootButton.Hint := 'Go to filesystem root';
   {$ENDIF}
   FRootButton.OnClick := @RootButtonClick;
+
+  FHomeButton := TButton.Create(Self);
+  FHomeButton.Parent := FNavPanel;
+  FHomeButton.Caption := 'H';
+  FHomeButton.Align := alLeft;
+  FHomeButton.Width := Px(32);
+  FHomeButton.ShowHint := True;
+  {$IFDEF WINDOWS}
+  FHomeButton.Hint := 'Go to your user folder';
+  {$ELSE}
+  FHomeButton.Hint := 'Go to home folder';
+  {$ENDIF}
+  FHomeButton.OnClick := @HomeButtonClick;
 
   { two user-defined roots, e.g. a sample library and a downloads folder. Both
     start unconfigured: the first click asks for a folder, every click after
