@@ -6,7 +6,8 @@ interface
 
 uses
   Classes, SysUtils, Math, Types, Forms, Controls, Graphics, LCLType, LCLIntf,
-  StdCtrls, Buttons, FileBrowser, SampleTypes, Project, AudioEngine, Waveform,
+  Buttons, FileBrowser, SampleTypes, Project, AudioEngine, Waveform,
+  ThemeScrollBar,
   { last on purpose - Theme shadows Graphics' clBtnFace/clWindow/... with the
     themed palette, and only wins if it is resolved after Graphics }
   ClipOverwrite, Theme;
@@ -101,9 +102,9 @@ type
       FPixelsPerSecond: Double;
       FCursorFrame: Int64;
       FScrollFrame: Int64;
-      FHScrollBar: TScrollBar;
+      FHScrollBar: TThemeScrollBar;
       FVScrollOffset: Integer;
-      FVScrollBar: TScrollBar;
+      FVScrollBar: TThemeScrollBar;
       FSelectedTrack: Integer;
       FSelectedClip: Integer;
       FKeyboardTrack: Integer;
@@ -308,13 +309,13 @@ begin
       FSendButtons[i][j].OnClick := @SendButtonClick;
     end;
 
-  FHScrollBar := TScrollBar.Create(Self);
+  FHScrollBar := TThemeScrollBar.Create(Self);
   FHScrollBar.Parent := Self;
   FHScrollBar.Kind := sbHorizontal;
   FHScrollBar.OnChange := @HScrollBarChange;
 
   FVScrollOffset := 0;
-  FVScrollBar := TScrollBar.Create(Self);
+  FVScrollBar := TThemeScrollBar.Create(Self);
   FVScrollBar.Parent := Self;
   FVScrollBar.Kind := sbVertical;
   FVScrollBar.OnChange := @VScrollBarChange;

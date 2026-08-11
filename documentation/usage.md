@@ -108,8 +108,6 @@ menus are disabled until the job finishes.
 
 - **WAV** — 8/16/24/32-bit integer PCM and 32-bit float.
 - **AIFF / AIF** — 8/16/24/32-bit integer PCM.
-- **MP3** — listed by the file browser, but **not loadable yet**. Opening one
-  will fail.
 
 Export writes 16-bit stereo WAV.
 
@@ -133,8 +131,7 @@ menu, but are suspended while you're typing in a text box.
 
 ### Consolidate (`Ctrl+J`)
 
-Bounces the selected time range on **one** track down into a single new clip,
-Ableton-style. Warp mode, detune, gain and swing are all printed into it, so
+Bounces the selected time range on **one** track down into a single new clip. Warp mode, detune, gain and swing are all printed into it, so
 a consolidated clip sounds identical to what you just heard.
 
 Two deliberate limits: it only acts on a **range** selection (not a single
@@ -152,15 +149,9 @@ clip.
   nothing about the sound changes, you're just cutting it shorter or longer.
 - **Hold Shift while dragging an edge** instead does an **elastic resize**:
   the same audio gets stretched or squeezed to fit the new length (this
-  changes the pitch/speed, same as dragging the end marker in the Warp
-  editor). Use this when you want the clip to "become" a different length
-  rather than just being cut.
+  changes the pitch/speed).
 - **Hold Ctrl while dragging** (move *or* resize) bypasses grid snapping
   entirely, for free placement.
-
-  **Ctrl = ignore the grid. Shift (on a resize handle only) = stretch
-  instead of cut.** They're independent and can't be confused with each
-  other, since Shift only does anything special on a resize drag.
 
 ### Selecting a range across time and tracks
 

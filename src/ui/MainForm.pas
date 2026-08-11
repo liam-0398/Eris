@@ -7,7 +7,7 @@ interface
 uses
   Classes, SysUtils, Math, Types, Forms, Controls, Graphics, Dialogs, Menus, ExtCtrls,
   StdCtrls, ComCtrls, Buttons, LCLType, ArrangementView, PrefsForm, FileBrowser,
-  SampleTypes, AudioEngine, Project, ProjectFile, WarpEditor,
+  SampleTypes, AudioEngine, Project, ProjectFile, WarpEditor, ThemeScrollBar,
   { Theme last - it shadows Graphics' system colours; see Theme.pas }
   InstrumentEditor, SamplerEditor, Effects, EffectsRack, UIScale, MidiInput,
   Theme;
@@ -83,7 +83,7 @@ type
     FSamplerKeys: TSamplerKeysWidget;
     FSamplerEditorWidget: TPanel;
     FSamplerKeyEditor: TSamplerKeyEditor;
-    FDeviceScrollBar: TScrollBar;
+    FDeviceScrollBar: TThemeScrollBar;
     FEffectsMenu: TPopupMenu;
     FEffectWidgets: array of TEffectWidget;
     FLastEffectsRackTrack: Integer;
@@ -596,7 +596,7 @@ begin
     width outgrows the panel, e.g. when the warp widget expands for a long
     clip; sits at the very top of the bottom bar, opposite the timeline's
     own scrollbar at the bottom of the arrangement view }
-  FDeviceScrollBar := TScrollBar.Create(Self);
+  FDeviceScrollBar := TThemeScrollBar.Create(Self);
   FDeviceScrollBar.Parent := FDevicePanel;
   FDeviceScrollBar.Kind := sbHorizontal;
   FDeviceScrollBar.Align := alTop;

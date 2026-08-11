@@ -16,9 +16,9 @@ export.
 ## Features
 
 - **Arrangement view**: multi-track linear timeline (up to 32 tracks),
-  Ableton-style track headers with per-track mute and volume, horizontal and
+  track headers with per-track mute and volume, horizontal and
   vertical scrollbars, zoomable, adjustable grid snap resolution (1/16 note
-  to 1 bar). Changing the tempo rescales the whole arrangement Ableton-style
+  to 1 bar). Changing the tempo rescales the whole arrangement 
   (clips stay locked to the same bars/beats) rather than just relabelling the
   ruler.
 - **Non-destructive clip editing**: split, move, resize/trim, drag-and-drop,
@@ -53,10 +53,7 @@ export.
   interpolation, deliberately lo-fi/OctaMED character, not a clean stretch
   algorithm).
 - **Sampler Track**: a dedicated, sample-only track type — a one-octave bank
-  of 12 keyboard-played samples (one per lower-row QWERTY key) instead of a
-  single shared instrument. Drag a timeline clip onto a key to assign it,
-  preserving whatever trim the clip already had; right-click a filled key to
-  clone it into the next empty key, so one long sample (a breakbeat) can be
+  of 12 keyboard-played samples (one per lower-row QWERTY key). Drag a timeline clip onto a key to assign it, preserving whatever trim the clip already had; right-click a filled key to clone it into the next empty key, so one long sample (a breakbeat) can be
   spread across the keyboard and re-sliced per key. Unlike instrument mode,
   the octave shift transposes the whole bank by whole octaves rather than
   pitching each key individually. Created via Track > Add Sampler Track
@@ -74,31 +71,16 @@ export.
 - **Effects**: per-track and master-bus insert chains — Lowpass, Highpass and
   Bandpass filters, 4-band EQ, Limiter, Chorus, Flanger, Phaser, Overdrive
   (band-focused saturation for loudness, 808 mangling or plain crunch),
-  Sidechain (ducking keyed off another track's level), Tuner (a passive
-  note/cents readout that listens to the track without touching it), Basic
-  Reverb, and an experimental Drowning (vocal-wash) effect (see
-  `documentation/usage.md` for every parameter), plus a dedicated **Master**
-  track/bus row for global effects.
+  Sidechain, Tuner, Reverb.
 - **Send buses**: two sends (S1/S2) pinned to the bottom of the track pane,
   with a per-track enable button and send-level slider on every track
-  header, and per-bus return level, pre/post-fader tap and mute. One effect
-  chain serves every track feeding it — so a reverb shared across the break,
-  the pads and the stabs is one room they are all in, at one reverb's worth
-  of CPU rather than one per track.
+  header, and per-bus return level, pre/post-fader tap and mute. 
 - **SP-1200 emulation**: a separate, always-available master-bus lo-fi
-  decimation mode (sample-and-hold to ~26kHz/12-bit, no anti-aliasing), baked
-  identically into live playback and rendered/exported audio so they can
-  never drift apart.
-- **Save/Load**: `.er` project files are real tar archives (native
-  reader/writer, no external `tar` dependency on any platform), backward
-  compatible with older loose-directory `.er` bundles. Recorded audio with no
-  source file is embedded into the bundle as a real WAV so it survives
-  save/load. Open/Save/Export and sample import all run off the UI thread.
-- **Export**: render the full arrangement (including all effects, swing and
-  SP-1200) to a WAV file.
+  decimation mode (sample-and-hold to ~26kHz/12-bit, no anti-aliasing).
+- **Save/Load**: `.er` project files are tar archives (native
+  reader/writer, no external `tar` dependency on any platform).
 - **Sample import**: WAV (8/16/24/32-bit integer PCM and 32-bit float) and
-  AIFF/AIF (8/16/24/32-bit integer PCM), via built-in decoders — no
-  third-party codec library.
+  AIFF/AIF (8/16/24/32-bit integer PCM), via built-in decoders.
 - **File browser**: quick-nav to home/root (a drive list on Windows) and a
   resizable width, drag-and-drop straight onto a track or the instrument
   slot.

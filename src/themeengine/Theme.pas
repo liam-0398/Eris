@@ -302,8 +302,8 @@ end;
   thumb are entirely theme-drawn; menus are native GTK menus that the LCL
   cannot reach at all. This is the known ceiling - some light chrome survives
   in Dark mode, and the honest fix is System mode or a dark desktop theme, not
-  a fight with the widget toolkit. TScrollBar is in this group too, until it
-  is replaced with a drawn one.
+  a fight with the widget toolkit. TScrollBar was in this group too, which is
+  why it is no longer used anywhere - see ThemeScrollBar.pas.
 
   Do not NEED theming: the custom-painted controls - the arrangement, the
   effects rack, the editors - paint every pixel themselves through the six
