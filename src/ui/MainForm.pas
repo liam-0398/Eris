@@ -119,6 +119,7 @@ type
     procedure FileExportClick(Sender: TObject);
     procedure FileExitClick(Sender: TObject);
     procedure EditPreferencesClick(Sender: TObject);
+    procedure ApplyThemeChange;
     procedure EditUndoClick(Sender: TObject);
     procedure EditCopyClick(Sender: TObject);
     procedure EditPasteClick(Sender: TObject);
@@ -230,6 +231,11 @@ var
   Form1: TForm1;
 
 implementation
+
+uses
+  { only for the theme dropdown's round trip - the dialog writes Cfg.Theme and
+    saves, this form reads it back to decide whether to re-theme }
+  Config;
 
 {$R *.lfm}
 
@@ -1349,13 +1355,48 @@ end;
 procedure TForm1.EditPreferencesClick(Sender: TObject);
 var
   Dlg: TPrefsForm;
+  ModeBefore: Integer;
 begin
   Dlg := TPrefsForm.Create(Self);
   try
-    Dlg.ShowModal;
+    if Dlg.ShowModal = mrOK then
+    begin
+      { the dialog only writes Cfg.Theme (and saves it); applying it is this
+        side's job. Compare the mode BEFORE and AFTER rather than against
+        Cfg.Theme, because ThemeSetMode can refuse the value outright when
+        ERIS_THEME is latched - and then there is genuinely nothing to redraw. }
+      ModeBefore := ThemeGetMode;
+      ThemeSetMode(Cfg.Theme);
+      if ThemeGetMode <> ModeBefore then
+        ApplyThemeChange;
+    end;
   finally
     Dlg.Free;
   end;
+end;
+
+{ Everything a mode switch needs beyond the generic walk.
+
+  ThemeRefreshAll re-colours the native widgets on every open form and
+  invalidates the lot, which is all the custom-painted controls need - they
+  read the palette while drawing, so a repaint IS the update. The three calls
+  after it are the things the walk deliberately cannot do:
+
+  - the file browser's divider carries ThemeTagSkip, so the walk steps over it
+    and its owner has to re-assert it;
+  - the metronome and warp toggles are TSpeedButtons, which the walk flattens
+    to button face - correct for an unlit one, wrong for a lit one, and only
+    their own updater knows which is which.
+
+  ArrangementView's send buttons are the same case but need nothing here:
+  LayoutSendButtons runs from its Paint and reasserts clSkyBlue on the lit
+  ones, and the Invalidate above is what gets Paint to run. }
+procedure TForm1.ApplyThemeChange;
+begin
+  ThemeRefreshAll;
+  FFileBrowser.ThemeRefresh;
+  UpdateMetronomeToggleLook;
+  UpdateWarpModeButtons;
 end;
 
 procedure TForm1.EditUndoClick(Sender: TObject);

@@ -157,9 +157,8 @@ clip.
 
 - **Right-click and drag anywhere in the lane area** — over empty space or
   straight across clips, it doesn't matter — to draw a rectangular selection
-  across whatever tracks the drag crosses. It's the right button precisely
-  so that starting the drag on top of a clip never grabs that clip instead.
-  A plain right-click (no drag) just clears the selection.
+  across whatever tracks the drag crosses.A plain right-click (no drag) just
+  clears the selection.
 - **Left-click empty space** moves the playback cursor there and drops any
   active range; left-dragging never starts a range selection.
 - To *move* a range selection, left-drag any clip inside it — the whole
@@ -245,7 +244,7 @@ On each **track header**, under the volume fader:
 
 On each **S1 / S2 row**:
 
-- **Click anywhere on the row** to select the bus. The bottom device panel
+- **Click on the row** to select the bus. The bottom device panel
   switches to that send's effect chain — add effects there exactly as you
   would for a track or the Master row. The row shows how many effects the bus
   is carrying.
@@ -351,7 +350,7 @@ To the right of the warp mode buttons, every selected clip gets two vertical
 sliders (drag **up** to increase, matching a real mixer):
 
 - **Gain** — ±24 dB trim on that clip alone, on top of the track fader.
-- **Detune** — ±12 semitones. A pure pitch change; the clip's length on the
+- **Detune** — ±12 semitones. Pitch change; the clip's length on the
   timeline does **not** change.
 
 ### Warp modes: BT / LF / RP
@@ -366,13 +365,13 @@ selected.
   one. Pitch doesn't change with length, and it stays dense rather than going
   choppy when you squeeze a clip down. This is the only mode that handles
   large stretches well.
-- **`LF` — Tones**. For sustained low material — 808s, sub bass, anything
+- **`LF` — Low Frequency**. For sustained low material — 808s, sub bass, anything
   monophonic where Beats has nothing useful to slice at and ends up wobbling
   the pitch. Each note is placed where the warp puts it and plays through
   untouched, so there are no artefacts at all.
   - **Its limit is deliberate:** LF can't fill time. A note whose slot is
     longer than its audio just ends and leaves its natural decay — it never
-    loops, because a looped bass note is an obvious artefact. Use LF to
+    loops, because a looped bass note is an obvious artifact. Use LF to
     *correct timing*, not to stretch; use Beats for large stretches.
 - **`RP` — Re-Pitch**. The old-school one: speed and pitch change together,
   exactly like slowing down or speeding up a sampler or a record. You can
@@ -412,8 +411,7 @@ What's in the menu, by category:
 - **Filters** — lowpass, highpass and bandpass.
 - **EQ** — a 4-band EQ.
 - **Modulation** — chorus, flanger, phaser.
-- **Distortion** — Overdrive: a saturator for making something louder,
-  wrecking an 808, or just adding crunch. You can aim it at a particular
+- **Distortion** — Overdrive. You can aim it at a particular
   band, so the grit lands where you want it instead of across everything.
 - **Reverb** — a simple room-type reverb (pick a size, set dry/wet), plus a
   detailed emulation of a classic late-80s rack reverb for the atmospheric
@@ -422,17 +420,11 @@ What's in the menu, by category:
   ping-pong, with its repeats getting darker and grainier as they circulate.
 - **Dynamics** — a compressor/limiter/gate modelled on the cheap 90s
   workhorse, with peak and RMS modes and a built-in gate.
-- **Exciter** — a Sonic Maximizer-style processor: not a treble EQ, it splits
-  the signal into bands and shifts their timing against each other so the top
-  of a hit arrives in front of its own low end.
-- **Utility** — Sidechain (duck this track from another track's level) and
+- **Exciter** — a Sonic Maximizer-style processor: not a treble EQ.
+- **Utility** — Sidechain and
   Tuner (see below).
 - **Mastering** — a brick-wall limiter.
-- **Experimental** — newest and least battle-tested. Currently Drowning, a
-  vocal-wash effect.
-
-Most effects have a **Mix** control, so anything can be run in parallel
-rather than fully in-line.
+- **Experimental** — weird shit.
 
 ### Reading the Tuner
 

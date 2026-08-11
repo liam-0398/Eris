@@ -21,12 +21,14 @@ type
     FListBox: TListBox;
     FCurrentDir: string;
     FOnFileActivate: TFileActivateEvent;
+    {$IFDEF WINDOWS}
+    FPendingDir: string;
+    FNavQueued: Boolean;
+    {$ENDIF}
     function HasSampleExtension(const AName: string): Boolean;
     function UserHomeDir: string;
     procedure Populate;
     {$IFDEF WINDOWS}
-    FPendingDir: string;
-    FNavQueued: Boolean;
     procedure PopulateDrives;
     function AtDriveRoot: Boolean;
     procedure AsyncNavigate(Data: PtrInt);
@@ -40,6 +42,7 @@ type
     {$IFDEF WINDOWS}
     destructor Destroy; override;
     {$ENDIF}
+    procedure ThemeRefresh;
     procedure SetDirectory(const ADir: string);
     function SelectedFullPath: string;
     property OnFileActivate: TFileActivateEvent read FOnFileActivate
@@ -336,6 +339,16 @@ begin
   {$ELSE}
   SetDirectory(PathDelim);
   {$ENDIF}
+end;
+
+{ Re-asserts the one colour a runtime theme switch cannot reach on its own.
+  The divider carries ThemeTagSkip so the walk leaves it alone (button face
+  would erase it), which also means the walk cannot update it - only its owner
+  knows it is meant to be clWindowFrame rather than whatever it was built
+  with. Called from TForm1.ApplyThemeChange. }
+procedure TFileBrowser.ThemeRefresh;
+begin
+  FDividerPanel.Color := clWindowFrame;
 end;
 
 procedure TFileBrowser.SetDirectory(const ADir: string);

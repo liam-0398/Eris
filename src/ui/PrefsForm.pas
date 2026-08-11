@@ -31,6 +31,7 @@ type
     FInputBufferSizeCombo: TComboBox;
     FInputGainSlider: TTrackBar;
     FSP1200Combo: TComboBox;
+    FThemeCombo: TComboBox;
     FOKButton: TButton;
     FCancelButton: TButton;
     { kept only so the greying below can grey a row's caption along with its
@@ -65,16 +66,16 @@ begin
   Position := poScreenCenter;
   BorderStyle := bsDialog;
   Width := 340;
-  Height := 364;
+  Height := 400;
   BuildLayout;
 end;
 
 procedure TPrefsForm.BuildLayout;
 var
   CurrentBufferSizeIdx, CurrentInputBufferSizeIdx, CurrentSampleRateIdx: Integer;
-  { the two row captions nothing ever greys - AddRow hands every label back,
-    and these are the ones with no field to keep them in }
-  BackendLabel, SP1200Label: TLabel;
+  { the row captions nothing ever greys - AddRow hands every label back, and
+    these are the ones with no field to keep them in }
+  BackendLabel, SP1200Label, ThemeLabel: TLabel;
 
   function AddRow(const ALabel: string; ATop: Integer;
     out ALabelCtl: TLabel): TComboBox;
@@ -204,12 +205,31 @@ begin
   FInputGainSlider.Hint := IntToStr(FInputGainSlider.Position) + ' dB';
   FInputGainSlider.OnChange := @InputGainSliderChange;
 
+  { The only row on this form that is not an audio setting, so it sits last
+    rather than among them. Item order IS Config's ThemeSystem/Light/Dark
+    values, but ThemeIndexToMode below maps them explicitly rather than
+    leaning on that.
+
+    Seeded from ThemeGetMode, not from Cfg.Theme: those differ when ERIS_THEME
+    is set, and the dropdown should say what is on screen rather than what is
+    in the file. }
+  FThemeCombo := AddRow('Theme:', 304, ThemeLabel);
+  FThemeCombo.Items.Add('Follow system');
+  FThemeCombo.Items.Add('Light');
+  FThemeCombo.Items.Add('Dark');
+  case ThemeGetMode of
+    ThemeLight: FThemeCombo.ItemIndex := 1;
+    ThemeDark: FThemeCombo.ItemIndex := 2;
+  else
+    FThemeCombo.ItemIndex := 0;
+  end;
+
   FOKButton := TButton.Create(Self);
   FOKButton.Parent := Self;
   FOKButton.Caption := 'OK';
   FOKButton.ModalResult := mrOK;
   FOKButton.Left := 164;
-  FOKButton.Top := 308;
+  FOKButton.Top := 344;
   FOKButton.Width := 75;
   FOKButton.Default := True;
   FOKButton.OnClick := @OKButtonClick;
@@ -219,7 +239,7 @@ begin
   FCancelButton.Caption := 'Cancel';
   FCancelButton.ModalResult := mrCancel;
   FCancelButton.Left := 245;
-  FCancelButton.Top := 308;
+  FCancelButton.Top := 344;
   FCancelButton.Width := 75;
   FCancelButton.Cancel := True;
 
@@ -386,8 +406,12 @@ begin
     session never ran with, then restore them on the next launch.
 
     Sample rate is the exception - nothing applies it, so the combo is the
-    only source there. Theme is carried through untouched; no UI writes it
-    yet, and re-saving what was loaded keeps the key from being dropped. }
+    only source there, and theme is now a second one: it has no engine to ask
+    either. Applying it is deliberately NOT done here - MainForm compares
+    Cfg.Theme against the live mode after ShowModal returns and re-themes from
+    there, because the walk has to reach every open form plus the fixups only
+    MainForm can make, and a dialog has no business reaching up to its
+    owner. }
   Cfg.BackendName := AudioEngineBackendNameFromKind(AudioEngineGetBackend);
   Cfg.OutputDevice := AudioEngineGetPipeWireOutputDevice;
   Cfg.InputDevice := AudioEngineGetPipeWireInputDevice;
@@ -396,6 +420,12 @@ begin
   Cfg.InputGainDb := Round(AudioEngineGetInputGainDb);
   if not TryStrToInt(FSampleRateCombo.Text, Cfg.SampleRate) then
     Cfg.SampleRate := 0;
+  case FThemeCombo.ItemIndex of
+    1: Cfg.Theme := ThemeLight;
+    2: Cfg.Theme := ThemeDark;
+  else
+    Cfg.Theme := ThemeSystem;
+  end;
   ConfigSave;
 end;
 

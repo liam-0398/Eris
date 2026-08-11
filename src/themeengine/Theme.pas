@@ -52,6 +52,25 @@ function ThemeIsDark: Boolean;
   the desktop theme, and pinning colours on them would be the opposite. }
 procedure ThemeApply(AControl: TControl);
 
+{ Re-themes every open form in place, for a mode switched at runtime. Walks
+  each of Screen.Forms the way ThemeApply does and repaints everything under
+  them, so the custom-painted controls - which read the palette as they draw
+  and so are already correct the moment the mode changes - actually redraw.
+
+  Unlike ThemeApply this does NOT skip System mode: it puts clDefault back on
+  every widget it would otherwise have pinned, which is what hands them to the
+  desktop theme again. Without that, Dark -> System would leave a form full of
+  widgets still wearing dark colours, since "do nothing" only means
+  passthrough when nothing was ever set.
+
+  Two things it cannot reach on its own, both by design - the caller fixes
+  them up afterwards (see TForm1.ApplyThemeChange):
+  - ThemeTagSkip controls, which are skipped here and have to be re-asserted
+    by whoever owns their meaning.
+  - controls lit with a fixed accent, which the allow-list flattens back to
+    button face; their own "look" updater puts the accent back. }
+procedure ThemeRefreshAll;
+
 { Put this in a control's Tag and ThemeApply will pass over it AND everything
   parented under it, leaving whatever colour it was built with.
 
@@ -97,12 +116,14 @@ var
   FOverrideChecked: Boolean = False;
   FOverride: Integer = -1;
 
-{ A development override, so the phases that build dark mode before there is
-  any UI to select it are not written blind. ERIS_THEME=dark|light|system beats
-  both the config file and (later) the Preferences dropdown - an override that
-  could be silently countermanded by whatever was last saved would be useless
-  for looking at a change. Unset, which is every normal launch, changes
-  nothing. }
+{ A development override, kept now that the dropdown exists because it is
+  still the only way to launch straight into a mode. ERIS_THEME=dark|light|
+  system beats both the config file and the Preferences dropdown - an override
+  that could be silently countermanded by whatever was last saved would be
+  useless for looking at a change. Picking a theme in Preferences while it is
+  latched therefore saves the choice but does not apply it, and MainForm's
+  before/after comparison is what keeps that from repainting for nothing.
+  Unset, which is every normal launch, changes nothing. }
 procedure CheckOverride;
 var
   S: string;
@@ -310,46 +331,78 @@ end;
   shadowed colours above, so they are already themed by the time this runs.
 
   Casts are explicit rather than going through TControl because Color and Font
-  are not published at that level for every descendant. }
-procedure ThemeApply(AControl: TControl);
+  are not published at that level for every descendant.
+
+  AReset swaps every colour this would assign for clDefault, which is how a
+  runtime switch back to System hands the widgets to the desktop theme again -
+  the same allow-list, run backwards. ARepaint additionally invalidates every
+  control the walk touches, INCLUDING the ones the allow-list leaves alone:
+  those are the custom-painted ones, which need nothing but a repaint to pick
+  the new palette up. Both are False for the startup call, where nothing is on
+  screen yet to repaint and there is nothing pinned to undo. }
+procedure ThemeWalk(AControl: TControl; AReset, ARepaint: Boolean);
 var
   i: Integer;
   Parent: TWinControl;
+  FaceColor, TextColor, CanvasColor: TColor;
+  {$IFNDEF WINDOWS}
+  NativeTextColor: TColor;
+  {$ENDIF}
 begin
-  if FMode = ThemeSystem then
-    Exit;
   { opted out - and so is everything under it, which is the useful reading
     for a control that manages its own appearance }
   if AControl.Tag = ThemeTagSkip then
     Exit;
 
+  if AReset then
+  begin
+    FaceColor := clDefault;
+    TextColor := clDefault;
+    CanvasColor := clDefault;
+  end
+  else
+  begin
+    FaceColor := clBtnFace;
+    TextColor := clWindowText;
+    CanvasColor := clWindow;
+  end;
+  {$IFNDEF WINDOWS}
+  { the widgetset's own button-text colour, deliberately NOT the palette's -
+    see the TCustomButton branch below. Black on a light desktop theme, which
+    is the case that needed fixing. }
+  if AReset then
+    NativeTextColor := clDefault
+  else
+    NativeTextColor := Graphics.clBtnText;
+  {$ENDIF}
+
   if AControl is TCustomForm then
-    TCustomForm(AControl).Color := clBtnFace
+    TCustomForm(AControl).Color := FaceColor
   else if AControl is TPanel then
   begin
-    TPanel(AControl).Color := clBtnFace;
-    TPanel(AControl).Font.Color := clWindowText;
+    TPanel(AControl).Color := FaceColor;
+    TPanel(AControl).Font.Color := TextColor;
   end
   else if AControl is TLabel then
     { background only ever comes from the parent - a TLabel is transparent on
       both widgetsets, which is exactly what we want, so only the text moves }
-    TLabel(AControl).Font.Color := clWindowText
+    TLabel(AControl).Font.Color := TextColor
   else if AControl is TEdit then
   begin
-    TEdit(AControl).Color := clWindow;
-    TEdit(AControl).Font.Color := clWindowText;
+    TEdit(AControl).Color := CanvasColor;
+    TEdit(AControl).Font.Color := TextColor;
   end
   else if AControl is TListBox then
   begin
-    TListBox(AControl).Color := clWindow;
-    TListBox(AControl).Font.Color := clWindowText;
+    TListBox(AControl).Color := CanvasColor;
+    TListBox(AControl).Font.Color := TextColor;
   end
   else if AControl is TComboBox then
   begin
     { the closed control takes these on both platforms; the popup list it
       opens is a separate native window and keeps the system's colours }
-    TComboBox(AControl).Color := clWindow;
-    TComboBox(AControl).Font.Color := clWindowText;
+    TComboBox(AControl).Color := CanvasColor;
+    TComboBox(AControl).Font.Color := TextColor;
   end
   else if AControl is TSpeedButton then
   begin
@@ -357,18 +410,55 @@ begin
       with no window handle, so the LCL paints it rather than the widgetset.
       Anything ArrangementView later lights up (the send buttons) reasserts
       its own colour on the next refresh. }
-    TSpeedButton(AControl).Color := clBtnFace;
-    TSpeedButton(AControl).Font.Color := clWindowText;
+    TSpeedButton(AControl).Color := FaceColor;
+    TSpeedButton(AControl).Font.Color := TextColor;
   end
+  {$IFNDEF WINDOWS}
+  { The one class the walk touches purely to UNDO itself, and the only branch
+    here that is platform-conditional - the behaviour it fixes was seen on
+    GTK2 and only GTK2 has been run, so the Win32 build keeps exactly what it
+    had.
+
+    A TButton's face is drawn by the GTK2 theme engine and stays light in Dark
+    mode (that is the known ceiling, and it is not fixable from here). Its
+    caption, though, is an ordinary LCL font that inherits Font.Color from the
+    panel above it - which the walk has just set to the dark palette's
+    near-white. Light grey lettering on a light button is the one combination
+    that is genuinely unreadable, so the caption is pinned back to the
+    widgetset's own clBtnText: black on a light desktop theme, and still
+    correct on a dark one, because it is by definition the colour that pairs
+    with the face GTK is drawing underneath it. Assigning Font.Color clears
+    ParentFont on its own, so the inheritance stops here. }
+  else if AControl is TCustomButton then
+    TCustomButton(AControl).Font.Color := NativeTextColor
+  {$ENDIF}
   else if AControl is TSplitter then
-    TSplitter(AControl).Color := clBtnFace;
+    TSplitter(AControl).Color := FaceColor;
+
+  if ARepaint then
+    AControl.Invalidate;
 
   if AControl is TWinControl then
   begin
     Parent := TWinControl(AControl);
     for i := 0 to Parent.ControlCount - 1 do
-      ThemeApply(Parent.Controls[i]);
+      ThemeWalk(Parent.Controls[i], AReset, ARepaint);
   end;
+end;
+
+procedure ThemeApply(AControl: TControl);
+begin
+  if FMode = ThemeSystem then
+    Exit;
+  ThemeWalk(AControl, False, False);
+end;
+
+procedure ThemeRefreshAll;
+var
+  i: Integer;
+begin
+  for i := 0 to Screen.FormCount - 1 do
+    ThemeWalk(Screen.Forms[i], FMode = ThemeSystem, True);
 end;
 
 end.
