@@ -947,7 +947,9 @@ begin
   Canvas.Brush.Color := clWindow;
   Canvas.FillRect(Rect(0, RulerHeight, LaneWidth, ContentHeight));
 
-  Canvas.Pen.Color := clSilver;
+  { row rules and the vertical grid below are the same weight of mark as an
+    editor's subdivision line, and take the same colour }
+  Canvas.Pen.Color := ThemeGridSub;
   for i := 0 to Project.TrackCount + 1 do
   begin
     y := RowTop(i);
@@ -1057,8 +1059,11 @@ begin
       horizontal scrollbar's margin below }
     if (y < RulerHeight) or (y + TrackHeight > ContentHeight) then
       Continue;
+    { the focused row is button face pushed one step away from the rest -
+      down on a light palette, up on a dark one, which is the direction
+      clBtnShadow already moves in }
     if i = FKeyboardTrack then
-      Canvas.Brush.Color := clGray
+      Canvas.Brush.Color := clBtnShadow
     else
       Canvas.Brush.Color := clBtnFace;
     Canvas.FillRect(Rect(HeaderLeft, y, Width, y + TrackHeight));
@@ -1077,7 +1082,9 @@ begin
       Canvas.Brush.Color := clLime
     else
       Canvas.Brush.Color := clRed;
-    Canvas.Pen.Color := clBlack;
+    { the fill is always one of the two accents, never chrome, so the edge
+      wants to stay a hard dark line against it in both palettes }
+    Canvas.Pen.Color := clWindowFrame;
     Canvas.Rectangle(MuteRect);
 
     { Input Track only: "M" input-monitoring toggle }
@@ -1088,7 +1095,10 @@ begin
         Canvas.Brush.Color := clYellow
       else
         Canvas.Brush.Color := clBtnFace;
-      Canvas.Pen.Color := clBlack;
+      { unlit, this button is button face sitting on a header of button face -
+        the border is the only thing that says there is a button here, so it
+        takes the border colour rather than the hard frame the mute uses }
+      Canvas.Pen.Color := clBtnShadow;
       Canvas.Rectangle(MonitorRect);
       Canvas.Brush.Style := bsClear;
       Canvas.TextOut(MonitorRect.Left + 4, MonitorRect.Top - 1, 'M');
@@ -1147,7 +1157,7 @@ begin
   if (y >= RulerHeight) and (y + TrackHeight <= ContentHeight) then
   begin
     if FKeyboardTrack = -2 then
-      Canvas.Brush.Color := clGray
+      Canvas.Brush.Color := clBtnShadow
     else
       Canvas.Brush.Color := clBtnFace;
     Canvas.FillRect(Rect(HeaderLeft, y, Width, y + TrackHeight));
@@ -1177,7 +1187,7 @@ begin
       Continue;
 
     if FKeyboardTrack = Project.SendIndexToBus(s) then
-      Canvas.Brush.Color := clGray
+      Canvas.Brush.Color := clBtnShadow
     else
       Canvas.Brush.Color := clBtnFace;
     Canvas.FillRect(Rect(HeaderLeft, y, Width, y + SendRowHeight));
@@ -1200,7 +1210,7 @@ begin
       Canvas.Brush.Color := clLime
     else
       Canvas.Brush.Color := clRed;
-    Canvas.Pen.Color := clBlack;
+    Canvas.Pen.Color := clWindowFrame;
     Canvas.Rectangle(R);
 
     { PRE/POST fader-tap switch }
@@ -1209,11 +1219,17 @@ begin
       Canvas.Brush.Color := clBtnShadow
     else
       Canvas.Brush.Color := clBtnFace;
-    Canvas.Pen.Color := clBlack;
+    { chrome-coloured in the POST state, so border rather than hard frame -
+      same reasoning as the input-monitor toggle above }
+    Canvas.Pen.Color := clBtnShadow;
     Canvas.Rectangle(R);
     Canvas.Brush.Style := bsClear;
     if Project.SendPreFader[s] then
     begin
+      { literal on purpose: PRE is lettered onto the clBtnShadow chip, and
+        that chip is a mid grey in both palettes - white reads on it either
+        way, where clWindowText would invert with the theme and lose the
+        contrast in one of them }
       Canvas.Font.Color := clWhite;
       Canvas.TextOut(R.Left + 5, R.Top - 1, 'PRE');
     end
@@ -1254,7 +1270,13 @@ begin
     Exit;
 
   { neutral dark interior so the waveform (drawn in the track's color)
-    reads clearly against it, full width - no horizontal border/inset }
+    reads clearly against it, full width - no horizontal border/inset.
+
+    Literal, and staying literal: this backdrop belongs to FTrackColors, not
+    to the theme. Those colours are bright mid-tones chosen to identify a
+    track, they are the same in every mode, and on a light interior they
+    would wash out - so the clip interior cannot follow clWindow without
+    taking the waveform's legibility with it. }
   Canvas.Brush.Color := clBlack;
   Canvas.FillRect(R);
   if AClip.SampleID <= High(Project.SamplePeaks) then
@@ -1275,6 +1297,7 @@ begin
   Canvas.Pen.Width := 1;
 
   Canvas.Brush.Style := bsClear;
+  { on the always-dark clip interior above, so it stays white in every mode }
   Canvas.Font.Color := clWhite;
   if AClip.SampleID <= High(Project.SampleNames) then
     ClipName := Project.SampleNames[AClip.SampleID]

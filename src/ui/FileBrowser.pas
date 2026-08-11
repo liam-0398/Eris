@@ -5,7 +5,7 @@ unit FileBrowser;
 interface
 
 uses
-  Classes, SysUtils, Controls, ExtCtrls, StdCtrls, Graphics, UIScale
+  Classes, SysUtils, Controls, ExtCtrls, StdCtrls, Graphics, UIScale, Theme
   {$IFDEF WINDOWS}, Windows, Forms{$ENDIF};
 
 type
@@ -115,7 +115,11 @@ begin
   FDividerPanel.Align := alTop;
   FDividerPanel.Height := Px(3);
   FDividerPanel.BevelOuter := bvNone;
-  FDividerPanel.Color := clBlack;
+  { a rule, not a container - this panel is nothing but its colour, so it
+    opts out of ThemeApply's blanket recolour of TPanel (which would paint it
+    button face and erase it) and takes the divider colour itself }
+  FDividerPanel.Tag := ThemeTagSkip;
+  FDividerPanel.Color := clWindowFrame;
 
   FListBox := TListBox.Create(Self);
   FListBox.Parent := Self;

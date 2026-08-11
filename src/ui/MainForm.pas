@@ -1861,6 +1861,8 @@ procedure TForm1.UpdateMetronomeToggleLook;
 begin
   if FMetronomeToggle.Down then
   begin
+    { black because the lit colour is a fixed accent, not because the theme
+      is light - clWindowText would go pale on clLime in Dark mode }
     FMetronomeToggle.Color := clLime;
     FMetronomeToggle.Font.Color := clBlack;
   end
@@ -1937,6 +1939,8 @@ begin
     means Beats) plus which one is lit together remove any doubt about
     which mode a clip is in - nothing here relies on a single button
     renaming itself. }
+  { the lit captions stay clBlack in every theme: they sit on fixed accents,
+    so they follow the accent rather than the palette }
   if FWarpRepitchButton.Down then
   begin
     FWarpRepitchButton.Color := clLime;

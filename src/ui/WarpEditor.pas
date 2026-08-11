@@ -254,8 +254,10 @@ begin
   x := FrameToX(Frame);
   while x < Width do
   begin
+    { the ruler strip is chrome, not canvas, so the bar tick takes the
+      foreground colour of the text beside it rather than ThemeGridBar }
     if Frame mod BarLen = 0 then
-      Canvas.Pen.Color := clBlack
+      Canvas.Pen.Color := clWindowText
     else
       Canvas.Pen.Color := clBtnShadow;
     Canvas.Line(x, WarpRulerHeight - 6, x, WarpRulerHeight);
@@ -286,17 +288,17 @@ begin
   begin
     if Frame mod BarLen = 0 then
     begin
-      Canvas.Pen.Color := clBlack;
+      Canvas.Pen.Color := ThemeGridBar;
       Canvas.Pen.Width := 2;
     end
     else if Frame mod Beat = 0 then
     begin
-      Canvas.Pen.Color := clGray;
+      Canvas.Pen.Color := ThemeGridBeat;
       Canvas.Pen.Width := 1;
     end
     else
     begin
-      Canvas.Pen.Color := clSilver;
+      Canvas.Pen.Color := ThemeGridSub;
       Canvas.Pen.Width := 1;
     end;
     Canvas.Line(x, WarpRulerHeight, x, Height);

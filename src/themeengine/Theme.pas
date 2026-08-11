@@ -52,6 +52,17 @@ function ThemeIsDark: Boolean;
   the desktop theme, and pinning colours on them would be the opposite. }
 procedure ThemeApply(AControl: TControl);
 
+{ Put this in a control's Tag and ThemeApply will pass over it AND everything
+  parented under it, leaving whatever colour it was built with.
+
+  For controls whose colour carries meaning rather than chrome. The walk
+  recolours every TPanel it meets, which is right for the panels used as
+  containers and wrong for one used as a rule or a divider - that panel IS its
+  colour, and repainting it as button face erases it. Tag rather than a
+  registry so the exclusion lives on the control and cannot outlive it. }
+const
+  ThemeTagSkip = -31415;
+
 { Deliberately shadowing Graphics' constants of the same name - see above. }
 function clBtnFace: TColor;
 function clWindow: TColor;
@@ -59,6 +70,20 @@ function clWindowText: TColor;
 function clBtnShadow: TColor;
 function clHighlight: TColor;
 function clWindowFrame: TColor;
+
+{ The musical grid: bar, beat, and the subdivision between beats, in that
+  order of weight. Ordinary names rather than shadowed ones, because the LCL
+  has no system colour that means "an eighth-note line" - the six above are
+  chrome, and the grid is the one thing drawn on the canvas that they cannot
+  express. The editors reached for clBlack/clGray/clSilver instead, which is
+  exactly the hierarchy these three keep, and exactly what breaks on a dark
+  canvas: all three of those go the wrong way at once.
+
+  Three levels rather than a shade-of-one-colour helper because the ratios
+  between them are not uniform - see the palette note below. }
+function ThemeGridBar: TColor;
+function ThemeGridBeat: TColor;
+function ThemeGridSub: TColor;
 
 implementation
 
@@ -211,6 +236,59 @@ begin
 end;
 
 { ---------------------------------------------------------------------------
+  The grid.
+
+  System returns the literals the editors used before these existed - clBlack,
+  clGray, clSilver - so routing the grid through here costs nothing in the
+  default mode. Light returns the same three values as real colours, so the
+  step from System to Light does not move the grid either.
+
+  Dark keeps the RATIO between the three rather than their contrast against
+  the canvas. A bar line at 208 to match the light theme's black-on-white
+  would be a row of bright rails across a dark editor, and the waveform drawn
+  in the track's own colour has to stay the loudest thing in the view; the
+  grid is scaffolding and should read as scaffolding. So the whole family is
+  pitched down to sit just far enough above clWindow (30) to separate, and
+  the same bloom that keeps clWindowText off pure white applies here with
+  more force - these are hairlines, and a hairline blooms harder than a
+  glyph.
+  --------------------------------------------------------------------------- }
+
+function ThemeGridBar: TColor;
+begin
+  case FMode of
+    ThemeLight: Result := RGBToColor(0, 0, 0);
+    ThemeDark: Result := RGBToColor(150, 150, 150);
+  else
+    Result := Graphics.clBlack;
+  end;
+end;
+
+function ThemeGridBeat: TColor;
+begin
+  case FMode of
+    ThemeLight: Result := RGBToColor(128, 128, 128);
+    ThemeDark: Result := RGBToColor(95, 95, 95);
+  else
+    Result := Graphics.clGray;
+  end;
+end;
+
+{ The faintest tier, and the one with no chrome equivalent at all: clBtnFace
+  is the nearest of the six and it sits 240-on-255 in Light, which is a line
+  you cannot see. Also used for the arrangement's lane grid and row rules,
+  which are the same weight of mark. }
+function ThemeGridSub: TColor;
+begin
+  case FMode of
+    ThemeLight: Result := RGBToColor(200, 200, 200);
+    ThemeDark: Result := RGBToColor(58, 58, 58);
+  else
+    Result := Graphics.clSilver;
+  end;
+end;
+
+{ ---------------------------------------------------------------------------
   The native-widget walk.
 
   An allow-list, not a sweep: a class that is not named here is recursed into
@@ -239,6 +317,10 @@ var
   Parent: TWinControl;
 begin
   if FMode = ThemeSystem then
+    Exit;
+  { opted out - and so is everything under it, which is the useful reading
+    for a control that manages its own appearance }
+  if AControl.Tag = ThemeTagSkip then
     Exit;
 
   if AControl is TCustomForm then

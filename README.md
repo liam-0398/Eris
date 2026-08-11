@@ -97,18 +97,14 @@ export.
 - **Export**: render the full arrangement (including all effects, swing and
   SP-1200) to a WAV file.
 - **Sample import**: WAV (8/16/24/32-bit integer PCM and 32-bit float) and
-  AIFF/AIF (8/16/24/32-bit integer PCM), via hand-written decoders — no
-  third-party codec library. An MP3 decoder is in the tree but unfinished
-  and deliberately not wired in yet.
+  AIFF/AIF (8/16/24/32-bit integer PCM), via built-in decoders — no
+  third-party codec library.
 - **File browser**: quick-nav to home/root (a drive list on Windows) and a
   resizable width, drag-and-drop straight onto a track or the instrument
   slot.
-- **Cross-platform UI**: hand-built widgets with DPI-aware scaling
-  (Wayland HiDPI and Xorg both handled), and a Windows build using
-  DirectSound.
-  **Unbeatable Performance**: Heavily optimized for the lowest latency 
+- **Unbeatable Performance**: Heavily optimized for the lowest latency 
   and CPU usage possible. Inline assembly for critical components and 
-  auto-detected AVX2 support with deliberate assembly instructions. 
+  auto-detected AVX2 support in critical areas. 
 
 ## Getting the toolchain (fpcupdeluxe)
 

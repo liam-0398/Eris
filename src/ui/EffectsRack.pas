@@ -6,7 +6,7 @@ interface
 
 uses
   Classes, SysUtils, Controls, StdCtrls, ComCtrls, ExtCtrls, Graphics, Effects,
-  Quadraverb, BBE422A, Alesis3630, BossFZ2, Project, UIScale;
+  Quadraverb, BBE422A, Alesis3630, BossFZ2, Project, UIScale, Theme;
 
 type
   PEffect = ^Effects.TEffect;
@@ -508,7 +508,10 @@ begin
   Canvas.Brush.Color := TunerFaceColor;
   Canvas.Brush.Style := bsSolid;
   Canvas.FillRect(Rect(0, 0, Width, Height));
-  Canvas.Pen.Color := clBlack;
+  { the bezel around the tuner's face. The face itself is darker than any
+    palette's chrome, so it separates from the rack on its own and the bezel
+    can stay a hard dark line rather than having to carry the separation. }
+  Canvas.Pen.Color := clWindowFrame;
   Canvas.Brush.Style := bsClear;
   Canvas.Rectangle(0, 0, Width, Height);
   Canvas.Brush.Style := bsSolid;
