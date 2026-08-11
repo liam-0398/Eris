@@ -83,6 +83,12 @@ const
   { small L/R delay-length offset for stereo width, Freeverb's own trick,
     expressed relative to a 44.1kHz reference like the tunings above }
   ReverbStereoSpreadSamples44k = 23;
+  { Largest room any caller of SetupReverbTank can ask for, and so the size
+    every tank line is actually allocated at. ekReverb's biggest preset is
+    Hall at 1.4; ekDrowning maps its Size slider to 0.4 + Size/100 * 1.6,
+    which tops out at exactly 2.0. Raise this if either of those grows, or
+    the tank quietly clamps to a smaller room than was asked for. }
+  ReverbMaxRoomScale = 2.0;
 
   { "Tuner" (Utility category): a completely passive pitch readout - it never
     touches the audio, it only listens to whatever reaches its slot in the
@@ -262,14 +268,29 @@ type
     EQBq: array[0..MaxEQBands - 1] of TBiquadState;
   end;
 
+  { Buf is allocated once at the largest room the tank can ever be asked for
+    (see ReverbMaxRoomScale) and never resized again; Len is how much of it
+    this room actually uses, and is the delay length as far as the DSP is
+    concerned. The two were the same thing when the buffer was resized per
+    room - but that resize ran from ProcessEffect, i.e. on the realtime
+    thread, and ekDrowning sizes its tank from a continuous Size slider, so
+    dragging that slider reallocated twelve buffers per mouse move underneath
+    the audio callback. Separating them makes a room change a length
+    assignment and a memset. }
+  { named so SetTankLine can take one by reference and SetLength it - an
+    anonymous "array of Single" field would arrive there as an open array }
+  TSingleArray = array of Single;
+
   TCombState = record
-    Buf: array of Single;
+    Buf: TSingleArray;
+    Len: Integer;
     BufPos: Integer;
     FilterStore: Single;
   end;
 
   TAllpassState = record
-    Buf: array of Single;
+    Buf: TSingleArray;
+    Len: Integer;
     BufPos: Integer;
   end;
 
@@ -303,6 +324,14 @@ type
     ReverbAllpassL, ReverbAllpassR: array[0..ReverbAllpassCount - 1] of TAllpassState;
     ReverbLastPreset: Integer; { -1 = not yet set up, forces setup on first use }
     ReverbLastSampleRate: Integer;
+    { tank coefficients resolved from the preset, and the dry/wet fraction -
+      recomputed only when the thing they derive from actually moved, same
+      pattern as LastLowpassFreq/LimiterThresholdLin above }
+    ReverbFeedback: Single;
+    ReverbDamp1: Single;
+    ReverbDamp2: Single;
+    LastReverbMixPercent: Single;
+    ReverbMixFrac: Single;
     FlangerBufL: array of Single; { lazily sized once the sample rate is known }
     FlangerBufR: array of Single;
     FlangerWritePos: Integer;
@@ -413,6 +442,17 @@ const
 
 procedure EffectStateReset(var AState: TEffectState);
 begin
+  { TEffectState holds a dozen dynamic arrays (the reverb tank lines, the
+    chorus/flanger/tuner buffers, and more of the same inside the QV/BBE/3630
+    sub-states). FillChar zeroes their pointers WITHOUT releasing what they
+    point at, so every reset - engine init, File > New, project load - simply
+    orphaned the lot. That was already true; it matters more now that a tank
+    line is allocated for the largest room rather than the current one.
+    Finalize walks the record's managed fields and drops the references
+    properly, and the FillChar below then does exactly what it always did.
+    Safe on every caller: all of them pass either a global or a local, and
+    FPC initialises both kinds of managed record before first use. }
+  Finalize(AState);
   FillChar(AState, SizeOf(AState), 0);
   AState.LimiterGain := 1.0; { unity - no reduction until something is loud enough to need it }
   AState.ReverbLastPreset := -1; { 0 is a valid preset (Small) - must not look
@@ -424,6 +464,10 @@ begin
     zeroed (wrong) default instead of ever actually being computed. NaN
     never compares equal to anything, including itself, so the first real
     call always recomputes regardless of what value it sees. }
+  { 0% is a legal reverb mix, so this needs the NaN sentinel too - a zeroed
+    LastReverbMixPercent against a 0% setting would look "unchanged" and leave
+    ReverbMixFrac at its zeroed default forever }
+  AState.LastReverbMixPercent := NaN;
   AState.LastLimiterThresholdDb := NaN;
   AState.LastLimiterReleaseMs := NaN;
   AState.LastSidechainThresholdDb := NaN;
@@ -623,13 +667,30 @@ function ReadDelayInterp(const ABuf: array of Single; ALen: Integer;
   AReadPos: Double): Single;
 var
   i0, i1: Integer;
+  T: Int64;
   Frac: Double;
 begin
   while AReadPos < 0 do
     AReadPos := AReadPos + ALen;
-  i0 := Trunc(AReadPos) mod ALen;
-  Frac := AReadPos - Trunc(AReadPos);
-  i1 := (i0 + 1) mod ALen;
+
+  { The wrap loop above leaves AReadPos in [0, ALen) for every delay this is
+    actually called with, so "mod ALen" was a no-op on the hot path that still
+    cost a full idiv - tens of cycles, unpipelined, and paid twice per read,
+    which is four times per frame per chorus/flanger instance. Testing first
+    keeps the divide reachable for any input the old form would have wrapped,
+    so the result is identical either way. }
+  T := Trunc(AReadPos);
+  Frac := AReadPos - T;
+  if T < ALen then
+    i0 := T
+  else
+    i0 := T mod ALen;
+
+  { i0 is now in [0, ALen), so the successor can only ever overshoot by one }
+  i1 := i0 + 1;
+  if i1 >= ALen then
+    i1 := 0;
+
   Result := ABuf[i0] * (1 - Frac) + ABuf[i1] * Frac;
 end;
 
@@ -645,7 +706,9 @@ begin
   AState.FilterStore := (Output * ADamp2) + (AState.FilterStore * ADamp1);
   AState.Buf[AState.BufPos] := AInput + AState.FilterStore * AFeedback;
   Inc(AState.BufPos);
-  if AState.BufPos >= Length(AState.Buf) then
+  { Len, not Length(Buf) - the allocation is sized for the largest room, this
+    room only uses the front of it. See TCombState. }
+  if AState.BufPos >= AState.Len then
     AState.BufPos := 0;
   Result := Output;
 end;
@@ -658,7 +721,7 @@ begin
   Result := -AInput + BufOut;
   AState.Buf[AState.BufPos] := AInput + BufOut * AFeedback;
   Inc(AState.BufPos);
-  if AState.BufPos >= Length(AState.Buf) then
+  if AState.BufPos >= AState.Len then
     AState.BufPos := 0;
 end;
 
@@ -685,40 +748,65 @@ end;
   Shared by ekReverb (which resolves RoomScale from a fixed preset via
   ReverbPresetParams) and ekDrowning (which sizes its tank straight off a
   continuous Size slider instead of a preset). }
+{ Sizes one comb/allpass line: the allocation covers the largest room the
+  tank can ever be asked for, ALen is what this room uses. Only ever grows,
+  so after the first call for a given sample rate no room change allocates
+  anything - which is the point, since the caller runs on the audio thread. }
+procedure SetTankLine(var ABuf: TSingleArray; var ALen, ABufPos: Integer;
+  ABaseMs, ARoomScale: Single; AExtra, ASampleRate: Integer);
+var
+  MaxLen: Integer;
+begin
+  ALen := Round(ABaseMs * ARoomScale * ASampleRate / 1000);
+  if ALen < 1 then
+    ALen := 1;
+  Inc(ALen, AExtra);
+
+  MaxLen := Round(ABaseMs * ReverbMaxRoomScale * ASampleRate / 1000);
+  if MaxLen < 1 then
+    MaxLen := 1;
+  Inc(MaxLen, AExtra);
+  { ALen is derived from a scale this clamp guarantees is <= the max, so this
+    only ever guards against a rounding edge, never a real overflow }
+  if ALen > MaxLen then
+    ALen := MaxLen;
+
+  if Length(ABuf) <> MaxLen then
+    SetLength(ABuf, MaxLen);
+  { the whole allocation, not just ALen: a later room may expose more of the
+    buffer than this one uses, and it must not surface a previous room's tail }
+  FillChar(ABuf[0], MaxLen * SizeOf(Single), 0);
+  ABufPos := 0;
+end;
+
 procedure SetupReverbTank(var AState: TEffectState; ARoomScale: Single; ASampleRate: Integer);
 var
-  c, StereoSpreadSamples, LenL, LenR: Integer;
+  c, StereoSpreadSamples: Integer;
 begin
+  if ARoomScale > ReverbMaxRoomScale then
+    ARoomScale := ReverbMaxRoomScale;
   StereoSpreadSamples := Round(ReverbStereoSpreadSamples44k * ASampleRate / 44100);
 
   for c := 0 to ReverbCombCount - 1 do
   begin
-    LenL := Round(ReverbCombBaseMs[c] * ARoomScale * ASampleRate / 1000);
-    if LenL < 1 then
-      LenL := 1;
-    LenR := LenL + StereoSpreadSamples;
-    SetLength(AState.ReverbCombL[c].Buf, LenL);
-    SetLength(AState.ReverbCombR[c].Buf, LenR);
-    FillChar(AState.ReverbCombL[c].Buf[0], LenL * SizeOf(Single), 0);
-    FillChar(AState.ReverbCombR[c].Buf[0], LenR * SizeOf(Single), 0);
-    AState.ReverbCombL[c].BufPos := 0;
-    AState.ReverbCombR[c].BufPos := 0;
+    SetTankLine(AState.ReverbCombL[c].Buf, AState.ReverbCombL[c].Len,
+      AState.ReverbCombL[c].BufPos, ReverbCombBaseMs[c], ARoomScale, 0,
+      ASampleRate);
+    SetTankLine(AState.ReverbCombR[c].Buf, AState.ReverbCombR[c].Len,
+      AState.ReverbCombR[c].BufPos, ReverbCombBaseMs[c], ARoomScale,
+      StereoSpreadSamples, ASampleRate);
     AState.ReverbCombL[c].FilterStore := 0;
     AState.ReverbCombR[c].FilterStore := 0;
   end;
 
   for c := 0 to ReverbAllpassCount - 1 do
   begin
-    LenL := Round(ReverbAllpassBaseMs[c] * ARoomScale * ASampleRate / 1000);
-    if LenL < 1 then
-      LenL := 1;
-    LenR := LenL + StereoSpreadSamples;
-    SetLength(AState.ReverbAllpassL[c].Buf, LenL);
-    SetLength(AState.ReverbAllpassR[c].Buf, LenR);
-    FillChar(AState.ReverbAllpassL[c].Buf[0], LenL * SizeOf(Single), 0);
-    FillChar(AState.ReverbAllpassR[c].Buf[0], LenR * SizeOf(Single), 0);
-    AState.ReverbAllpassL[c].BufPos := 0;
-    AState.ReverbAllpassR[c].BufPos := 0;
+    SetTankLine(AState.ReverbAllpassL[c].Buf, AState.ReverbAllpassL[c].Len,
+      AState.ReverbAllpassL[c].BufPos, ReverbAllpassBaseMs[c], ARoomScale, 0,
+      ASampleRate);
+    SetTankLine(AState.ReverbAllpassR[c].Buf, AState.ReverbAllpassR[c].Len,
+      AState.ReverbAllpassR[c].BufPos, ReverbAllpassBaseMs[c], ARoomScale,
+      StereoSpreadSamples, ASampleRate);
   end;
 end;
 
@@ -1105,7 +1193,11 @@ begin
         L := 0.5 * L + 0.5 * WetL;
         R := 0.5 * R + 0.5 * WetR;
 
-        AState.ChorusWritePos := (AState.ChorusWritePos + 1) mod ChorusBufLen;
+        { the write head only ever advances one frame, so it can overshoot by
+          at most one - a compare beats an idiv per frame here }
+        Inc(AState.ChorusWritePos);
+        if AState.ChorusWritePos >= ChorusBufLen then
+          AState.ChorusWritePos := 0;
         AState.ChorusPhase := AState.ChorusPhase + AEffect.ChorusRateHz / ASampleRate;
         if AState.ChorusPhase >= 1 then
           AState.ChorusPhase := AState.ChorusPhase - 1;
@@ -1118,11 +1210,23 @@ begin
           SetupReverb(AState, AEffect.ReverbPreset, ASampleRate);
           AState.ReverbLastPreset := AEffect.ReverbPreset;
           AState.ReverbLastSampleRate := ASampleRate;
+
+          { the tank coefficients come from the preset and nothing else, so
+            they belong here with the tank itself rather than being re-derived
+            per sample - this was running the whole case statement in
+            ReverbPresetParams, plus a subtract, 48000 times a second to
+            arrive at three constants. Same caching the biquad coefficients
+            and the limiter/sidechain thresholds already use. }
+          ReverbPresetParams(AEffect.ReverbPreset, RvRoomScale, RvFeedback,
+            RvDamping);
+          AState.ReverbFeedback := RvFeedback;
+          AState.ReverbDamp1 := RvDamping;
+          AState.ReverbDamp2 := 1 - RvDamping;
         end;
 
-        ReverbPresetParams(AEffect.ReverbPreset, RvRoomScale, RvFeedback, RvDamping);
-        RvDamp1 := RvDamping;
-        RvDamp2 := 1 - RvDamp1;
+        RvFeedback := AState.ReverbFeedback;
+        RvDamp1 := AState.ReverbDamp1;
+        RvDamp2 := AState.ReverbDamp2;
 
         RvDryL := L;
         RvDryR := R;
@@ -1146,7 +1250,16 @@ begin
           RvWetR := ProcessAllpass(AState.ReverbAllpassR[c], RvWetR, ReverbAllpassFeedback);
         end;
 
-        RvMixFrac := AEffect.ReverbMixPercent / 100;
+        { cached rather than folded into a multiply by 0.01: 100 is exactly
+          representable and 0.01 is not, so "/ 100" and "* 0.01" are genuinely
+          different numbers. The compare is bit-identical and still replaces a
+          divide per sample with a divide per slider move. }
+        if AState.LastReverbMixPercent <> AEffect.ReverbMixPercent then
+        begin
+          AState.ReverbMixFrac := AEffect.ReverbMixPercent / 100;
+          AState.LastReverbMixPercent := AEffect.ReverbMixPercent;
+        end;
+        RvMixFrac := AState.ReverbMixFrac;
         L := RvDryL * (1 - RvMixFrac) + RvWetL * RvMixFrac;
         R := RvDryR * (1 - RvMixFrac) + RvWetR * RvMixFrac;
       end;
@@ -1186,7 +1299,10 @@ begin
         L := L * (1 - MixFrac) + WetL * MixFrac;
         R := R * (1 - MixFrac) + WetR * MixFrac;
 
-        AState.FlangerWritePos := (AState.FlangerWritePos + 1) mod FlangerBufLen;
+        { see the chorus write head above - same one-frame advance }
+        Inc(AState.FlangerWritePos);
+        if AState.FlangerWritePos >= FlangerBufLen then
+          AState.FlangerWritePos := 0;
         AState.FlangerPhase := AState.FlangerPhase + AEffect.FlangerRateHz / ASampleRate;
         if AState.FlangerPhase >= 1 then
           AState.FlangerPhase := AState.FlangerPhase - 1;
@@ -1323,7 +1439,11 @@ begin
           AState.ChorusWritePos - DelayMsL * ASampleRate / 1000);
         WetR := ReadDelayInterp(AState.ChorusBufR, ChorusBufLen,
           AState.ChorusWritePos - DelayMsR * ASampleRate / 1000);
-        AState.ChorusWritePos := (AState.ChorusWritePos + 1) mod ChorusBufLen;
+        { the write head only ever advances one frame, so it can overshoot by
+          at most one - a compare beats an idiv per frame here }
+        Inc(AState.ChorusWritePos);
+        if AState.ChorusWritePos >= ChorusBufLen then
+          AState.ChorusWritePos := 0;
         AState.ChorusPhase := AState.ChorusPhase + AEffect.DrowningWarbleRateHz / ASampleRate;
         if AState.ChorusPhase >= 1 then
           AState.ChorusPhase := AState.ChorusPhase - 1;

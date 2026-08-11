@@ -326,6 +326,7 @@ end;
 function QVLineRead(const ALine: TQVDelayLine; ADelaySamples: Double): Single;
 var
   Len, i0, i1: Integer;
+  T: Int64;
   Pos: Double;
   Frac: Double;
 begin
@@ -339,9 +340,24 @@ begin
   Pos := ALine.Pos - ADelaySamples;
   while Pos < 0 do
     Pos := Pos + Len;
-  i0 := Trunc(Pos) mod Len;
-  Frac := Pos - Trunc(Pos);
-  i1 := (i0 + 1) mod Len;
+
+  { ALine.Pos is in [0, Len) and ADelaySamples was clamped to [0, Len - 1]
+    above, so the wrap loop leaves Pos in [0, Len) and "mod Len" here never
+    had anything to do - while still costing an idiv, twice per read and
+    twice per frame (predelay plus density line). QVLineWrite already wraps
+    by comparison; this just matches it. Testing first keeps the divide
+    reachable for anything the old form would have wrapped. }
+  T := Trunc(Pos);
+  Frac := Pos - T;
+  if T < Len then
+    i0 := T
+  else
+    i0 := T mod Len;
+
+  i1 := i0 + 1;
+  if i1 >= Len then
+    i1 := 0;
+
   Result := ALine.Buf[i0] * (1 - Frac) + ALine.Buf[i1] * Frac;
 end;
 

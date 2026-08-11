@@ -204,7 +204,7 @@ uses
   {$ELSE}
   ALSABackend, JACKBackend, PipeWireBackend,
   {$ENDIF}
-  Resample, Project, SP1200, Effects, DenormalGuard;
+  Resample, Project, SP1200, Effects, DenormalGuard, AVector;
 
 const
   DefaultBlockFrames = 512;
@@ -337,6 +337,12 @@ var
   CaptureRingCapacityFrames: Int64;
   CaptureWriteCount: Int64;
   CaptureReadCount: Int64;
+  { CaptureReadCount mod CaptureRingCapacityFrames, carried forward rather
+    than recomputed. The counter is free-running so that modulo is a real
+    Int64 idiv, and PopCaptureFrame runs it once per frame of every block on
+    the realtime thread. Kept in step with CaptureReadCount by advancing in
+    the same place it does, and zeroed with it in AudioEngineSetBufferSize. }
+  CaptureReadIdx: Int64;
   InputGainLinear: Single;
 
   RingBuffer: array[0..RingBufferCapacity - 1] of TCommand;
@@ -634,11 +640,19 @@ begin
   Space := CaptureRingCapacityFrames - (CaptureWriteCount - CaptureReadCount);
   if Space < AFrameCount then
     Exit;
+
+  { one Int64 idiv for the whole push instead of one per frame - the index
+    then just walks forward and wraps by comparison, which is what the "Space
+    < AFrameCount" bail above already guarantees is safe: this write can
+    never lap the reader, so it wraps at most once. }
+  Idx := CaptureWriteCount mod CaptureRingCapacityFrames;
   for i := 0 to AFrameCount - 1 do
   begin
-    Idx := (CaptureWriteCount + i) mod CaptureRingCapacityFrames;
     CaptureRingBuffer[Idx * 2] := ASrc[i * 2];
     CaptureRingBuffer[Idx * 2 + 1] := ASrc[i * 2 + 1];
+    Inc(Idx);
+    if Idx >= CaptureRingCapacityFrames then
+      Idx := 0;
   end;
   CaptureWriteCount := CaptureWriteCount + AFrameCount;
 end;
@@ -648,8 +662,6 @@ end;
   empty, so an underrun is heard as a gap rather than a stuck/repeating
   sample. }
 procedure PopCaptureFrame(out ACapL, ACapR: Single);
-var
-  Idx: Int64;
 begin
   if CaptureWriteCount - CaptureReadCount <= 0 then
   begin
@@ -657,10 +669,13 @@ begin
     ACapR := 0;
     Exit;
   end;
-  Idx := CaptureReadCount mod CaptureRingCapacityFrames;
-  ACapL := CaptureRingBuffer[Idx * 2] * InputGainLinear;
-  ACapR := CaptureRingBuffer[Idx * 2 + 1] * InputGainLinear;
+  ACapL := CaptureRingBuffer[CaptureReadIdx * 2] * InputGainLinear;
+  ACapR := CaptureRingBuffer[CaptureReadIdx * 2 + 1] * InputGainLinear;
   Inc(CaptureReadCount);
+  { the wrapped twin of the Inc above - see CaptureReadIdx's declaration }
+  Inc(CaptureReadIdx);
+  if CaptureReadIdx >= CaptureRingCapacityFrames then
+    CaptureReadIdx := 0;
 end;
 
 function AnyLiveNoteActive: Boolean;
@@ -841,6 +856,56 @@ const
     absorb the rate kink between two segments - see ClipSourcePosition }
   WarpRepitchFadeMs = 4;
 
+{ Which warp segment owns a timeline frame: the lowest k in
+  [0, MarkerCount - 2] with AClipRelativeFrame < MarkerTimeline[k + 1], or
+  MarkerCount - 2 when the frame is at or past the last internal marker.
+  Callers must have already ruled out MarkerCount < 2.
+
+  AHintK is a pure accelerator and never a correctness input. This search used
+  to restart from marker 0 on every sample, in all three of the places that
+  need it - so a clip carrying a full marker array (MaxClipWarpMarkers = 128)
+  cost up to 126 dependent loads PER SAMPLE, and cost the most exactly where
+  playback spends most of its time, out at the far end of the clip. That is
+  also the shape of cost that sets the minimum workable buffer size, since it
+  is worst-case rather than average block time that has to fit. Transport
+  moves one frame at a time, so seeding from the previous answer normally
+  settles the search in zero steps.
+
+  Adjusting in BOTH directions is what makes an outside seed safe. The frames
+  arriving here are not strictly monotonic: a loop wrap throws the position
+  back to LoopStart, and the detune layer asks about grain anchors on either
+  side of the current frame. A forward-only walk - which is all
+  Waveform.WarpedSourcePosition needs, since screen columns genuinely do
+  ascend - would stick past the answer and return the wrong segment. Walking
+  back while the frame sits below this segment's start, then forward while it
+  sits at or past this segment's end, converges on exactly the k the
+  scan-from-zero produced, from any starting point. That includes a stale or
+  out-of-range hint, which is why an uninitialised one is merely slow rather
+  than wrong. }
+function FindWarpSegment(Clip: PPlaybackClip; AClipRelativeFrame: Int64;
+  AHintK: PInteger): Integer;
+begin
+  Result := 0;
+  if AHintK <> nil then
+  begin
+    Result := AHintK^;
+    if Result < 0 then
+      Result := 0
+    else if Result > Clip^.MarkerCount - 2 then
+      Result := Clip^.MarkerCount - 2;
+  end;
+
+  while (Result > 0) and
+    (AClipRelativeFrame < Clip^.MarkerTimeline[Result]) do
+    Dec(Result);
+  while (Result < Clip^.MarkerCount - 2) and
+    (AClipRelativeFrame >= Clip^.MarkerTimeline[Result + 1]) do
+    Inc(Result);
+
+  if AHintK <> nil then
+    AHintK^ := Result;
+end;
+
 { Nominal timeline -> source map for one clip.
 
   For RePitch this IS the playback position: a continuous vari-speed resample
@@ -850,8 +915,12 @@ const
   notionally assigns to a timeline frame. Beats playback does not read through
   a single position at all (see BeatsClipSample), so this is used for the
   detune layer's grain anchors and for non-audio callers that need a single
-  answer, not for producing Beats audio. }
-function ClipSourcePosition(Clip: PPlaybackClip; AClipRelativeFrame: Int64): Double;
+  answer, not for producing Beats audio.
+
+  AHintK is threaded through from the mix loop purely to accelerate the
+  segment search - see FindWarpSegment. Passing nil is always valid. }
+function ClipSourcePosition(Clip: PPlaybackClip; AClipRelativeFrame: Int64;
+  AHintK: PInteger): Double;
 var
   k: Integer;
   SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen: Int64;
@@ -862,10 +931,7 @@ begin
   if Clip^.MarkerCount < 2 then
     Exit(AClipRelativeFrame);
 
-  k := 0;
-  while (k < Clip^.MarkerCount - 2) and
-    (AClipRelativeFrame >= Clip^.MarkerTimeline[k + 1]) do
-    Inc(k);
+  k := FindWarpSegment(Clip, AClipRelativeFrame, AHintK);
 
   SegStartTimeline := Clip^.MarkerTimeline[k];
   SegStartSource := Clip^.MarkerSource[k];
@@ -967,7 +1033,7 @@ end;
     slightly delayed copy of itself.
   --------------------------------------------------------------------------- }
 function BeatsClipSample(Clip: PPlaybackClip; AClipRelativeFrame: Int64;
-  AChannel: Integer): Single;
+  AChannel: Integer; AHintK: PInteger): Single;
 var
   k: Integer;
   SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen: Int64;
@@ -1257,10 +1323,11 @@ begin
   if Clip^.MarkerCount < 2 then
     Exit(SafeInterp(AClipRelativeFrame));
 
-  k := 0;
-  while (k < Clip^.MarkerCount - 2) and
-    (AClipRelativeFrame >= Clip^.MarkerTimeline[k + 1]) do
-    Inc(k);
+  { FindWarpSegment has already written k back to the hint, so the walk-back
+    below is free to move k into earlier segments without corrupting it - the
+    next sample wants to resume from the segment it STARTED in, not from
+    whichever one the overlap tail happened to reach. }
+  k := FindWarpSegment(Clip, AClipRelativeFrame, AHintK);
 
   LoadSegment(k);
   if (SegTimelineLen <= 0) or (SegSourceLen <= 0) then
@@ -1353,7 +1420,7 @@ const
   is for correcting timing, not for large stretches. Beats is for those.
   --------------------------------------------------------------------------- }
 function TonesClipSample(Clip: PPlaybackClip; AClipRelativeFrame: Int64;
-  AChannel: Integer): Single;
+  AChannel: Integer; AHintK: PInteger): Single;
 var
   k, Guard: Integer;
   SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen, SegEnd: Int64;
@@ -1546,10 +1613,7 @@ begin
   if Clip^.MarkerCount < 2 then
     Exit(SafeInterp(AClipRelativeFrame));
 
-  k := 0;
-  while (k < Clip^.MarkerCount - 2) and
-    (AClipRelativeFrame >= Clip^.MarkerTimeline[k + 1]) do
-    Inc(k);
+  k := FindWarpSegment(Clip, AClipRelativeFrame, AHintK);
 
   LoadSegment(k);
   if (SegTimelineLen <= 0) or (SegSourceLen <= 0) then
@@ -1607,16 +1671,16 @@ end;
   ClipSourcePosition remains available for callers that want a single nominal
   position (detune anchors, split points, marker placement) rather than audio. }
 function ClipSourceSample(Clip: PPlaybackClip; AClipRelativeFrame: Int64;
-  AChannel: Integer): Single;
+  AChannel: Integer; AHintK: PInteger): Single;
 var
   AbsPos: Double;
 begin
   if (Clip^.MarkerCount >= 2) and (Clip^.WarpMode = 2) then
-    Exit(TonesClipSample(Clip, AClipRelativeFrame, AChannel));
+    Exit(TonesClipSample(Clip, AClipRelativeFrame, AChannel, AHintK));
   if (Clip^.MarkerCount >= 2) and (Clip^.WarpMode <> 1) then
-    Exit(BeatsClipSample(Clip, AClipRelativeFrame, AChannel));
+    Exit(BeatsClipSample(Clip, AClipRelativeFrame, AChannel, AHintK));
 
-  AbsPos := Clip^.Offset + ClipSourcePosition(Clip, AClipRelativeFrame);
+  AbsPos := Clip^.Offset + ClipSourcePosition(Clip, AClipRelativeFrame, AHintK);
   if (AbsPos < 0) or (AbsPos >= Clip^.FrameCount) then
     Result := 0
   else
@@ -1646,7 +1710,7 @@ end;
   contiguous real audio; the small per-grain re-anchor jump is exactly
   what the overlap crossfade is for. }
 function DetunedClipSample(Clip: PPlaybackClip; AClipRelativeFrame: Int64;
-  AChannel: Integer): Single;
+  AChannel: Integer; AHintK: PInteger): Single;
 const
   DetuneGrainMs = 25;
 var
@@ -1667,7 +1731,7 @@ var
 
 begin
   if Clip^.DetuneSemitones = 0 then
-    Exit(ClipSourceSample(Clip, AClipRelativeFrame, AChannel));
+    Exit(ClipSourceSample(Clip, AClipRelativeFrame, AChannel, AHintK));
 
   Rate := Exp((Clip^.DetuneSemitones / 12) * Ln(2));
   GrainFrames := (DetuneGrainMs * ProjectSampleRate) div 1000;
@@ -1681,7 +1745,10 @@ begin
   GrainStartTimeline := GrainIndex * GrainFrames;
   GrainOffsetIntoGrain := AClipRelativeFrame - GrainStartTimeline;
 
-  AnchorStart := ClipSourcePosition(Clip, GrainStartTimeline);
+  { both anchors share the one hint: they sit a grain apart, so at worst a
+    marker falls between them and each query costs the single step back or
+    forward that FindWarpSegment's bidirectional adjust is there for }
+  AnchorStart := ClipSourcePosition(Clip, GrainStartTimeline, AHintK);
 
   PosCurrent := AnchorStart + GrainOffsetIntoGrain * Rate;
   SampleCurrent := SafeInterp(PosCurrent);
@@ -1693,7 +1760,7 @@ begin
     own local offset starts a bit negative here, i.e. it's already "running"
     underneath the tail of this one and lands exactly on its own anchor at
     the boundary }
-  AnchorEnd := ClipSourcePosition(Clip, GrainStartTimeline + GrainFrames);
+  AnchorEnd := ClipSourcePosition(Clip, GrainStartTimeline + GrainFrames, AHintK);
   PosNext := AnchorEnd + (GrainOffsetIntoGrain - GrainFrames) * Rate;
   SampleNext := SafeInterp(PosNext);
 
@@ -1885,8 +1952,15 @@ var
     i: Integer;
     g, Rel: Int64;
     Mono: Single;
+    HintK: Integer;
   begin
     g := GlobalFrame;
+    { warp segment cursor for this clip across this range - see
+      FindWarpSegment. Starting it at 0 each range costs one full scan per
+      clip per block instead of one per SAMPLE, and it is scoped to the one
+      clip it belongs to, so it can never be seeded from a clip with a
+      different marker array. }
+    HintK := 0;
     for i := AStart to AStart + ACount - 1 do
     begin
       Rel := g - ASwung;
@@ -1899,16 +1973,18 @@ var
             overlapping-slice sum, interpolation) and is pure in its
             arguments, so two identical calls would do all of that twice to
             arrive at the same number - a flat 2x on every mono clip. }
-          Mono := DetunedClipSample(AClip, Rel, 0) * AClip^.Gain;
+          Mono := DetunedClipSample(AClip, Rel, 0, @HintK) * AClip^.Gain;
           ScratchL[i] := ScratchL[i] + Mono;
           ScratchR[i] := ScratchR[i] + Mono;
         end
         else
         begin
+          { both channels ask about the same Rel, so the second call finds the
+            segment the first one just left in HintK without moving at all }
           ScratchL[i] := ScratchL[i] +
-            DetunedClipSample(AClip, Rel, 0) * AClip^.Gain;
+            DetunedClipSample(AClip, Rel, 0, @HintK) * AClip^.Gain;
           ScratchR[i] := ScratchR[i] +
-            DetunedClipSample(AClip, Rel, 1) * AClip^.Gain;
+            DetunedClipSample(AClip, Rel, 1, @HintK) * AClip^.Gain;
         end;
       end;
 
@@ -1926,25 +2002,24 @@ var
   procedure ProcessRange(AStart, ACount: Integer);
   var
     t, i, e, s, Last: Integer;
+    ZeroBytes: PtrUInt;
     Clip: PPlaybackClip;
     Swung: Int64;
-    Vol, Amount, aL, aR, ClickVal: Single;
+    Vol, Amount, ClickVal: Single;
     Tap: PSingle;
     NeedPreFade: Boolean;
   begin
     Last := AStart + ACount - 1;
 
-    for i := AStart to Last do
-    begin
-      MasterL[i] := 0;
-      MasterR[i] := 0;
-    end;
+    ZeroBytes := ACount * SizeOf(Single);
+
+    FillChar(MasterL[AStart], ZeroBytes, 0);
+    FillChar(MasterR[AStart], ZeroBytes, 0);
     for s := 0 to Project.SendCount - 1 do
-      for i := AStart to Last do
-      begin
-        SendBufL[s][i] := 0;
-        SendBufR[s][i] := 0;
-      end;
+    begin
+      FillChar(SendBufL[s][AStart], ZeroBytes, 0);
+      FillChar(SendBufR[s][AStart], ZeroBytes, 0);
+    end;
 
     for t := 0 to MaxTracks - 1 do
     begin
@@ -1954,16 +2029,12 @@ var
       begin
         { a muted track can't be the thing a kick hits - stop any
           ekSidechain keyed off it from ducking on a stale, frozen level }
-        for i := AStart to Last do
-          Tap[i] := 0;
+        FillChar(Tap[AStart], ZeroBytes, 0);
         Continue;
       end;
 
-      for i := AStart to Last do
-      begin
-        ScratchL[i] := 0;
-        ScratchR[i] := 0;
-      end;
+      FillChar(ScratchL[AStart], ZeroBytes, 0);
+      FillChar(ScratchR[AStart], ZeroBytes, 0);
 
       if Playing then
       begin
@@ -2009,11 +2080,10 @@ var
         - independent of the record tap just below, so monitoring can stay
         on (or off) throughout a take with no change in what gets recorded }
       if Project.TrackIsInput[t] and Project.TrackMonitorEnabled[t] then
-        for i := AStart to Last do
-        begin
-          ScratchL[i] := ScratchL[i] + CapBufL[i];
-          ScratchR[i] := ScratchR[i] + CapBufR[i];
-        end;
+      begin
+        VAdd(@ScratchL[AStart], @CapBufL[AStart], ACount);
+        VAdd(@ScratchR[AStart], @CapBufR[AStart], ACount);
+      end;
 
       { Record tap, taken here so a take is recorded DRY - before the insert
         chain below, after monitoring.
@@ -2029,20 +2099,18 @@ var
       if (t = RecordTrackIndex) and (RecordState <> RecordStateIdle) then
       begin
         if Project.TrackIsInput[t] then
+        begin
           { an Input Track's take must be captured regardless of whether
             this track's own "M" monitor toggle happens to be on, matching
             regular tracks' dry tap }
-          for i := AStart to Last do
-          begin
-            RecTapL[i] := CapBufL[i];
-            RecTapR[i] := CapBufR[i];
-          end
+          Move(CapBufL[AStart], RecTapL[AStart], ZeroBytes);
+          Move(CapBufR[AStart], RecTapR[AStart], ZeroBytes);
+        end
         else
-          for i := AStart to Last do
-          begin
-            RecTapL[i] := ScratchL[i];
-            RecTapR[i] := ScratchR[i];
-          end;
+        begin
+          Move(ScratchL[AStart], RecTapL[AStart], ZeroBytes);
+          Move(ScratchR[AStart], RecTapR[AStart], ZeroBytes);
+        end;
       end;
 
       { per-track insert effects chain. Entirely separate from the SP1200
@@ -2065,11 +2133,10 @@ var
           Project.SendPreFader[s] then
           NeedPreFade := True;
       if NeedPreFade then
-        for i := AStart to Last do
-        begin
-          PreFadeL[i] := ScratchL[i];
-          PreFadeR[i] := ScratchR[i];
-        end;
+      begin
+        Move(ScratchL[AStart], PreFadeL[AStart], ZeroBytes);
+        Move(ScratchR[AStart], PreFadeR[AStart], ZeroBytes);
+      end;
 
       { The track fader. This used to be pre-multiplied into every clip's
         Gain by ArrangementView.PushTrackToEngine and into note gains by
@@ -2078,28 +2145,23 @@ var
         tapped, and quietly meant a "recorded dry" take was in fact
         recorded through the fader. It is applied here now instead. }
       Vol := Project.TrackVolume[t];
-      for i := AStart to Last do
-      begin
-        ScratchL[i] := ScratchL[i] * Vol;
-        ScratchR[i] := ScratchR[i] * Vol;
-      end;
+      VScale(@ScratchL[AStart], Vol, ACount);
+      VScale(@ScratchR[AStart], Vol, ACount);
 
       for s := 0 to Project.SendCount - 1 do
         if Project.SendEnabled[s] and Project.TrackSendEnabled[t][s] then
         begin
           Amount := Project.TrackSendLevel[t][s];
           if Project.SendPreFader[s] then
-            for i := AStart to Last do
-            begin
-              SendBufL[s][i] := SendBufL[s][i] + PreFadeL[i] * Amount;
-              SendBufR[s][i] := SendBufR[s][i] + PreFadeR[i] * Amount;
-            end
+          begin
+            VAddScaled(@SendBufL[s][AStart], @PreFadeL[AStart], Amount, ACount);
+            VAddScaled(@SendBufR[s][AStart], @PreFadeR[AStart], Amount, ACount);
+          end
           else
-            for i := AStart to Last do
-            begin
-              SendBufL[s][i] := SendBufL[s][i] + ScratchL[i] * Amount;
-              SendBufR[s][i] := SendBufR[s][i] + ScratchR[i] * Amount;
-            end;
+          begin
+            VAddScaled(@SendBufL[s][AStart], @ScratchL[AStart], Amount, ACount);
+            VAddScaled(@SendBufR[s][AStart], @ScratchR[AStart], Amount, ACount);
+          end;
         end;
 
       { this track's final, post-insert-FX, post-fader level per frame - see
@@ -2107,17 +2169,9 @@ var
         LATER in this same pass reads. Summed into the master in the same
         pass, in track index order, which is what keeps the master sum
         bit-identical to the frame-major engine's. }
-      for i := AStart to Last do
-      begin
-        aL := Abs(ScratchL[i]);
-        aR := Abs(ScratchR[i]);
-        if aL > aR then
-          Tap[i] := aL
-        else
-          Tap[i] := aR;
-        MasterL[i] := MasterL[i] + ScratchL[i];
-        MasterR[i] := MasterR[i] + ScratchR[i];
-      end;
+      VMaxAbs2(@Tap[AStart], @ScratchL[AStart], @ScratchR[AStart], ACount);
+      VAdd(@MasterL[AStart], @ScratchL[AStart], ACount);
+      VAdd(@MasterR[AStart], @ScratchR[AStart], ACount);
     end;
 
     { Send-bus returns. Each bus runs its chain ONCE on the sum of every
@@ -2140,11 +2194,8 @@ var
           RunEffect(SendEffectState[s][e], Project.SendEffects[s][e],
             SendBufL[s], SendBufR[s], AStart, ACount);
       Amount := Project.SendReturnLevel[s];
-      for i := AStart to Last do
-      begin
-        MasterL[i] := MasterL[i] + SendBufL[s][i] * Amount;
-        MasterR[i] := MasterR[i] + SendBufR[s][i] * Amount;
-      end;
+      VAddScaled(@MasterL[AStart], @SendBufL[s][AStart], Amount, ACount);
+      VAddScaled(@MasterR[AStart], @SendBufR[s][AStart], Amount, ACount);
     end;
 
     { Per-frame transport bookkeeping - the click voice, the recorder and
@@ -2233,16 +2284,14 @@ var
         RunEffect(MasterEffectState[e], Project.MasterEffects[e],
           MasterL, MasterR, AStart, ACount);
 
+    { clamp in place first, then interleave. The interleave is a stride-2
+      scatter - AVX2 can do it with an unpack/permute pair, but it runs once
+      per block rather than once per track, so it stays plain Pascal. }
+    VClamp1(@MasterL[AStart], ACount);
+    VClamp1(@MasterR[AStart], ACount);
+
     for i := AStart to Last do
     begin
-      if MasterL[i] > 1.0 then
-        MasterL[i] := 1.0
-      else if MasterL[i] < -1.0 then
-        MasterL[i] := -1.0;
-      if MasterR[i] > 1.0 then
-        MasterR[i] := 1.0
-      else if MasterR[i] < -1.0 then
-        MasterR[i] := -1.0;
       MixBuffer[i * OutputChannels] := MasterL[i];
       MixBuffer[i * OutputChannels + 1] := MasterR[i];
     end;
@@ -2426,6 +2475,7 @@ begin
   GetMem(CaptureRingBuffer, CaptureRingCapacityFrames * OutputChannels * SizeOf(Single));
   CaptureWriteCount := 0;
   CaptureReadCount := 0;
+  CaptureReadIdx := 0;
 
   CaptureAvailable := Backend.CaptureOpen(ProjectSampleRate, OutputChannels,
     InputBufferFrames);
