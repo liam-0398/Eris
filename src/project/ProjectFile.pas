@@ -946,15 +946,34 @@ begin
     DeleteDirectory(Dir, False);
 end;
 
+{ Renders the whole arrangement to a 16-bit WAV.
+
+  BLOCK-MAJOR: the timeline is walked in RenderBlockFrames-frame chunks, and
+  every stage runs over one chunk before the next stage sees it - the same
+  shape AudioEngine.FillBlock has. It used to be whole-timeline-major, giving
+  every track, every send bus and the master a float buffer as long as the
+  entire project; see the block-size constant and the memory note below.
+
+  The pass ORDER within a block is exactly the pass order the whole-timeline
+  version used across the project, which is what makes the output identical
+  rather than merely equivalent - see SidechainLevelFor for the one place
+  that could have gone wrong. }
 function RenderProjectToWav(const AOutputPath: string): Boolean;
 const
   OutChannels = 2;
+  { Frames rendered per pass. Nothing about the audio depends on this number:
+    every stage is either same-frame (the fader, the send taps, the sums, the
+    clip reads) or a sequential state machine carried across blocks (the
+    effect chains, the SP-1200). It only trades per-block loop overhead
+    against scratch memory, and at this size the scratch is ~1MB total for a
+    32-track project of ANY length. }
+  RenderBlockFrames = 4096;
 var
   ProjectLengthFrames: Int64;
   t, i: Integer;
   Clip: TClip;
   Sample: TSample;
-  Buffer: PSingle;
+  MasterBuf: PSingle;
   TrackBuffers: array[0..Project.MaxTracks - 1] of PSingle;
   TrackEffectState: array[0..Project.MaxTracks - 1, 0..Effects.MaxEffectsPerTrack - 1] of
     Effects.TEffectState;
@@ -965,21 +984,37 @@ var
   e, sIdx: Integer;
   RenderBeatFrames, SwungPos: Int64;
   { send buses, mirroring AudioEngine.FillBlock's SendL/SendR accumulators -
-    one whole-timeline scratch buffer per bus, since this render is
-    track-major and the buses can only be processed once every track has
-    contributed to them }
+    one scratch buffer per bus, now one BLOCK long rather than one timeline
+    long, refilled every block }
   SendBuffers: array[0..Project.SendCount - 1] of PSingle;
   SendEffectState: array[0..Project.SendCount - 1, 0..Effects.MaxEffectsPerTrack - 1] of
     Effects.TEffectState;
   SendAmount, PreFaderL, PreFaderR, TrackVol: Single;
+  BlockStart, BlockLen, FirstAbs, LastAbs, AbsFrame, ClipFrame: Int64;
+  W: TWavWriter;
+  WavStarted: Boolean;
 
   { Offline equivalent of AudioEngine.FillBlock's SidechainLevelFor - reads
-    straight off the source track's raw (pre-FX) buffer at the current
-    Frame rather than realtime's post-FX/one-frame-stale TrackTapLevel; a
-    deliberate, documented approximation (matching this codebase's existing
-    tolerance for that exact class of gap) rather than restructuring this
-    whole render to be frame-major just for sidechain parity. }
-  function SidechainLevelFor(ASourceTrack: Integer): Single;
+    straight off the source track's buffer at the current frame rather than
+    realtime's post-FX/one-frame-stale TrackTapLevel; a deliberate,
+    documented approximation (matching this codebase's existing tolerance for
+    that exact class of gap).
+
+    ALocalFrame is an index into the current block, not the timeline - that
+    is the only thing about this that the block-major rework changed. What it
+    reads is unchanged, and that is worth being precise about, because it is
+    the one place where blocking the render could have altered the output.
+    The source track's buffer is mutated in place by the pass below, so what
+    this sees depends on where the source sits in track order: a
+    LOWER-numbered source has already been through its inserts and its fader
+    and reads post-FX, a HIGHER-numbered one has only been through the clip
+    pass and reads pre-FX, and the track itself reads pre-FX because the
+    frame is not written back until its whole chain has run. Since pass 1
+    completes for every track before pass 2 begins, that relationship holds
+    within a block exactly as it held across the timeline, and every read is
+    same-frame - there is no lookahead or lookbehind that a block boundary
+    could truncate. }
+  function SidechainLevelFor(ASourceTrack: Integer; ALocalFrame: Int64): Single;
   var
     SL, SR: Single;
   begin
@@ -988,8 +1023,8 @@ var
       Result := 0
     else
     begin
-      SL := Abs(TrackBuffers[ASourceTrack][Frame * OutChannels]);
-      SR := Abs(TrackBuffers[ASourceTrack][Frame * OutChannels + 1]);
+      SL := Abs(TrackBuffers[ASourceTrack][ALocalFrame * OutChannels]);
+      SR := Abs(TrackBuffers[ASourceTrack][ALocalFrame * OutChannels + 1]);
       if SL > SR then Result := SL else Result := SR;
     end;
   end;
@@ -1015,210 +1050,266 @@ begin
   if ProjectLengthFrames <= 0 then
     Exit;
 
-  GetMem(Buffer, ProjectLengthFrames * OutChannels * SizeOf(Single));
+  MasterBuf := nil;
+  WavStarted := False;
   FillChar(TrackBuffers, SizeOf(TrackBuffers), 0);
   FillChar(SendBuffers, SizeOf(SendBuffers), 0);
   try
-    FillChar(Buffer^, ProjectLengthFrames * OutChannels * SizeOf(Single), 0);
+    { fixed scratch, sized by the block and not by the project }
+    GetMem(MasterBuf, RenderBlockFrames * OutChannels * SizeOf(Single));
     for sIdx := 0 to Project.SendCount - 1 do
       if Project.SendEnabled[sIdx] then
-      begin
-        GetMem(SendBuffers[sIdx], ProjectLengthFrames * OutChannels * SizeOf(Single));
-        FillChar(SendBuffers[sIdx]^, ProjectLengthFrames * OutChannels * SizeOf(Single), 0);
-      end;
-
-    { each enabled track renders into its OWN scratch buffer first - needed
-      so its insert-FX chain (below) can run on just that track's signal,
-      exactly like AudioEngine.FillBlock's per-track TrackL/TrackR does,
-      before summing into the master buffer. Previously every clip summed
-      straight into the master buffer and Project.TrackEffects was never
-      even read here, so insert effects silently never applied to a bounce. }
+        GetMem(SendBuffers[sIdx], RenderBlockFrames * OutChannels * SizeOf(Single));
     for t := 0 to Project.TrackCount - 1 do
+      if Project.TrackEnabled[t] then
+        GetMem(TrackBuffers[t], RenderBlockFrames * OutChannels * SizeOf(Single));
+
+    { Every chain's state is reset ONCE, here, and then carried across every
+      block - which is what the whole-timeline version got for free by making
+      a single pass down each track. Resetting inside the block loop would
+      restart every filter, envelope follower and reverb tail eleven times a
+      second and the bounce would be nothing like the playback. }
+    for t := 0 to Project.MaxTracks - 1 do
+      for e := 0 to Effects.MaxEffectsPerTrack - 1 do
+        Effects.EffectStateReset(TrackEffectState[t][e]);
+    for sIdx := 0 to Project.SendCount - 1 do
+      for e := 0 to Effects.MaxEffectsPerTrack - 1 do
+        Effects.EffectStateReset(SendEffectState[sIdx][e]);
+    for e := 0 to Effects.MaxEffectsPerTrack - 1 do
+      Effects.EffectStateReset(MasterEffectState[e]);
+    if AudioEngineGetSP1200Enabled then
+      SP1200Reset(SP1200St);
+
+    { the length is known before a single frame is rendered, so the header
+      goes out correct up front and the audio can stream straight past it }
+    if not WavWriteBegin(W, AOutputPath, ProjectLengthFrames, OutChannels,
+      ProjectSampleRate) then
+      Exit;
+    WavStarted := True;
+
+    BlockStart := 0;
+    while BlockStart < ProjectLengthFrames do
     begin
-      if not Project.TrackEnabled[t] then
-        Continue;
+      BlockLen := ProjectLengthFrames - BlockStart;
+      if BlockLen > RenderBlockFrames then
+        BlockLen := RenderBlockFrames;
 
-      GetMem(TrackBuffers[t], ProjectLengthFrames * OutChannels * SizeOf(Single));
-      FillChar(TrackBuffers[t]^, ProjectLengthFrames * OutChannels * SizeOf(Single), 0);
-
-      for i := 0 to High(Project.Tracks[t].Clips) do
+      { ---------- pass 1: clips into each track's own scratch ----------
+        Runs for EVERY track before pass 2 touches any of them, so that a
+        sidechain reading a higher-numbered track still finds that track's
+        raw pre-FX audio, exactly as it did when this was whole-timeline. }
+      for t := 0 to Project.TrackCount - 1 do
       begin
-        Clip := Project.Tracks[t].Clips[i];
-        Sample := Project.SamplePool[Clip.SampleID];
-        SwungPos := AudioEngine.SwungPosition(Clip.Position,
-          Project.TrackSwingPercent[t], Project.TrackSwingDivision[t], RenderBeatFrames);
+        if not Project.TrackEnabled[t] then
+          Continue;
 
-        for Frame := 0 to Clip.Length - 1 do
+        FillChar(TrackBuffers[t]^, BlockLen * OutChannels * SizeOf(Single), 0);
+
+        for i := 0 to High(Project.Tracks[t].Clips) do
         begin
-          OutIdx := (SwungPos + Frame) * OutChannels;
+          Clip := Project.Tracks[t].Clips[i];
+          Sample := Project.SamplePool[Clip.SampleID];
+          SwungPos := AudioEngine.SwungPosition(Clip.Position,
+            Project.TrackSwingPercent[t], Project.TrackSwingDivision[t], RenderBeatFrames);
 
-          { transients passed through (absolute file positions; translated
-            clip-relative inside the warp lookup via Clip.Offset) so a bounce
-            uses the same transient-bounded Beats grains as live playback -
-            omitting them silently fell back to the fixed ~120ms grid,
-            making bounces audibly diverge from what was heard live }
-          if Sample.Channels = 1 then
+          { The clip's span on the timeline, intersected with this block. The
+            whole-timeline version walked the clip's own frames 0..Length-1
+            and wrote at SwungPos + Frame; this walks the block's frames and
+            recovers the same clip-relative index, so DetunedSample is handed
+            identical arguments and returns identical values.
+
+            Intersecting also clamps the low end at the block start, and so
+            at 0 - the old form indexed the output at (SwungPos + Frame),
+            which for a negative SwungPos wrote off the front of the buffer.
+            Unreachable for any project whose swing leaves clips at or after
+            zero, which is why it never showed up. }
+          FirstAbs := SwungPos;
+          if FirstAbs < BlockStart then
+            FirstAbs := BlockStart;
+          LastAbs := SwungPos + Clip.Length;
+          if LastAbs > BlockStart + BlockLen then
+            LastAbs := BlockStart + BlockLen;
+
+          AbsFrame := FirstAbs;
+          while AbsFrame < LastAbs do
           begin
-            { ONE call, fanned out to both outputs - mirrors the identical
-              fix in AudioEngine.FillBlock's mono branch (see there). The two
-              calls this replaced took the same arguments, channel 0 included,
-              so the whole warp/interpolation ran twice per frame to produce
-              one number. }
-            MonoSample := DetunedSample(Clip.WarpMarkers, Frame,
-              Clip.PitchSemitones, Clip.Offset, Sample.Data, Sample.FrameCount,
-              Sample.Channels, AudioEngine.ProjectSampleRate, Clip.WarpMode, 0,
-              Clip.Length, Project.SampleTransients[Clip.SampleID],
-              Project.SamplePeriods[Clip.SampleID]) * Clip.Gain;
-            TrackBuffers[t][OutIdx] := TrackBuffers[t][OutIdx] + MonoSample;
-            TrackBuffers[t][OutIdx + 1] := TrackBuffers[t][OutIdx + 1] + MonoSample;
-          end
-          else
-          begin
-            TrackBuffers[t][OutIdx] := TrackBuffers[t][OutIdx] +
-              DetunedSample(Clip.WarpMarkers, Frame, Clip.PitchSemitones, Clip.Offset,
-                Sample.Data, Sample.FrameCount, Sample.Channels,
-                AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length,
-                Project.SampleTransients[Clip.SampleID],
-                  Project.SamplePeriods[Clip.SampleID]) * Clip.Gain;
-            TrackBuffers[t][OutIdx + 1] := TrackBuffers[t][OutIdx + 1] +
-              DetunedSample(Clip.WarpMarkers, Frame, Clip.PitchSemitones, Clip.Offset,
-                Sample.Data, Sample.FrameCount, Sample.Channels,
-                AudioEngine.ProjectSampleRate, Clip.WarpMode, 1, Clip.Length,
-                Project.SampleTransients[Clip.SampleID],
-                  Project.SamplePeriods[Clip.SampleID]) * Clip.Gain;
-          end;
-        end;
-      end;
-    end;
+            ClipFrame := AbsFrame - SwungPos;
+            OutIdx := (AbsFrame - BlockStart) * OutChannels;
 
-    { per-track insert effects (mirrors the master-effect loop below, just
-      per-track), then the fader, the send taps, and the sum into master -
-      the same order FillBlock uses, so a bounce matches what was heard }
-    for t := 0 to Project.TrackCount - 1 do
-    begin
-      if not Project.TrackEnabled[t] then
-        Continue;
-
-      if Project.TrackEffectCount[t] > 0 then
-      begin
-        for e := 0 to Effects.MaxEffectsPerTrack - 1 do
-          Effects.EffectStateReset(TrackEffectState[t][e]);
-        for Frame := 0 to ProjectLengthFrames - 1 do
-        begin
-          L := TrackBuffers[t][Frame * OutChannels];
-          R := TrackBuffers[t][Frame * OutChannels + 1];
-          for e := 0 to Project.TrackEffectCount[t] - 1 do
-            if Project.TrackEffects[t][e].Kind <> Effects.ekNone then
-              Effects.ProcessEffect(TrackEffectState[t][e], Project.TrackEffects[t][e],
-                L, R, ProjectSampleRate,
-                SidechainLevelFor(Project.TrackEffects[t][e].SidechainSourceTrack));
-          TrackBuffers[t][Frame * OutChannels] := L;
-          TrackBuffers[t][Frame * OutChannels + 1] := R;
-        end;
-      end;
-
-      { The track fader, and the pre/post-fader send taps around it. Note
-        that the fader is applied HERE and not at clip level: this render
-        used to ignore Project.TrackVolume entirely (it only ever multiplied
-        by the clip's own Gain), so a bounce came out with every track at
-        unity however the faders were set. Applying it here fixes that and
-        keeps the ordering identical to FillBlock's. }
-      TrackVol := Project.TrackVolume[t];
-      for Frame := 0 to ProjectLengthFrames - 1 do
-      begin
-        OutIdx := Frame * OutChannels;
-        PreFaderL := TrackBuffers[t][OutIdx];
-        PreFaderR := TrackBuffers[t][OutIdx + 1];
-        L := PreFaderL * TrackVol;
-        R := PreFaderR * TrackVol;
-        TrackBuffers[t][OutIdx] := L;
-        TrackBuffers[t][OutIdx + 1] := R;
-
-        for sIdx := 0 to Project.SendCount - 1 do
-          if Project.SendEnabled[sIdx] and Project.TrackSendEnabled[t][sIdx] then
-          begin
-            SendAmount := Project.TrackSendLevel[t][sIdx];
-            if Project.SendPreFader[sIdx] then
+            { transients passed through (absolute file positions; translated
+              clip-relative inside the warp lookup via Clip.Offset) so a bounce
+              uses the same transient-bounded Beats grains as live playback -
+              omitting them silently fell back to the fixed ~120ms grid,
+              making bounces audibly diverge from what was heard live }
+            if Sample.Channels = 1 then
             begin
-              SendBuffers[sIdx][OutIdx] := SendBuffers[sIdx][OutIdx] + PreFaderL * SendAmount;
-              SendBuffers[sIdx][OutIdx + 1] := SendBuffers[sIdx][OutIdx + 1] + PreFaderR * SendAmount;
+              { ONE call, fanned out to both outputs - mirrors the identical
+                fix in AudioEngine.FillBlock's mono branch (see there). The two
+                calls this replaced took the same arguments, channel 0 included,
+                so the whole warp/interpolation ran twice per frame to produce
+                one number. }
+              MonoSample := DetunedSample(Clip.WarpMarkers, ClipFrame,
+                Clip.PitchSemitones, Clip.Offset, Sample.Data, Sample.FrameCount,
+                Sample.Channels, AudioEngine.ProjectSampleRate, Clip.WarpMode, 0,
+                Clip.Length, Project.SampleTransients[Clip.SampleID],
+                Project.SamplePeriods[Clip.SampleID]) * Clip.Gain;
+              TrackBuffers[t][OutIdx] := TrackBuffers[t][OutIdx] + MonoSample;
+              TrackBuffers[t][OutIdx + 1] := TrackBuffers[t][OutIdx + 1] + MonoSample;
             end
             else
             begin
-              SendBuffers[sIdx][OutIdx] := SendBuffers[sIdx][OutIdx] + L * SendAmount;
-              SendBuffers[sIdx][OutIdx + 1] := SendBuffers[sIdx][OutIdx + 1] + R * SendAmount;
+              TrackBuffers[t][OutIdx] := TrackBuffers[t][OutIdx] +
+                DetunedSample(Clip.WarpMarkers, ClipFrame, Clip.PitchSemitones, Clip.Offset,
+                  Sample.Data, Sample.FrameCount, Sample.Channels,
+                  AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length,
+                  Project.SampleTransients[Clip.SampleID],
+                    Project.SamplePeriods[Clip.SampleID]) * Clip.Gain;
+              TrackBuffers[t][OutIdx + 1] := TrackBuffers[t][OutIdx + 1] +
+                DetunedSample(Clip.WarpMarkers, ClipFrame, Clip.PitchSemitones, Clip.Offset,
+                  Sample.Data, Sample.FrameCount, Sample.Channels,
+                  AudioEngine.ProjectSampleRate, Clip.WarpMode, 1, Clip.Length,
+                  Project.SampleTransients[Clip.SampleID],
+                    Project.SamplePeriods[Clip.SampleID]) * Clip.Gain;
             end;
+
+            Inc(AbsFrame);
           end;
+        end;
       end;
 
-      for SampleIdx := 0 to ProjectLengthFrames * OutChannels - 1 do
-        Buffer[SampleIdx] := Buffer[SampleIdx] + TrackBuffers[t][SampleIdx];
-    end;
+      { ---------- pass 2: per-track inserts, fader, send taps, sum ----------
+        the same order FillBlock uses, so a bounce matches what was heard }
+      FillChar(MasterBuf^, BlockLen * OutChannels * SizeOf(Single), 0);
+      for sIdx := 0 to Project.SendCount - 1 do
+        if SendBuffers[sIdx] <> nil then
+          FillChar(SendBuffers[sIdx]^, BlockLen * OutChannels * SizeOf(Single), 0);
 
-    { send buses: one chain per bus over the summed contributions, returned
-      into the master buffer at the bus's own return level. Runs for the
-      whole timeline including stretches where nothing fed the bus, so a
-      reverb tail on a send decays past the last thing that fed it rather
-      than being cut off - same reasoning as FillBlock's version. }
-    for sIdx := 0 to Project.SendCount - 1 do
-    begin
-      if (not Project.SendEnabled[sIdx]) or (SendBuffers[sIdx] = nil) then
-        Continue;
-      for e := 0 to Effects.MaxEffectsPerTrack - 1 do
-        Effects.EffectStateReset(SendEffectState[sIdx][e]);
-      for Frame := 0 to ProjectLengthFrames - 1 do
+      for t := 0 to Project.TrackCount - 1 do
       begin
-        OutIdx := Frame * OutChannels;
-        L := SendBuffers[sIdx][OutIdx];
-        R := SendBuffers[sIdx][OutIdx + 1];
-        for e := 0 to Project.SendEffectCount[sIdx] - 1 do
-          if Project.SendEffects[sIdx][e].Kind <> Effects.ekNone then
-            Effects.ProcessEffect(SendEffectState[sIdx][e], Project.SendEffects[sIdx][e],
-              L, R, ProjectSampleRate,
-              SidechainLevelFor(Project.SendEffects[sIdx][e].SidechainSourceTrack));
-        Buffer[OutIdx] := Buffer[OutIdx] + L * Project.SendReturnLevel[sIdx];
-        Buffer[OutIdx + 1] := Buffer[OutIdx + 1] + R * Project.SendReturnLevel[sIdx];
-      end;
-    end;
+        if not Project.TrackEnabled[t] then
+          Continue;
 
-    if Project.MasterEffectCount > 0 then
-    begin
-      for e := 0 to Effects.MaxEffectsPerTrack - 1 do
-        Effects.EffectStateReset(MasterEffectState[e]);
-      for Frame := 0 to ProjectLengthFrames - 1 do
+        if Project.TrackEffectCount[t] > 0 then
+          for Frame := 0 to BlockLen - 1 do
+          begin
+            L := TrackBuffers[t][Frame * OutChannels];
+            R := TrackBuffers[t][Frame * OutChannels + 1];
+            for e := 0 to Project.TrackEffectCount[t] - 1 do
+              if Project.TrackEffects[t][e].Kind <> Effects.ekNone then
+                Effects.ProcessEffect(TrackEffectState[t][e], Project.TrackEffects[t][e],
+                  L, R, ProjectSampleRate,
+                  SidechainLevelFor(Project.TrackEffects[t][e].SidechainSourceTrack, Frame));
+            TrackBuffers[t][Frame * OutChannels] := L;
+            TrackBuffers[t][Frame * OutChannels + 1] := R;
+          end;
+
+        { The track fader, and the pre/post-fader send taps around it. Note
+          that the fader is applied HERE and not at clip level, keeping the
+          ordering identical to FillBlock's. }
+        TrackVol := Project.TrackVolume[t];
+        for Frame := 0 to BlockLen - 1 do
+        begin
+          OutIdx := Frame * OutChannels;
+          PreFaderL := TrackBuffers[t][OutIdx];
+          PreFaderR := TrackBuffers[t][OutIdx + 1];
+          L := PreFaderL * TrackVol;
+          R := PreFaderR * TrackVol;
+          TrackBuffers[t][OutIdx] := L;
+          TrackBuffers[t][OutIdx + 1] := R;
+
+          for sIdx := 0 to Project.SendCount - 1 do
+            if Project.SendEnabled[sIdx] and Project.TrackSendEnabled[t][sIdx] then
+            begin
+              SendAmount := Project.TrackSendLevel[t][sIdx];
+              if Project.SendPreFader[sIdx] then
+              begin
+                SendBuffers[sIdx][OutIdx] := SendBuffers[sIdx][OutIdx] + PreFaderL * SendAmount;
+                SendBuffers[sIdx][OutIdx + 1] := SendBuffers[sIdx][OutIdx + 1] + PreFaderR * SendAmount;
+              end
+              else
+              begin
+                SendBuffers[sIdx][OutIdx] := SendBuffers[sIdx][OutIdx] + L * SendAmount;
+                SendBuffers[sIdx][OutIdx + 1] := SendBuffers[sIdx][OutIdx + 1] + R * SendAmount;
+              end;
+            end;
+        end;
+
+        for SampleIdx := 0 to BlockLen * OutChannels - 1 do
+          MasterBuf[SampleIdx] := MasterBuf[SampleIdx] + TrackBuffers[t][SampleIdx];
+      end;
+
+      { ---------- pass 3: send buses ----------
+        one chain per bus over the summed contributions, returned into the
+        master at the bus's own return level. Runs on every block including
+        ones nothing fed, so a reverb tail on a send decays past the last
+        thing that fed it rather than being cut off - same reasoning as
+        FillBlock's version, and now literally the same mechanism. }
+      for sIdx := 0 to Project.SendCount - 1 do
       begin
-        L := Buffer[Frame * OutChannels];
-        R := Buffer[Frame * OutChannels + 1];
-        for e := 0 to Project.MasterEffectCount - 1 do
-          if Project.MasterEffects[e].Kind <> Effects.ekNone then
-            { 0 for the sidechain level: per-track signal no longer exists
-              distinctly by the time a master effect runs (every track's
-              already been summed into Buffer just above), same as before -
-              only per-track inserts gained real sidechain support here. }
-            Effects.ProcessEffect(MasterEffectState[e], Project.MasterEffects[e], L, R,
-              ProjectSampleRate, 0);
-        Buffer[Frame * OutChannels] := L;
-        Buffer[Frame * OutChannels + 1] := R;
+        if (not Project.SendEnabled[sIdx]) or (SendBuffers[sIdx] = nil) then
+          Continue;
+        for Frame := 0 to BlockLen - 1 do
+        begin
+          OutIdx := Frame * OutChannels;
+          L := SendBuffers[sIdx][OutIdx];
+          R := SendBuffers[sIdx][OutIdx + 1];
+          for e := 0 to Project.SendEffectCount[sIdx] - 1 do
+            if Project.SendEffects[sIdx][e].Kind <> Effects.ekNone then
+              Effects.ProcessEffect(SendEffectState[sIdx][e], Project.SendEffects[sIdx][e],
+                L, R, ProjectSampleRate,
+                SidechainLevelFor(Project.SendEffects[sIdx][e].SidechainSourceTrack, Frame));
+          MasterBuf[OutIdx] := MasterBuf[OutIdx] + L * Project.SendReturnLevel[sIdx];
+          MasterBuf[OutIdx + 1] := MasterBuf[OutIdx + 1] + R * Project.SendReturnLevel[sIdx];
+        end;
       end;
+
+      { ---------- pass 4: master inserts ---------- }
+      if Project.MasterEffectCount > 0 then
+        for Frame := 0 to BlockLen - 1 do
+        begin
+          L := MasterBuf[Frame * OutChannels];
+          R := MasterBuf[Frame * OutChannels + 1];
+          for e := 0 to Project.MasterEffectCount - 1 do
+            if Project.MasterEffects[e].Kind <> Effects.ekNone then
+              { 0 for the sidechain level: per-track signal no longer exists
+                distinctly by the time a master effect runs (every track's
+                already been summed into MasterBuf just above), same as before
+                - only per-track inserts gained real sidechain support here. }
+              Effects.ProcessEffect(MasterEffectState[e], Project.MasterEffects[e], L, R,
+                ProjectSampleRate, 0);
+          MasterBuf[Frame * OutChannels] := L;
+          MasterBuf[Frame * OutChannels + 1] := R;
+        end;
+
+      { ---------- pass 5: SP-1200, then straight out to disk ----------
+        SP1200Process is a strictly sequential per-frame state machine, so
+        feeding it consecutive blocks with the state carried between them
+        produces the same samples as one call over the whole timeline. }
+      if AudioEngineGetSP1200Enabled then
+        SP1200Process(SP1200St, MasterBuf, BlockLen, OutChannels,
+          ProjectSampleRate);
+
+      if not WavWriteBlock(W, MasterBuf, BlockLen, OutChannels) then
+        Exit;
+
+      BlockStart := BlockStart + BlockLen;
     end;
 
-    if AudioEngineGetSP1200Enabled then
-    begin
-      SP1200Reset(SP1200St);
-      SP1200Process(SP1200St, Buffer, ProjectLengthFrames, OutChannels,
-        ProjectSampleRate);
-    end;
-
-    Result := EncodeWav(AOutputPath, Buffer, ProjectLengthFrames, OutChannels,
-      ProjectSampleRate);
+    Result := True;
   finally
+    { closing also verifies that as many frames arrived as the header
+      promised, so a render that bailed out mid-way reports failure rather
+      than leaving a plausible-looking truncated file }
+    if WavStarted then
+      Result := WavWriteEnd(W) and Result;
     for t := 0 to Project.MaxTracks - 1 do
       if TrackBuffers[t] <> nil then
         FreeMem(TrackBuffers[t]);
     for sIdx := 0 to Project.SendCount - 1 do
       if SendBuffers[sIdx] <> nil then
         FreeMem(SendBuffers[sIdx]);
-    FreeMem(Buffer);
+    if MasterBuf <> nil then
+      FreeMem(MasterBuf);
   end;
 end;
 

@@ -17,10 +17,39 @@ type
     Decode: TDecodeFunc;
   end;
 
+  { Incremental form of EncodeWav, for a caller that produces its audio a
+    block at a time and would otherwise have to hold the whole thing in RAM
+    just to hand it over - see ProjectFile.RenderProjectToWav.
+
+    The total frame count is required up front, because that is what lets the
+    header go out correct on the first write with no seek-back at the end: a
+    render knows its own length before it starts. Writing more or fewer
+    frames than declared produces a file whose header disagrees with its
+    data, so don't.
+
+    EncodeWav is implemented on top of this, so both paths share one copy of
+    the header layout and the sample conversion and cannot drift apart. }
+  TWavWriter = record
+    Stream: TFileStream;
+    Chunk: array of SmallInt;
+    Declared: Int64;   { frames promised in the header }
+    Written: Int64;    { frames actually handed over so far }
+  end;
+
 function DecodeWav(const APath: string; out ASample: TSample): Boolean;
 function DecodeSampleFile(const APath: string; out ASample: TSample): Boolean;
 function EncodeWav(const APath: string; AData: PSingle; AFrameCount, AChannels,
   ASampleRate: Integer): Boolean;
+
+function WavWriteBegin(out AW: TWavWriter; const APath: string;
+  AFrameCount: Int64; AChannels, ASampleRate: Integer): Boolean;
+{ Appends AFrameCount frames of interleaved floats. May be called any number
+  of times; the block sizes need not be equal or aligned to anything. }
+function WavWriteBlock(var AW: TWavWriter; AData: PSingle;
+  AFrameCount: Int64; AChannels: Integer): Boolean;
+{ Closes the file. Returns False if fewer frames arrived than were declared,
+  which would leave a header claiming data that is not there. }
+function WavWriteEnd(var AW: TWavWriter): Boolean;
 
 implementation
 
@@ -202,8 +231,6 @@ begin
   end;
 end;
 
-function EncodeWav(const APath: string; AData: PSingle; AFrameCount, AChannels,
-  ASampleRate: Integer): Boolean;
 const
   { Samples converted per write. TFileStream is UNBUFFERED - every
     WriteBuffer call is a write() syscall straight through to the OS - so
@@ -215,70 +242,110 @@ const
     project with any real amount of recorded material.
 
     Chunked rather than one buffer for the whole file so peak memory stays
-    fixed (128KB) instead of scaling with render length - a full-length
-    bounce is already holding several whole-timeline float buffers by the
-    time it gets here. }
+    fixed (128KB) instead of scaling with render length. }
   ChunkSamples = 65536;
+
+function WavWriteBegin(out AW: TWavWriter; const APath: string;
+  AFrameCount: Int64; AChannels, ASampleRate: Integer): Boolean;
 var
-  Stream: TFileStream;
   DataBytes, RiffSize, ByteRate: UInt32;
   BlockAlign: UInt16;
-  i, TotalSamples, Done, ThisChunk: Integer;
-  Value: Single;
-  Chunk: array of SmallInt;
 begin
   Result := False;
+  AW.Stream := nil;
+  AW.Declared := AFrameCount;
+  AW.Written := 0;
+  SetLength(AW.Chunk, ChunkSamples);
+
   DataBytes := AFrameCount * AChannels * 2;
   BlockAlign := AChannels * 2;
   ByteRate := UInt32(ASampleRate) * BlockAlign;
   RiffSize := 4 + (8 + 16) + (8 + DataBytes);
 
-  Stream := TFileStream.Create(APath, fmCreate);
-  try
-    Stream.WriteBuffer('RIFF', 4);
-    WriteU32(Stream, RiffSize);
-    Stream.WriteBuffer('WAVE', 4);
+  AW.Stream := TFileStream.Create(APath, fmCreate);
 
-    Stream.WriteBuffer('fmt ', 4);
-    WriteU32(Stream, 16);
-    WriteU16(Stream, FormatPCM);
-    WriteU16(Stream, AChannels);
-    WriteU32(Stream, ASampleRate);
-    WriteU32(Stream, ByteRate);
-    WriteU16(Stream, BlockAlign);
-    WriteU16(Stream, 16);
+  AW.Stream.WriteBuffer('RIFF', 4);
+  WriteU32(AW.Stream, RiffSize);
+  AW.Stream.WriteBuffer('WAVE', 4);
 
-    Stream.WriteBuffer('data', 4);
-    WriteU32(Stream, DataBytes);
+  AW.Stream.WriteBuffer('fmt ', 4);
+  WriteU32(AW.Stream, 16);
+  WriteU16(AW.Stream, FormatPCM);
+  WriteU16(AW.Stream, AChannels);
+  WriteU32(AW.Stream, ASampleRate);
+  WriteU32(AW.Stream, ByteRate);
+  WriteU16(AW.Stream, BlockAlign);
+  WriteU16(AW.Stream, 16);
 
-    { identical clamp and Round per sample as before, so the bytes written
-      are unchanged - only how many of them go out per syscall differs }
-    TotalSamples := AFrameCount * AChannels;
-    SetLength(Chunk, ChunkSamples);
-    Done := 0;
-    while Done < TotalSamples do
-    begin
+  AW.Stream.WriteBuffer('data', 4);
+  WriteU32(AW.Stream, DataBytes);
+  Result := True;
+end;
+
+function WavWriteBlock(var AW: TWavWriter; AData: PSingle;
+  AFrameCount: Int64; AChannels: Integer): Boolean;
+var
+  i, ThisChunk: Integer;
+  Done, TotalSamples: Int64;
+  Value: Single;
+begin
+  Result := False;
+  if AW.Stream = nil then
+    Exit;
+
+  { the identical clamp and Round per sample the single-shot encoder always
+    used, so the bytes written do not depend on how the caller blocked its
+    audio up }
+  TotalSamples := AFrameCount * AChannels;
+  Done := 0;
+  while Done < TotalSamples do
+  begin
+    if TotalSamples - Done > ChunkSamples then
+      ThisChunk := ChunkSamples
+    else
       ThisChunk := TotalSamples - Done;
-      if ThisChunk > ChunkSamples then
-        ThisChunk := ChunkSamples;
 
-      for i := 0 to ThisChunk - 1 do
-      begin
-        Value := AData[Done + i];
-        if Value > 1.0 then
-          Value := 1.0
-        else if Value < -1.0 then
-          Value := -1.0;
-        Chunk[i] := Round(Value * 32767.0);
-      end;
-
-      Stream.WriteBuffer(Chunk[0], ThisChunk * 2);
-      Inc(Done, ThisChunk);
+    for i := 0 to ThisChunk - 1 do
+    begin
+      Value := AData[Done + i];
+      if Value > 1.0 then
+        Value := 1.0
+      else if Value < -1.0 then
+        Value := -1.0;
+      AW.Chunk[i] := Round(Value * 32767.0);
     end;
 
-    Result := True;
+    AW.Stream.WriteBuffer(AW.Chunk[0], ThisChunk * 2);
+    Inc(Done, ThisChunk);
+  end;
+
+  AW.Written := AW.Written + AFrameCount;
+  Result := True;
+end;
+
+function WavWriteEnd(var AW: TWavWriter): Boolean;
+begin
+  Result := (AW.Stream <> nil) and (AW.Written = AW.Declared);
+  if AW.Stream <> nil then
+  begin
+    AW.Stream.Free;
+    AW.Stream := nil;
+  end;
+  SetLength(AW.Chunk, 0);
+end;
+
+function EncodeWav(const APath: string; AData: PSingle; AFrameCount, AChannels,
+  ASampleRate: Integer): Boolean;
+var
+  W: TWavWriter;
+begin
+  Result := False;
+  if not WavWriteBegin(W, APath, AFrameCount, AChannels, ASampleRate) then
+    Exit;
+  try
+    Result := WavWriteBlock(W, AData, AFrameCount, AChannels);
   finally
-    Stream.Free;
+    Result := WavWriteEnd(W) and Result;
   end;
 end;
 
