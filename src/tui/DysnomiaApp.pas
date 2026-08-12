@@ -12,7 +12,7 @@ unit DysnomiaApp;
 interface
 
 uses
-  SysUtils, Objects, Drivers, Views, Menus, Dialogs, App,
+  SysUtils, Objects, Drivers, Views, Menus, Dialogs, App, Keyboard,
   DysGeometry, DysWidgets, DysEffectsRack, DysFilePane, DysTrackPane, DysTimeline,
   DysPreferences, DysFileDialog, Project, Config, ProjectFile;
 
@@ -162,6 +162,26 @@ begin
   EnsureDysTrackCount(DysStartTrackCount);
 
   inherited Init;
+  { `packages/rtl-console/src/unix/keyboard.pp`'s SysInitKeyboard (run
+    inside "inherited Init" above, via InitScreen) defaults AltPrefix to
+    26 ($1A, i.e. Ctrl+Z's byte) on every non-Linux-console target,
+    including xterm - a fallback for terminals with no ESC-prefixed Alt
+    encoding. It does this unconditionally BEFORE checking TERM, and the
+    xterm-specific branch right after it (which sends `ESC[?1036h` to make
+    a real xterm emit a genuine ESC-prefixed Alt sequence instead) never
+    resets AltPrefix back to 0 once that's done. Net effect: SysGetKeyEvent
+    treats a raw Ctrl+Z byte as a toggle for "the next key is Alt+<key>"
+    and swallows it outright - it never reaches HandleEvent as kbCtrlZ at
+    all, silently eating the keystroke instead of shifting the instrument
+    keyboard's octave down (DysWidgets.TDysToolBar.HandleEvent). Ctrl+X
+    (AltPrefix's neighbour on the octave-up binding) has no such hijack and
+    works fine, which is what made this look like a one-sided bug. Since
+    Dysnomia only targets xterm-family terminals (Linux xterm, Darwin's
+    Tiger xterm - see tui.md's Terminal geometry section), the ESC-prefix
+    mechanism above already covers every real Alt shortcut (Alt+X for
+    Exit); the Ctrl+Z legacy prefix hack is never needed and is safe to
+    disable outright. }
+  Keyboard.AltPrefix := 0;
   { Nothing is Current anywhere by default - Insert() doesn't select what
     it inserts, so without this no view anywhere would receive keyboard
     input until the user's first mouse click (mouse events are routed by

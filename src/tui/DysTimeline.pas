@@ -448,6 +448,15 @@ var
   of ArrangementView's KeyboardTrack/CursorFrame. Only called (via
   DysWidgets.StartRecordingProc) when AudioEngineRecordState is already
   confirmed Idle - see TDysToolBar's own Record button handling. }
+{ Real implementation behind DysWidgets.SeekPlaybackToCursorProc - see that
+  var's own comment. Mirrors DysStartRecording's own seek-to-cursor line
+  above, just without the recording bookkeeping around it. }
+procedure DysSeekPlaybackToCursor;
+begin
+  if ActiveTimelineContent <> nil then
+    AudioEngineSeek(ActiveTimelineContent^.CursorFrame);
+end;
+
 procedure DysStartRecording;
 begin
   RecordTrackIndex := SelectedTrackIndex;
@@ -1492,5 +1501,6 @@ initialization
     `uses DysTimeline` directly to call these itself. }
   StartRecordingProc := @DysStartRecording;
   FinalizeRecordingProc := @DysFinalizeRecording;
+  SeekPlaybackToCursorProc := @DysSeekPlaybackToCursor;
 
 end.

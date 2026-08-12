@@ -151,6 +151,15 @@ var
   StartRecordingProc: procedure = nil;
   FinalizeRecordingProc: procedure = nil;
 
+{ Same circularity/wiring as the two callbacks above: TogglePlayPause (below)
+  needs to seek the engine to DysTimeline.ActiveTimelineContent^.CursorFrame
+  before AudioEnginePlay, so Play always starts from wherever the timeline
+  cursor currently sits rather than wherever the engine last stopped -
+  DysTimeline's own `initialization` section points this at the real
+  implementation alongside StartRecordingProc/FinalizeRecordingProc. }
+var
+  SeekPlaybackToCursorProc: procedure = nil;
+
 { Called from DysTimeline.TDysTimelineContent.MarkClipUnderCursor (the 'k'
   key) to hand the marked clip off to the bottom pane's waveform widget -
   same circularity as the two callbacks above (DysTimeline `uses
@@ -398,6 +407,8 @@ begin
   end
   else if AudioEngineHasClip then
   begin
+    if Assigned(SeekPlaybackToCursorProc) then
+      SeekPlaybackToCursorProc;
     AudioEnginePlay;
     Playing := True;
   end;

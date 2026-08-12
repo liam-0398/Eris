@@ -255,6 +255,41 @@ existing in `Drivers.pas` is not evidence a real terminal can generate it;
 check the driver's own sequence table (or the raw-byte case for a
 Ctrl+<letter>) before relying on any KeyCode this framework predefines.
 
+**`Keyboard.AltPrefix` defaults to 26 (Ctrl+Z's byte, `$1A`) on every
+non-Linux-console Unix target, including xterm - and silently swallows any
+Ctrl+Z keystroke as a modifier-prefix toggle instead of ever delivering it
+as `kbCtrlZ`.** `packages/rtl-console/src/unix/keyboard.pp`'s
+`SysInitKeyboard`, inside the `{$ifdef linux} ... else` branch that runs for
+every non-console target (so xterm on both Linux and Darwin, per the Source
+layout note above), does `if AltPrefix=0 then AltPrefix:=26` unconditionally
+- a fallback "Ctrl+Z means the next key is Alt+<key>" convention for
+terminals with no ESC-prefixed Alt encoding. It does this *before* checking
+`TERM`; the very next lines, only for `TERM` starting `xterm`, write
+`ESC[?1036h` to make a real xterm emit a genuine ESC-prefixed Alt sequence
+instead - but never reset `AltPrefix` back to 0 once that's done, so the
+legacy prefix hack stays armed on top of the now-redundant proper mechanism.
+`SysGetKeyEvent`'s main loop checks `(AltPrefix<>0) and (MyChar=chr(AltPrefix))`
+*before* the normal per-byte decode path, so a raw Ctrl+Z byte never reaches
+`EvalScan`/`LScan` at all (which otherwise correctly derives scancode `$2C`,
+matching `Drivers.kbCtrlZ = $2C1A`, exactly the same way Ctrl+X's `$18`
+correctly derives `$2D` for `kbCtrlX` - the two constants are equally valid,
+only Ctrl+Z is intercepted upstream). Confirmed no `roottree`/escape-sequence
+entry is involved - this is a raw single-byte check, unrelated to the
+`kbCtrlEnter`/Ctrl+I sequence-tree gaps below. Symptom: Ctrl+Z produces
+*no* event at all (not even a wrong one) - it just arms "treat the next
+keystroke as Alt+X" and waits, so a Ctrl+Z press followed by an unrelated
+key looks like nothing happened, or like some other key silently did
+something Alt-flavored. Since any real Free Vision app on this RTL only
+ever targets xterm-family terminals (this codebase has no Linux-console
+target), the `ESC[?1036h` mechanism already covers every Alt shortcut the
+app needs, and the legacy prefix hack can simply be disabled once, after
+`TApplication.Init` (which is what runs `SysInitKeyboard`) has already set
+its default: `Keyboard.AltPrefix := 0;` (add `Keyboard` to the app unit's
+`uses`). Setting it to 0 *before* `TApplication.Init` doesn't work - that's
+exactly the sentinel `SysInitKeyboard` checks to decide whether to apply its
+own default of 26, so it would just get overwritten back to 26 on the next
+line.
+
 **A selectable `ofTopSelect` view without `ofFirstClick` eats its own
 focusing click.** `TView.HandleEvent`'s generic mouse-down handling
 (`views.pas`):
