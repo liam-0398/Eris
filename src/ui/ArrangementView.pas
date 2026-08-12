@@ -71,17 +71,23 @@ type
       VolumeSliderMargin = 10;
       VolumeSliderRadius = 5;
       VolumeSliderGrabPixels = 8;
-      TrackVolumeMax = 2.0;
-      { The master fader's own top of scale, and deliberately not
-        TrackVolumeMax. A track fader is a balancing control - doubling one
-        track against the others is an ordinary thing to want, so unity sits
-        at the middle of its travel. The master fader is not: the mix is
-        already as loud as it is going to get without clipping, so what is
-        asked of it is nearly always attenuation. Unity at 80% of the travel
-        leaves a couple of dB to push into and the whole rest of the slider
-        to come down with, and it means the default position reads as "up"
-        rather than sitting mid-track looking half turned down. }
-      MasterVolumeMax = 1.25;
+      { Top of scale for every fader in this view, track and master alike.
+        1.25 rather than 2.0 puts unity at 80% of the travel: a couple of dB
+        to push into, and the whole rest of the slider to come down with.
+        That is how these actually get used - a mix is balanced by pulling
+        things down against the loudest thing in it, and a fader whose
+        default sits dead centre both looks half turned down and spends half
+        its resolution on gains that would clip the master.
+
+        This is a SCALE, not a stored value. A project file holds a linear
+        gain, so a project saved when the scale was 0..2 plays back at
+        exactly the gain it was saved with - all that changed is where on the
+        slider that gain is drawn. A track saved above 1.25 keeps its gain
+        and pins its knob at the right-hand end; nothing is clamped on load,
+        because clamping is the one thing that WOULD change how an old
+        project sounds. }
+      TrackVolumeMax = 1.25;
+      MasterVolumeMax = TrackVolumeMax;
       MuteButtonSize = 16;
       MuteButtonMargin = 4;
       { solo sits immediately left of the mute and is deliberately the same
@@ -1564,9 +1570,8 @@ begin
     Canvas.Rectangle(MuteRect);
 
     { master fader - the same slider a track has, in the same place on the
-      row - the same control in the same place, differing only in its top of
-      scale (see MasterVolumeMax), because putting it anywhere else would
-      only make it look like a different kind of thing }
+      row - same control, same place, same scale, because putting it
+      anywhere else would only make it look like a different kind of thing }
     SliderY := y + VolumeSliderY;
     Canvas.Pen.Color := clBtnShadow;
     Canvas.Line(HeaderLeft + VolumeSliderMargin, SliderY, Width - VolumeSliderMargin, SliderY);
