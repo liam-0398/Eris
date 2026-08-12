@@ -80,6 +80,30 @@ type
       See the 'l' key and tui.md's Bindings. }
     LoopStart: Int64;
     LoopEnd: Int64;
+    { Shift+W: interactive re-warp of the clip under the cursor, mirroring
+      BeginOverlay/Pending's "blink until solidified" pattern instead of
+      warping straight to the nearest power-of-two bar (that's still plain
+      'w' - WarpClipToNearestPow2Bar). Left/Right grow/shrink ResizeLength by
+      GridStepFrames (so it stays grid-snapped the whole time, same
+      convention the cursor's own Left/Right already use); Enter solidifies
+      by resampling the clip to ResizeLength via WarpClipToLength (the same
+      two-WarpMarker mechanism 'w' uses, just targeting an arbitrary grid-
+      snapped length instead of a power-of-two bar count); Esc cancels. }
+    ResizeActive: Boolean;
+    ResizeTrack: Integer;
+    ResizeClipIndex: Integer;
+    ResizeLength: Int64;
+    { 'm': interactive move of the clip under the cursor, same blink-until-
+      solidified shape as resize above. Left/Right nudge MovePosition by
+      GridStepFrames; Enter solidifies by removing the clip from its old
+      slot and re-committing it at MovePosition (CommitClipToTrack's own
+      OverwriteClips handles anything already sitting at the destination,
+      same as Paste); Esc cancels. }
+    MoveActive: Boolean;
+    MoveTrack: Integer;
+    MoveClipIndex: Integer;
+    MoveLength: Int64;
+    MovePosition: Int64;
     constructor Init(Bounds: TRect);
     procedure Draw; virtual;
     procedure HandleEvent(var Event: TEvent); virtual;
@@ -101,6 +125,9 @@ type
     procedure DuplicateClipUnderCursor;
     procedure SplitClipUnderCursor;
     procedure DeleteClipUnderCursor;
+    { Enter while ResizeActive/MoveActive - see the field comments above. }
+    procedure SolidifyResize;
+    procedure SolidifyMove;
     { Whole-project version of PushTrackToEngine (below, private to this
       unit) - mirrors ArrangementView.RefreshAllTracks (src/ui), the "every
       track changed" call Eris's own MainForm makes after project open/New/
@@ -379,6 +406,46 @@ end;
   onscreen. Fixed by comparing the two power-of-two CANDIDATES directly in
   bar space (LenBars, not its logarithm) and picking whichever is closer -
   no log(), no Round() tie-break, "nearest" now means what it looks like. }
+{ Rounds AValue to the nearest multiple of AStep - shared by Shift+W (resize)
+  and 'm' (move) so their interactive start point is already grid-aligned,
+  same convention the cursor's own Left/Right movement (GridStepFrames)
+  established. }
+function SnapToGrid(AValue, AStep: Int64): Int64;
+begin
+  if AStep <= 0 then
+  begin
+    Result := AValue;
+    Exit;
+  end;
+  Result := ((AValue + (AStep div 2)) div AStep) * AStep;
+end;
+
+{ The resampling half of 'w' (WarpClipToNearestPow2Bar), factored out so
+  Shift+W's interactive resize can retarget the clip to an arbitrary grid-
+  snapped length instead of only the nearest power-of-two bar count -
+  identical two-WarpMarker/WarpModeRePitch mechanism either way (see the
+  header comment on WarpClipToNearestPow2Bar for why this changes nothing
+  about the underlying sample data). }
+procedure WarpClipToLength(ATrack, AClipIndex: Integer; ATargetLength: Int64);
+var
+  OrigLength: Int64;
+begin
+  if (AClipIndex < 0) or (ATargetLength <= 0) then
+    Exit;
+  OrigLength := Project.Tracks[ATrack].Clips[AClipIndex].Length;
+  if OrigLength <= 0 then
+    Exit;
+  Project.Tracks[ATrack].Clips[AClipIndex].WarpMode := SampleTypes.WarpModeRePitch;
+  SetLength(Project.Tracks[ATrack].Clips[AClipIndex].WarpMarkers, 2);
+  Project.Tracks[ATrack].Clips[AClipIndex].WarpMarkers[0].SourceFrame := 0;
+  Project.Tracks[ATrack].Clips[AClipIndex].WarpMarkers[0].TimelineFrame := 0;
+  Project.Tracks[ATrack].Clips[AClipIndex].WarpMarkers[1].SourceFrame := OrigLength;
+  Project.Tracks[ATrack].Clips[AClipIndex].WarpMarkers[1].TimelineFrame := ATargetLength;
+  Project.Tracks[ATrack].Clips[AClipIndex].Length := ATargetLength;
+
+  PushTrackToEngine(ATrack);
+end;
+
 procedure WarpClipToNearestPow2Bar(ATrack, AClipIndex: Integer);
 var
   Frames, Bars, OrigLength, TargetLength: Int64;
@@ -424,15 +491,7 @@ begin
     Bars := BarsHi;
   TargetLength := Bars * Frames;
 
-  Project.Tracks[ATrack].Clips[AClipIndex].WarpMode := SampleTypes.WarpModeRePitch;
-  SetLength(Project.Tracks[ATrack].Clips[AClipIndex].WarpMarkers, 2);
-  Project.Tracks[ATrack].Clips[AClipIndex].WarpMarkers[0].SourceFrame := 0;
-  Project.Tracks[ATrack].Clips[AClipIndex].WarpMarkers[0].TimelineFrame := 0;
-  Project.Tracks[ATrack].Clips[AClipIndex].WarpMarkers[1].SourceFrame := OrigLength;
-  Project.Tracks[ATrack].Clips[AClipIndex].WarpMarkers[1].TimelineFrame := TargetLength;
-  Project.Tracks[ATrack].Clips[AClipIndex].Length := TargetLength;
-
-  PushTrackToEngine(ATrack);
+  WarpClipToLength(ATrack, AClipIndex, TargetLength);
 end;
 
 { TDysTimelineContent }
@@ -465,6 +524,10 @@ begin
   PlayheadFrame := 0;
   LoopStart := -1;
   LoopEnd := -1;
+  ResizeActive := False;
+  ResizeClipIndex := -1;
+  MoveActive := False;
+  MoveClipIndex := -1;
   ActiveTimelineContent := @Self;
 end;
 
@@ -585,13 +648,31 @@ begin
     end;
 
     for i := 0 to High(Project.Tracks[Track].Clips) do
+    begin
+      { The clip currently being interactively resized/moved is skipped here
+        and drawn again below with PendingAttr at its TENTATIVE span instead
+        - same "blink until solidified" look BeginOverlay's Pending clip
+        already has, see the field comments on ResizeActive/MoveActive. }
+      if (ResizeActive and (Track = ResizeTrack) and (i = ResizeClipIndex)) or
+         (MoveActive and (Track = MoveTrack) and (i = MoveClipIndex)) then
+        Continue;
       DrawSpan(B, FramesPerCol, Size.X, Project.Tracks[Track].Clips[i].Position,
         Project.Tracks[Track].Clips[i].Length,
         SampleShadeAttr(Project.Tracks[Track].Clips[i].SampleID), ViewStartFrame);
+    end;
     DrawAdjoiningSeparators(B, Track, FramesPerCol, Size.X, ViewStartFrame);
 
     if Pending and (Track = CursorTrack) then
       DrawSpan(B, FramesPerCol, Size.X, CursorFrame, PendingLength, PendingAttr,
+        ViewStartFrame);
+
+    if ResizeActive and (Track = ResizeTrack) then
+      DrawSpan(B, FramesPerCol, Size.X,
+        Project.Tracks[Track].Clips[ResizeClipIndex].Position, ResizeLength,
+        PendingAttr, ViewStartFrame);
+
+    if MoveActive and (Track = MoveTrack) then
+      DrawSpan(B, FramesPerCol, Size.X, MovePosition, MoveLength, PendingAttr,
         ViewStartFrame);
 
     if LoopStartCol >= 0 then
@@ -642,6 +723,24 @@ begin
         end;
       kbLeft:
         begin
+          if ResizeActive then
+          begin
+            Dec(ResizeLength, GridStepFrames);
+            if ResizeLength < GridStepFrames then
+              ResizeLength := GridStepFrames; { never below one grid step }
+            DrawView;
+            ClearEvent(Event);
+            Exit;
+          end;
+          if MoveActive then
+          begin
+            Dec(MovePosition, GridStepFrames);
+            if MovePosition < 0 then
+              MovePosition := 0;
+            DrawView;
+            ClearEvent(Event);
+            Exit;
+          end;
           if not CursorInLabel then
           begin
             if CursorFrame <= 0 then
@@ -660,6 +759,20 @@ begin
         end;
       kbRight:
         begin
+          if ResizeActive then
+          begin
+            Inc(ResizeLength, GridStepFrames);
+            DrawView;
+            ClearEvent(Event);
+            Exit;
+          end;
+          if MoveActive then
+          begin
+            Inc(MovePosition, GridStepFrames);
+            DrawView;
+            ClearEvent(Event);
+            Exit;
+          end;
           if CursorInLabel then
             CursorInLabel := False
           else
@@ -673,13 +786,24 @@ begin
         end;
       kbEnter:
         begin
-          PlaceOverlay;
+          if ResizeActive then
+            SolidifyResize
+          else if MoveActive then
+            SolidifyMove
+          else
+            PlaceOverlay;
           ClearEvent(Event);
           Exit;
         end;
       kbEsc:
         begin
-          CancelOverlay;
+          if ResizeActive then
+            ResizeActive := False
+          else if MoveActive then
+            MoveActive := False
+          else
+            CancelOverlay;
+          DrawView;
           ClearEvent(Event);
           Exit;
         end;
@@ -739,7 +863,14 @@ begin
           Exit;
         end;
     end;
-    case UpCase(Event.CharCode) of
+    { Char-code case, not UpCase - unlike Ctrl+<letter> or Enter (see tui.md's
+      "Three of these were redesigned" note), Shift DOES change a plain
+      letter's byte, so 'w' and 'W' arrive as genuinely distinct codes and
+      can mean different things: 'w' still warps straight to the nearest
+      power-of-two bar, 'W' now starts the interactive resize instead. 'l'/
+      'L' and '+'/'=' etc. don't need the distinction, so those still match
+      case-insensitively where that was already true. }
+    case Event.CharCode of
       '+', '=':
         begin
           { '=' too - the unshifted key sharing that cap on most keyboards,
@@ -754,7 +885,7 @@ begin
           ClearEvent(Event);
           Exit;
         end;
-      'W':
+      'w':
         begin
           ClipIdx := ClipIndexAtFrame(CursorTrack, CursorFrame);
           if ClipIdx >= 0 then
@@ -765,7 +896,49 @@ begin
           ClearEvent(Event);
           Exit;
         end;
-      'L':
+      'W':
+        begin
+          { Start the interactive resize - see the ResizeActive field
+            comment. Starting length is the clip's current length snapped to
+            the grid, so the very first Left/Right press moves it by exactly
+            one grid step rather than an odd leftover fraction. }
+          ClipIdx := ClipIndexAtFrame(CursorTrack, CursorFrame);
+          if ClipIdx >= 0 then
+          begin
+            ResizeActive := True;
+            ResizeTrack := CursorTrack;
+            ResizeClipIndex := ClipIdx;
+            ResizeLength := SnapToGrid(
+              Project.Tracks[CursorTrack].Clips[ClipIdx].Length, GridStepFrames);
+            if ResizeLength < GridStepFrames then
+              ResizeLength := GridStepFrames;
+            DrawView;
+          end;
+          ClearEvent(Event);
+          Exit;
+        end;
+      'm', 'M':
+        begin
+          { Start the interactive move - see the MoveActive field comment.
+            Starting position is the clip's current position snapped to the
+            grid, same reasoning as ResizeLength above. }
+          ClipIdx := ClipIndexAtFrame(CursorTrack, CursorFrame);
+          if ClipIdx >= 0 then
+          begin
+            MoveActive := True;
+            MoveTrack := CursorTrack;
+            MoveClipIndex := ClipIdx;
+            MoveLength := Project.Tracks[CursorTrack].Clips[ClipIdx].Length;
+            MovePosition := SnapToGrid(
+              Project.Tracks[CursorTrack].Clips[ClipIdx].Position, GridStepFrames);
+            if MovePosition < 0 then
+              MovePosition := 0;
+            DrawView;
+          end;
+          ClearEvent(Event);
+          Exit;
+        end;
+      'l', 'L':
         begin
           { Three-press cycle: start marker, end marker, clear - see tui.md.
             CursorFrame is already column-aligned (it only ever moves by
@@ -972,6 +1145,30 @@ begin
     Exit;
   Project.RemoveClipAt(CursorTrack, ClipIdx);
   PushTrackToEngine(CursorTrack);
+  DrawView;
+end;
+
+procedure TDysTimelineContent.SolidifyResize;
+begin
+  if not ResizeActive then
+    Exit;
+  WarpClipToLength(ResizeTrack, ResizeClipIndex, ResizeLength);
+  ResizeActive := False;
+  DrawView;
+end;
+
+procedure TDysTimelineContent.SolidifyMove;
+var
+  MovedClip: TClip;
+begin
+  if not MoveActive then
+    Exit;
+  MovedClip := Project.Tracks[MoveTrack].Clips[MoveClipIndex];
+  Project.RemoveClipAt(MoveTrack, MoveClipIndex);
+  MovedClip.Position := MovePosition;
+  Project.CommitClipToTrack(MoveTrack, MovedClip);
+  PushTrackToEngine(MoveTrack);
+  MoveActive := False;
   DrawView;
 end;
 
