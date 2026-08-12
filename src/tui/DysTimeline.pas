@@ -8,9 +8,10 @@ unit DysTimeline;
   track to the engine, Esc cancels it. Drag mode (Ctrl+S) stays a stub -
   that's selection editing, stage 8.
 
-  The grid step (PixelsPerSecond, below) is a fixed constant for now, not
-  wired to the toolbar's interval selector - that's stage 8 too, once the
-  cycle button actually needs to change something.
+  The grid step Left/Right nudges by is wired to the toolbar's interval
+  selector (GridStepFrames); zoom (PxPerSec, +/-) and horizontal scroll
+  (ViewStartFrame, autoscrolling to follow the playhead during playback)
+  are both runtime-adjustable - see tui.md's most recent session note.
 
   The per-row label (LabelWidth columns wide) is a single track-type
   letter - A/I/S, see TrackTypeChar - derived fresh from Project state on
