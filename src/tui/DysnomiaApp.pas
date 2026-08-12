@@ -1,11 +1,11 @@
 unit DysnomiaApp;
 
 { Stage 1 Free Vision application shell: menu bar, status line, transport
-  bar, docked file/track/timeline panes, bottom bar. Still reaches into
-  no aengine or abackend - see tui.md, "Build stages", that's stage 6.
-  Stage 5 links Project and Config (util) so they compile/link clean
-  through the isolated unit path; nothing in the panes reads from them
-  yet, that's stage 6/7. }
+  bar, docked file/track/timeline panes, bottom bar. Stage 5 linked Project
+  and Config (util); stage 6 links aengine/abackend the same way - engine
+  starts and stops with the app, same AudioEngineInit/Shutdown pair and
+  same ALSA-default behaviour as eris.lpr/MainForm.pas, completely
+  untouched. No pane reads from the engine yet, that's stage 7/8. }
 
 {$mode objfpc}{$H+}
 
@@ -42,7 +42,7 @@ type
 implementation
 
 uses
-  MsgBox;
+  MsgBox, AudioEngine;
 
 { App-wide colour override. See DysWidgets.TDysPane's comment for why the
   panes need CGrayDialog rather than a plain window palette; this is the
@@ -111,6 +111,10 @@ begin
     here consumes it yet; this just proves util links clean, per stage 5
     in tui.md. }
   ConfigLoad;
+  { Same call, same backend defaulting (ALSA unless eris.conf or a present
+    PipeWire server says otherwise) as eris.lpr/MainForm.pas - see
+    AudioEngineInit. Nothing Dysnomia-specific here. }
+  AudioEngineInit;
 
   inherited Init;
   { Nothing is Current anywhere by default - Insert() doesn't select what
@@ -128,9 +132,12 @@ begin
 end;
 
 { Round-trips Cfg straight back out unchanged - nothing here edits it yet,
-  this only proves the save half of the same link. }
+  this only proves the save half of the same link. Engine down before
+  config save, same ordering MainForm.Destroy uses (backend closed while
+  nothing else still touches it). }
 destructor TDysnomiaApp.Done;
 begin
+  AudioEngineShutdown;
   ConfigSave;
   inherited Done;
 end;
