@@ -19,7 +19,15 @@ unit DysTimeline;
   wiring. The track cursor (CursorTrack + CursorInLabel) is two-
   dimensional: Up/Down always moves CursorTrack, Left/Right move between
   the label column and the grid, and Ctrl+Enter/right-click open the track
-  dropdown for CursorTrack from either position - see tui.md's Bindings. }
+  dropdown for CursorTrack from either position - see tui.md's Bindings.
+
+  'w' re-warps the clip under the cursor to the nearest power-of-two bar
+  count (WarpClipToNearestPow2Bar); 'l' cycles a transport loop range
+  start/end/clear at the cursor's frame (LoopStart/LoopEnd). Committed
+  clips are shaded per-SampleID (SampleShadeAttr) rather than one fixed
+  colour, with a forced black divider (DrawAdjoiningSeparators) wherever
+  two same-shade clips are back-to-back and would otherwise look like one
+  clip - see tui.md's Bindings and Free Vision notes for all four. }
 
 {$mode objfpc}{$H+}
 
@@ -27,7 +35,7 @@ interface
 
 uses
   SysUtils, Objects, Drivers, Views, Dialogs, MsgBox, DysWidgets, Project,
-  SampleTypes, AudioEngine;
+  SampleTypes, AudioEngine, Waveform;
 
 const
   { Fixed timeline scale: this many terminal columns per second of audio.
@@ -52,12 +60,34 @@ type
     FramesPerCol: Int64;
     ShowPlayhead: Boolean;
     PlayheadFrame: Int64;
+    { Transport loop range, -1 = unset - there's no per-clip/per-track loop
+      concept in Project.pas to hook into (checked porting this from Eris),
+      so this mirrors ArrangementView's own FLoopStart/FLoopEnd instead:
+      global range pushed straight to AudioEngineSetLoop/AudioEngineClearLoop.
+      See the 'l' key and tui.md's Bindings. }
+    LoopStart: Int64;
+    LoopEnd: Int64;
     constructor Init(Bounds: TRect);
     procedure Draw; virtual;
     procedure HandleEvent(var Event: TEvent); virtual;
     procedure BeginOverlay(ASampleID: Integer; ALength: Int64);
     procedure CancelOverlay;
     procedure PlaceOverlay;
+    { Clip manipulation "under the cursor" - all five key off the same clip
+      lookup (ClipIndexAtFrame at CursorTrack/CursorFrame) and the same
+      cursor-frame convention 'l' already established (see tui.md's
+      Bindings). Ported from ArrangementView's Copy/Paste/Duplicate/Split/
+      DeleteSelection (src/ui) simplified for a single cursor instead of a
+      selection: there's no multi-clip range-select here, so the clipboard
+      only ever holds one clip. Public so both the direct keys (HandleEvent)
+      and the Edit menu (DysnomiaApp, routed through ActiveTimelineContent)
+      call the same implementation, same as Eris's MainForm/ArrangementView
+      split. }
+    procedure CopyClipUnderCursor;
+    procedure PasteClipAtCursor;
+    procedure DuplicateClipUnderCursor;
+    procedure SplitClipUnderCursor;
+    procedure DeleteClipUnderCursor;
     { Polled from TDysnomiaApp.Idle (see DysnomiaApp.pas) - Free Vision has
       no timer, but TProgram.Idle runs on every pass of the event loop that
       finds no key/mouse event waiting, which is close enough to "as fast
@@ -83,14 +113,35 @@ var
 
 implementation
 
+{ The clip clipboard: a single TClip, not Eris's array-of-(RelTrack,TClip) -
+  there's no multi-track range selection here to copy, just "the clip under
+  the cursor" (see ClipIndexAtFrame), so one slot is enough. Position is
+  rebased to 0 on copy and re-based to CursorFrame on paste, same convention
+  ArrangementView.CopySelection/PasteSelection use. }
+var
+  ClipboardClip: TClip;
+  ClipboardHasItem: Boolean = False;
+
 const
   NormalAttr = $0F; { black bg, bright white fg - matches DysWidgets' PaneNorm }
   CursorAttr = $70; { light grey bg, black fg, no blink - matches PaneSel }
-  ClipAttr   = $1F; { blue bg, bright white fg - a committed clip }
   PendingAttr = $5F; { magenta bg, bright white fg - not placed yet }
   PlayheadAttr = $4F; { red bg, bright white fg - distinct from both clip colours }
+  LoopAttr = $2F; { green bg, bright white fg - transport loop markers }
   BlockChar = #219; { CP437 solid block - see tui.md "Half-block glyphs" }
   PlayheadChar = '|';
+  LoopChar = 'L';
+
+  { A committed clip's colour, per-sample not per-clip: BlockChar is a solid
+    CP437 glyph that fills the whole cell in the FOREGROUND colour - the
+    background nibble underneath never shows through it - so "shade" here
+    means picking a foreground, not a background. The 16-colour set only has
+    three true grey/white tones (0 and 15 are the ramp's black/white
+    endpoints, kept out of the rotation so a clip is never black-on-black or
+    indistinguishable from PlayheadChar's own white-on-red): dark grey (8),
+    light grey (7), bright white (15). See SampleShadeAttr. }
+  ClipShades: array[0..2] of Byte = ($08, $07, $0F);
+  SeparatorAttr = $00; { solid black - see DrawAdjoiningSeparators }
 
 { A/I/S per tui.md: Sampler Track wins over instrument (a track can carry
   both TrackIsSampler and a live TrackInstrument at once - see Project.pas's
@@ -109,6 +160,87 @@ begin
     Result := 'I'
   else
     Result := 'A';
+end;
+
+{ Deterministic per-sample shade, not per-clip - two clips referencing the
+  same SampleID (the same audio file dropped twice) always render
+  identically, matching "all break01.wav starts white" from the feature
+  request. Knuth's multiplicative hash constant rather than SampleID mod 3
+  so consecutive file drops don't visibly cycle 1-2-3-1-2-3 - it still has
+  only 3 possible outputs (see ClipShades), it just scrambles which SampleID
+  lands on which of the 3, and 3-way collisions are expected and handled by
+  DrawAdjoiningSeparators below, not avoided here. }
+function SampleShadeAttr(ASampleID: Integer): Word;
+var
+  H: LongWord;
+begin
+  H := LongWord(ASampleID) * 2654435761;
+  Result := ClipShades[(H shr 28) mod Length(ClipShades)];
+end;
+
+{ Same-colour clips placed back-to-back (one ends exactly where the next
+  starts) render as a single unbroken block with no visible seam between
+  two different files - see the feature request. Paints a one-column black
+  divider at the second clip's leading column whenever that happens; that
+  column is "spent" on the divider rather than either clip, which is the
+  best this grid's resolution (FramesPerCol frames/column) can do. }
+procedure DrawAdjoiningSeparators(var B: TDrawBuffer; ATrack: Integer;
+  AFramesPerCol: Int64; AWidth: Integer);
+var
+  i, j, Col: Integer;
+  EndA, PosB: Int64;
+begin
+  for i := 0 to High(Project.Tracks[ATrack].Clips) do
+  begin
+    EndA := Project.Tracks[ATrack].Clips[i].Position +
+      Project.Tracks[ATrack].Clips[i].Length;
+    for j := 0 to High(Project.Tracks[ATrack].Clips) do
+    begin
+      if i = j then
+        Continue;
+      PosB := Project.Tracks[ATrack].Clips[j].Position;
+      if PosB <> EndA then
+        Continue;
+      if SampleShadeAttr(Project.Tracks[ATrack].Clips[j].SampleID) <>
+         SampleShadeAttr(Project.Tracks[ATrack].Clips[i].SampleID) then
+        Continue;
+      Col := LabelWidth + (PosB div AFramesPerCol);
+      if (Col >= LabelWidth) and (Col <= AWidth - 1) then
+        MoveChar(B[Col], BlockChar, SeparatorAttr, 1);
+    end;
+  end;
+end;
+
+{ Frames per bar at the project's current tempo, hardcoded to 4/4 like
+  ArrangementView.BeatFrames/CurrentGridFrames (src/ui) - Project.pas has no
+  time-signature field, and Eris doesn't either, so there's nothing else to
+  read here. }
+function BarFrames: Int64;
+begin
+  if Project.TempoBPM <= 0 then
+  begin
+    Result := 0;
+    Exit;
+  end;
+  Result := Round((AudioEngine.ProjectSampleRate * 60) / Project.TempoBPM) * 4;
+end;
+
+{ The clip on ATrack whose span covers AFrame, or -1. Same "is this frame
+  inside [Position, Position+Length)" test PlaceOverlay's own commit uses
+  implicitly, just as a lookup instead of an insert. }
+function ClipIndexAtFrame(ATrack: Integer; AFrame: Int64): Integer;
+var
+  i: Integer;
+begin
+  Result := -1;
+  for i := 0 to High(Project.Tracks[ATrack].Clips) do
+    if (AFrame >= Project.Tracks[ATrack].Clips[i].Position) and
+       (AFrame < Project.Tracks[ATrack].Clips[i].Position +
+         Project.Tracks[ATrack].Clips[i].Length) then
+    begin
+      Result := i;
+      Exit;
+    end;
 end;
 
 { Ported from ArrangementView.PushTrackToEngine (src/ui) - same translation
@@ -169,6 +301,51 @@ begin
   AudioEngineSetTrackClips(ATrackIndex, Items, Count);
 end;
 
+{ The 'w' key: re-warp a clip's length to the nearest power-of-two bar count
+  (1, 2, 4, 8, 16...) rather than the nearest whole bar - a "clean loop" in
+  practice means a musically round length, and 3 or 5 bars is not that even
+  though it's a whole number. Ported from ArrangementView's shift-drag
+  resize-right (MouseUp, src/ui): force WarpMode to WarpModeRePitch and give
+  the clip exactly two WarpMarkers spanning the original source length onto
+  the new (target) timeline length - AudioEngine.ClipSourcePosition's
+  WarpMode=1 branch reads the ratio between bounding markers and resamples
+  by adjusting playback rate on the fly, so this changes nothing about the
+  underlying sample data, only how fast the clip's own copy of it is read.
+  Unlike the Eris drag (which only rewrites the trailing marker, preserving
+  whatever markers already existed for a mid-drag edit), this always treats
+  the clip's current Length as the whole source span and replaces the
+  marker list outright - simpler, and correct for warping an entire clip in
+  one keypress rather than dragging one edge of it. }
+procedure WarpClipToNearestPow2Bar(ATrack, AClipIndex: Integer);
+var
+  Frames, Bars, OrigLength, TargetLength: Int64;
+  LenBars: Double;
+  Pow2: Integer;
+begin
+  Frames := BarFrames;
+  if (Frames <= 0) or (AClipIndex < 0) then
+    Exit;
+  OrigLength := Project.Tracks[ATrack].Clips[AClipIndex].Length;
+  if OrigLength <= 0 then
+    Exit;
+  LenBars := OrigLength / Frames;
+  Pow2 := Round(Ln(LenBars) / Ln(2));
+  if Pow2 < 0 then
+    Pow2 := 0; { floor of one bar - never warp a clip down to nothing }
+  Bars := Int64(1) shl Pow2;
+  TargetLength := Bars * Frames;
+
+  Project.Tracks[ATrack].Clips[AClipIndex].WarpMode := SampleTypes.WarpModeRePitch;
+  SetLength(Project.Tracks[ATrack].Clips[AClipIndex].WarpMarkers, 2);
+  Project.Tracks[ATrack].Clips[AClipIndex].WarpMarkers[0].SourceFrame := 0;
+  Project.Tracks[ATrack].Clips[AClipIndex].WarpMarkers[0].TimelineFrame := 0;
+  Project.Tracks[ATrack].Clips[AClipIndex].WarpMarkers[1].SourceFrame := OrigLength;
+  Project.Tracks[ATrack].Clips[AClipIndex].WarpMarkers[1].TimelineFrame := TargetLength;
+  Project.Tracks[ATrack].Clips[AClipIndex].Length := TargetLength;
+
+  PushTrackToEngine(ATrack);
+end;
+
 { TDysTimelineContent }
 
 constructor TDysTimelineContent.Init(Bounds: TRect);
@@ -195,6 +372,8 @@ begin
   FramesPerCol := AudioEngine.ProjectSampleRate div PixelsPerSecond;
   ShowPlayhead := False;
   PlayheadFrame := 0;
+  LoopStart := -1;
+  LoopEnd := -1;
   ActiveTimelineContent := @Self;
 end;
 
@@ -222,7 +401,7 @@ end;
 procedure TDysTimelineContent.Draw;
 var
   B: TDrawBuffer;
-  Col, Track, Row, i, Sec, PlayCol, CursorCol: Integer;
+  Col, Track, Row, i, Sec, PlayCol, CursorCol, LoopStartCol, LoopEndCol: Integer;
   Lbl, SecStr: string;
 begin
   PlayCol := -1;
@@ -233,6 +412,21 @@ begin
       PlayCol := -1; { off the visible grid - draw nothing rather than clamp
                         it to an edge, which would misleadingly suggest the
                         playhead is still in view }
+  end;
+
+  LoopStartCol := -1;
+  if LoopStart >= 0 then
+  begin
+    LoopStartCol := LabelWidth + (LoopStart div FramesPerCol);
+    if (LoopStartCol < LabelWidth) or (LoopStartCol > Size.X - 1) then
+      LoopStartCol := -1;
+  end;
+  LoopEndCol := -1;
+  if LoopEnd >= 0 then
+  begin
+    LoopEndCol := LabelWidth + (LoopEnd div FramesPerCol);
+    if (LoopEndCol < LabelWidth) or (LoopEndCol > Size.X - 1) then
+      LoopEndCol := -1;
   end;
 
   { Ruler: a tick every column, the elapsed second written out at every
@@ -257,6 +451,10 @@ begin
       Inc(Col);
     end;
   end;
+  if LoopStartCol >= 0 then
+    MoveChar(B[LoopStartCol], LoopChar, LoopAttr, 1);
+  if LoopEndCol >= 0 then
+    MoveChar(B[LoopEndCol], LoopChar, LoopAttr, 1);
   if PlayCol >= 0 then
     MoveChar(B[PlayCol], PlayheadChar, PlayheadAttr, 1);
   WriteLine(0, 0, Size.X, 1, B);
@@ -289,10 +487,17 @@ begin
 
     for i := 0 to High(Project.Tracks[Track].Clips) do
       DrawSpan(B, FramesPerCol, Size.X, Project.Tracks[Track].Clips[i].Position,
-        Project.Tracks[Track].Clips[i].Length, ClipAttr);
+        Project.Tracks[Track].Clips[i].Length,
+        SampleShadeAttr(Project.Tracks[Track].Clips[i].SampleID));
+    DrawAdjoiningSeparators(B, Track, FramesPerCol, Size.X);
 
     if Pending and (Track = CursorTrack) then
       DrawSpan(B, FramesPerCol, Size.X, CursorFrame, PendingLength, PendingAttr);
+
+    if LoopStartCol >= 0 then
+      MoveChar(B[LoopStartCol], LoopChar, LoopAttr, 1);
+    if LoopEndCol >= 0 then
+      MoveChar(B[LoopEndCol], LoopChar, LoopAttr, 1);
 
     if PlayCol >= 0 then
       MoveChar(B[PlayCol], PlayheadChar, PlayheadAttr, 1);
@@ -312,6 +517,9 @@ begin
 end;
 
 procedure TDysTimelineContent.HandleEvent(var Event: TEvent);
+var
+  ClipIdx: Integer;
+  Candidate: Int64;
 begin
   if Event.What = evKeyDown then
   begin
@@ -378,6 +586,84 @@ begin
           ClearEvent(Event);
           Exit;
         end;
+      { Same operations the Edit menu's Copy/Paste/Duplicate/Split/Delete
+        items call (DysnomiaApp.HandleEvent) - bound directly here too, same
+        dual-binding ArrangementView.KeyDown/MainForm's Edit menu use in
+        Eris, so the shortcuts work with the timeline focused whether or not
+        the menu bar is ever touched. }
+      kbCtrlC:
+        begin
+          CopyClipUnderCursor;
+          ClearEvent(Event);
+          Exit;
+        end;
+      kbCtrlV:
+        begin
+          PasteClipAtCursor;
+          ClearEvent(Event);
+          Exit;
+        end;
+      kbCtrlD:
+        begin
+          DuplicateClipUnderCursor;
+          ClearEvent(Event);
+          Exit;
+        end;
+      kbCtrlE:
+        begin
+          SplitClipUnderCursor;
+          ClearEvent(Event);
+          Exit;
+        end;
+      kbDel:
+        begin
+          DeleteClipUnderCursor;
+          ClearEvent(Event);
+          Exit;
+        end;
+    end;
+    case UpCase(Event.CharCode) of
+      'W':
+        begin
+          ClipIdx := ClipIndexAtFrame(CursorTrack, CursorFrame);
+          if ClipIdx >= 0 then
+          begin
+            WarpClipToNearestPow2Bar(CursorTrack, ClipIdx);
+            DrawView;
+          end;
+          ClearEvent(Event);
+          Exit;
+        end;
+      'L':
+        begin
+          { Three-press cycle: start marker, end marker, clear - see tui.md.
+            CursorFrame is already column-aligned (it only ever moves by
+            FramesPerCol - see kbLeft/kbRight above), so it IS the frame at
+            the left border of the cursor's cell, no extra snapping needed. }
+          if LoopStart < 0 then
+            LoopStart := CursorFrame
+          else if LoopEnd < 0 then
+          begin
+            Candidate := CursorFrame;
+            if Candidate <= LoopStart then
+            begin
+              LoopEnd := LoopStart;
+              LoopStart := Candidate;
+            end
+            else
+              LoopEnd := Candidate;
+            AudioEngineSetLoop(LoopStart, LoopEnd);
+          end
+          else
+          begin
+            LoopStart := -1;
+            LoopEnd := -1;
+            AudioEngineClearLoop;
+          end;
+          DrawView;
+          ClearEvent(Event);
+          Exit;
+        end;
     end;
   end;
   { App-wide dropdown convention (tui.md's Bindings): whether the cursor is
@@ -438,6 +724,123 @@ begin
 
   Pending := False;
   PendingSampleID := -1;
+  DrawView;
+end;
+
+procedure TDysTimelineContent.CopyClipUnderCursor;
+var
+  ClipIdx: Integer;
+begin
+  ClipIdx := ClipIndexAtFrame(CursorTrack, CursorFrame);
+  if ClipIdx < 0 then
+    Exit;
+  ClipboardClip := Project.Tracks[CursorTrack].Clips[ClipIdx];
+  ClipboardClip.Position := 0; { rebased - see the clipboard var's comment }
+  ClipboardHasItem := True;
+end;
+
+procedure TDysTimelineContent.PasteClipAtCursor;
+var
+  NewClip: TClip;
+begin
+  if not ClipboardHasItem then
+    Exit;
+  NewClip := ClipboardClip;
+  NewClip.Position := CursorFrame + NewClip.Position;
+  NewClip.TrackID := CursorTrack;
+  Project.CommitClipToTrack(CursorTrack, NewClip);
+  PushTrackToEngine(CursorTrack);
+  DrawView;
+end;
+
+procedure TDysTimelineContent.DuplicateClipUnderCursor;
+var
+  ClipIdx: Integer;
+  NewClip: TClip;
+begin
+  ClipIdx := ClipIndexAtFrame(CursorTrack, CursorFrame);
+  if ClipIdx < 0 then
+    Exit;
+  NewClip := Project.Tracks[CursorTrack].Clips[ClipIdx];
+  { Immediately after the original, Ableton-style, same as
+    ArrangementView.DuplicateSelection's single-clip branch - not
+    overlapping, not at the cursor. }
+  NewClip.Position := NewClip.Position + NewClip.Length;
+  Project.CommitClipToTrack(CursorTrack, NewClip);
+  PushTrackToEngine(CursorTrack);
+  { Move the cursor onto the duplicate, so a repeated Ctrl+D keeps stacking
+    copies rightward instead of re-duplicating the original every time. }
+  CursorFrame := NewClip.Position;
+  DrawView;
+end;
+
+procedure TDysTimelineContent.SplitClipUnderCursor;
+var
+  ClipIdx: Integer;
+  Selected, LeftPart, RightPart: TClip;
+  SplitRel, SplitSource: Int64;
+  NewClips: TClipArray;
+  i, k: Integer;
+begin
+  ClipIdx := ClipIndexAtFrame(CursorTrack, CursorFrame);
+  if ClipIdx < 0 then
+    Exit;
+  Selected := Project.Tracks[CursorTrack].Clips[ClipIdx];
+  { Strictly inside, same guard ArrangementView.SplitAtCursor uses - a split
+    exactly on an edge would just produce an empty half. }
+  if (CursorFrame <= Selected.Position) or
+     (CursorFrame >= Selected.Position + Selected.Length) then
+    Exit;
+
+  LeftPart := Selected;
+  RightPart := Selected;
+  { Divides the existing WarpMarkers between the two halves instead of
+    discarding them (see Waveform.SplitWarpMarkers) - naively truncating
+    would silently revert both halves to unwarped playback. SplitSource is
+    the SOURCE-domain split point, which RightPart.Offset must advance by,
+    NOT the timeline-domain CursorFrame - the two differ for any clip that's
+    been time-warped (see the comment on SplitWarpMarkers itself). }
+  SplitRel := SplitWarpMarkers(Selected.WarpMarkers,
+    CursorFrame - Selected.Position, LeftPart.WarpMarkers,
+    RightPart.WarpMarkers, Selected.WarpMode, AudioEngine.ProjectSampleRate,
+    @SplitSource);
+
+  LeftPart.Length := SplitRel;
+  RightPart.Offset := Selected.Offset + SplitSource;
+  RightPart.Position := Selected.Position + SplitRel;
+  RightPart.Length := Selected.Length - SplitRel;
+
+  SetLength(NewClips, Length(Project.Tracks[CursorTrack].Clips) + 1);
+  k := 0;
+  for i := 0 to High(Project.Tracks[CursorTrack].Clips) do
+  begin
+    if i = ClipIdx then
+    begin
+      NewClips[k] := LeftPart;
+      Inc(k);
+      NewClips[k] := RightPart;
+      Inc(k);
+    end
+    else
+    begin
+      NewClips[k] := Project.Tracks[CursorTrack].Clips[i];
+      Inc(k);
+    end;
+  end;
+  Project.ReplaceTrackClips(CursorTrack, NewClips);
+  PushTrackToEngine(CursorTrack);
+  DrawView;
+end;
+
+procedure TDysTimelineContent.DeleteClipUnderCursor;
+var
+  ClipIdx: Integer;
+begin
+  ClipIdx := ClipIndexAtFrame(CursorTrack, CursorFrame);
+  if ClipIdx < 0 then
+    Exit;
+  Project.RemoveClipAt(CursorTrack, ClipIdx);
+  PushTrackToEngine(CursorTrack);
   DrawView;
 end;
 

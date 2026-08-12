@@ -88,6 +88,17 @@ export.
   and CPU usage possible. Inline assembly for critical components and 
   auto-detected AVX2 support in critical areas. 
 
+## Dysnomia
+
+A TUI frontend for Eris aiming to implement as many features as possible.
+
+- **Incredibly Resource Efficeint**
+- **Cross-Platform**: A bi motivator for making this is to run on anything and
+everything, including running over SSH. Support for PowerPC Macs is coming soon
+and it will target G4s, optimized with Altivec and inline asm for the absolute
+best performance. Theoretically it will compile on any platform FPC and FPC's 
+Free Vision will compile on.
+
 ## Getting the toolchain (fpcupdeluxe)
 
 Eris is built with **Lazarus + Free Pascal (FPC)**. The easiest way to get a
@@ -108,9 +119,9 @@ working, self-contained install of both — without depending on whatever
    tool) live under that install directory, typically at
    `~/fpcupdeluxe/lazarus/lazbuild`.
 
-## Compiling with lazbuild
+## Compiling
 
-From the project root (this directory):
+From the project root:
 
 ```sh
 # incremental build - only recompiles what changed
@@ -122,6 +133,16 @@ From the project root (this directory):
 ```
 This produces an `eris` executable in the project root; run it directly
 (`./eris` on Linux). There's no separate install step.
+```
+```sh
+# x86_64 build 
+./build-dysnomia.sh
+
+# ppc build 
+./build-dysnomia-ppc.sh
+```
+This produces an `dysnomia` executable in the dysnomia-bin folder; run it directly
+(`./dysnomia`). There's no separate install step.
 ```
 
 ## Documentation

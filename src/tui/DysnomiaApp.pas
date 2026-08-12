@@ -14,10 +14,28 @@ interface
 uses
   SysUtils, Objects, Drivers, Views, Menus, Dialogs, App,
   DysGeometry, DysWidgets, DysFilePane, DysTrackPane, DysTimeline,
-  Project, Config;
+  DysPreferences, Project, Config;
 
 const
   cmAbout = 1000;
+  { File menu - same item order as Eris's own (MainForm.BuildMenu, src/ui).
+    New/Open/Save/Save As/Export are stubs per tui.md: none of them touch
+    disk yet, only Exit (cmQuit, already a Free Vision builtin) is real. }
+  cmFileNew      = 1010;
+  cmFileOpen     = 1011;
+  cmFileSave     = 1012;
+  cmFileSaveAs   = 1013;
+  cmFileExport   = 1014;
+  { Edit menu - the timeline's own clip-under-cursor operations
+    (DysTimeline.TDysTimelineContent), routed through here so the menu and
+    the direct Ctrl+C/V/D/E/Delete keys share one implementation, same as
+    Eris's MainForm/ArrangementView split. }
+  cmEditCopy         = 1020;
+  cmEditPaste        = 1021;
+  cmEditDuplicate    = 1022;
+  cmEditSplit        = 1023;
+  cmEditDelete       = 1024;
+  cmEditPreferences  = 1025;
 
 type
   PDysnomiaApp = ^TDysnomiaApp;
@@ -146,17 +164,41 @@ end;
 procedure TDysnomiaApp.InitMenuBar;
 var
   R: TRect;
+  FileItems, EditItems, HelpItems: PMenuItem;
 begin
   GetExtent(R);
   R.B.Y := R.A.Y + 1;
+
+  FileItems :=
+    NewItem('~N~ew', '', kbNoKey, cmFileNew, hcNoContext,
+    NewItem('~O~pen...', 'Ctrl-O', kbCtrlO, cmFileOpen, hcNoContext,
+    NewItem('~S~ave', 'Ctrl-S', kbCtrlS, cmFileSave, hcNoContext,
+    NewItem('Save ~A~s...', 'F12', kbF12, cmFileSaveAs, hcNoContext,
+    NewLine(
+    NewItem('~E~xport...', '', kbNoKey, cmFileExport, hcNoContext,
+    NewLine(
+    NewItem('E~x~it', 'Alt-X', kbAltX, cmQuit, hcNoContext,
+    nil))))))));
+
+  EditItems :=
+    NewItem('~C~opy', 'Ctrl-C', kbCtrlC, cmEditCopy, hcNoContext,
+    NewItem('~P~aste', 'Ctrl-V', kbCtrlV, cmEditPaste, hcNoContext,
+    NewItem('D~u~plicate', 'Ctrl-D', kbCtrlD, cmEditDuplicate, hcNoContext,
+    NewItem('S~p~lit', 'Ctrl-E', kbCtrlE, cmEditSplit, hcNoContext,
+    NewItem('D~e~lete', 'Del', kbDel, cmEditDelete, hcNoContext,
+    NewLine(
+    NewItem('~P~references...', '', kbNoKey, cmEditPreferences, hcNoContext,
+    nil)))))));
+
+  HelpItems :=
+    NewItem('~A~bout', '', kbNoKey, cmAbout, hcNoContext,
+    nil);
+
   MenuBar := New(PMenuBar, Init(R, NewMenu(
-    NewSubMenu('~F~ile', hcNoContext, NewMenu(
-      NewItem('E~x~it', 'Alt-X', kbAltX, cmQuit, hcNoContext,
-      nil)),
-    NewSubMenu('~H~elp', hcNoContext, NewMenu(
-      NewItem('~A~bout', '', kbNoKey, cmAbout, hcNoContext,
-      nil)),
-    nil)))));
+    NewSubMenu('~F~ile', hcNoContext, NewMenu(FileItems),
+    NewSubMenu('~E~dit', hcNoContext, NewMenu(EditItems),
+    NewSubMenu('~H~elp', hcNoContext, NewMenu(HelpItems),
+    nil))))));
 end;
 
 procedure TDysnomiaApp.InitStatusLine;
@@ -254,6 +296,47 @@ begin
   begin
     case Event.Command of
       cmAbout: ShowAbout;
+      cmFileNew:
+        begin
+          { The one File item that's real, not a stub - see tui.md: it
+            touches no disk, so it's exempt from "don't implement load/save
+            yet". Mirrors MainForm.FileNewClick's Project half (no
+            standalone-bundle/undo/title-bar bookkeeping to mirror here). }
+          Project.NewProject;
+          if Timeline <> nil then
+            Timeline^.Content^.DrawView;
+          if TrackPane <> nil then
+            TrackPane^.Listing^.DrawView;
+        end;
+      cmFileOpen:
+        MessageBox('Open is not wired yet - project load/save is future work.',
+          nil, mfInformation or mfOKButton);
+      cmFileSave:
+        MessageBox('Save is not wired yet - project load/save is future work.',
+          nil, mfInformation or mfOKButton);
+      cmFileSaveAs:
+        MessageBox('Save As is not wired yet - project load/save is future work.',
+          nil, mfInformation or mfOKButton);
+      cmFileExport:
+        MessageBox('Export is not wired yet - project load/save is future work.',
+          nil, mfInformation or mfOKButton);
+      cmEditCopy:
+        if Timeline <> nil then
+          Timeline^.Content^.CopyClipUnderCursor;
+      cmEditPaste:
+        if Timeline <> nil then
+          Timeline^.Content^.PasteClipAtCursor;
+      cmEditDuplicate:
+        if Timeline <> nil then
+          Timeline^.Content^.DuplicateClipUnderCursor;
+      cmEditSplit:
+        if Timeline <> nil then
+          Timeline^.Content^.SplitClipUnderCursor;
+      cmEditDelete:
+        if Timeline <> nil then
+          Timeline^.Content^.DeleteClipUnderCursor;
+      cmEditPreferences:
+        ShowPreferencesDialog;
     else
       Exit;
     end;
