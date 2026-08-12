@@ -159,6 +159,13 @@ var
   MasterEffects: array[0..Effects.MaxEffectsPerTrack - 1] of Effects.TEffect;
   MasterEffectCount: Integer;
 
+  { Master fader, the last gain the mix passes through: applied after the
+    master insert chain and before the ±1 clamp, on the same 0..2 linear
+    scale a track fader uses (1.0 = unity). Read straight off this global by
+    AudioEngine.FillBlock, the same way TrackVolume is, so moving it costs no
+    command-ring traffic and takes effect on the next block. }
+  MasterVolume: Single;
+
   { --- Send buses (S1/S2) -------------------------------------------------
     A send takes a copy of a track's signal, sums it with copies from every
     other track feeding the same send, runs that ONE sum through ONE effect
@@ -792,6 +799,7 @@ begin
   InitTrackInstruments;
   InitSendBuses;
   MasterEffectCount := 0;
+  MasterVolume := 1.0;
   { as with the track and send chains, blank the slots and not just the count }
   for i := 0 to Effects.MaxEffectsPerTrack - 1 do
     MasterEffects[i].Kind := Effects.ekNone;
@@ -858,5 +866,10 @@ end;
 initialization
   InitTrackInstruments;
   InitSendBuses;
+  { every other global here reads correctly as its zero value before a project
+    is loaded - MasterEffectCount = 0 means "no inserts", and so on. The master
+    fader is the one that does not: zero-initialised it would be -inf dB, so
+    the app would start silent until File>New ran NewProject. }
+  MasterVolume := 1.0;
 
 end.

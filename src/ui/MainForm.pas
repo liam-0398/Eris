@@ -3058,6 +3058,10 @@ begin
     in AudioEngine.pas for why this can't happen on the audio thread itself }
   AudioEngineDrainPendingFrees;
 
+  { master clip lamp - polled here rather than driven from the audio thread,
+    which must not touch the LCL }
+  FArrangementView.PollMasterMeter;
+
   if AudioEngineIsPlaying then
     FArrangementView.SetCursorFrame(AudioEngineGetPosition)
   else if FPlayPauseButton.Caption = 'Pause' then

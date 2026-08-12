@@ -111,7 +111,7 @@ implementation
 uses
   SysUtils, IniFiles, FileUtil, SampleTypes, Project, ProjectCache, WavDecoder,
   AudioEngine, Resample, Waveform, SP1200, TarArchive, Effects, Quadraverb,
-  Alesis3630, BossFZ2, ThreadUtil, DenormalGuard
+  Alesis3630, BossFZ2, ThreadUtil, DenormalGuard, AVector
   {$IFDEF WINDOWS}, Windows{$ENDIF};
 
 { RTL RenameFile is rename(2) on unix - which replaces an existing
@@ -696,6 +696,7 @@ begin
       extension above, not by this key }
     Ini.WriteBool('Project', 'Standalone', Standalone);
 
+    Ini.WriteFloat('Master', 'Volume', Project.MasterVolume);
     Ini.WriteInteger('Master', 'EffectCount', Project.MasterEffectCount);
     for e := 0 to Project.MasterEffectCount - 1 do
       SaveEffect(Ini, 'Master', 'Effect' + IntToStr(e) + '.', Project.MasterEffects[e]);
@@ -1166,6 +1167,10 @@ begin
     Standalone := Ini.ReadBool('Project', 'Standalone', IsStandalonePath(APath));
     Project.Standalone := Standalone;
 
+    { absent in projects written before the master fader existed - those load
+      at unity, the gain at which it multiplies by exactly 1.0 and so cannot
+      change how they sound }
+    Project.MasterVolume := Ini.ReadFloat('Master', 'Volume', 1.0);
     Project.MasterEffectCount := Ini.ReadInteger('Master', 'EffectCount', 0);
     if Project.MasterEffectCount > Effects.MaxEffectsPerTrack then
       Project.MasterEffectCount := Effects.MaxEffectsPerTrack;
@@ -1775,6 +1780,15 @@ begin
           MasterBuf[Frame * OutChannels] := L;
           MasterBuf[Frame * OutChannels + 1] := R;
         end;
+
+      { ---------- pass 4b: master fader ----------
+        The mirror of FillBlock's, and it has to sit exactly here - after the
+        master inserts and before SP-1200 - or a bounce stops matching what
+        was heard. One VScale over the interleaved buffer rather than two:
+        the gain is the same for both channels, so the interleaving is
+        irrelevant to it. Skipped at unity for the same reason as there. }
+      if Project.MasterVolume <> 1.0 then
+        VScale(MasterBuf, Project.MasterVolume, BlockLen * OutChannels);
 
       { ---------- pass 5: SP-1200, then straight out to disk ----------
         SP1200Process is a strictly sequential per-frame state machine, so

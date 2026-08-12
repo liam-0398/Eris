@@ -118,6 +118,21 @@ function AudioEngineGetMetronomeEnabled: Boolean;
   MasterEffectState/SendEffectState are implementation-private to this unit. }
 function AudioEngineTunerPitchHz(ATarget, AEffectIndex: Integer): Single;
 
+{ Loudest master sample since the last call, as a linear magnitude, and clears
+  the running peak so the next call answers for the next window. Measured
+  POST master-fader and PRE the ±1 clamp, which is what makes ">= 1.0 means it
+  clipped" true: the clamp is where the damage happens, so a peak read after
+  it could never report anything above unity.
+
+  Read-and-clear rather than read-latest because the caller polls at UI rate
+  (~150ms) while blocks arrive every few milliseconds - the maximum has to
+  accumulate across the blocks in between, or a single clipped block would be
+  missed nine times out of ten. Written on the audio thread and read here on
+  the main one with no synchronization, deliberately and for the same reason
+  AudioEngineTunerPitchHz is: an aligned 4-byte float is never torn, and the
+  worst a lost race can do to a meter is drop or repeat one block's peak. }
+function AudioEngineTakeMasterPeak: Single;
+
 { Buffer size (frames per callback). Changing it stops the realtime thread,
   closes the backend, reopens it at the new size, and restarts the thread -
   fully serialized on the calling (main) thread, per CLAUDE.md's rule for
@@ -340,6 +355,9 @@ var
   ScratchL, ScratchR: PSingle;
   PreFadeL, PreFadeR: PSingle;
   MasterL, MasterR: PSingle;
+  { running max |master sample| since the UI last drained it - see
+    AudioEngineTakeMasterPeak for the threading argument }
+  MasterPeakRunning: Single;
   SendBufL, SendBufR: array[0..Project.SendCount - 1] of PSingle;
   CapBufL, CapBufR: PSingle;
   RecTapL, RecTapR: PSingle;
@@ -1963,6 +1981,36 @@ var
           ProjectSampleRate, 0);
   end;
 
+  { Folds this range's loudest master sample into the running peak the UI
+    drains through AudioEngineTakeMasterPeak.
+
+    VMinMax rather than an abs-max loop because it is already in AVector with
+    both paths built and self-tested, and it is exact: min and max round
+    nothing, so the vector fold and the scalar walk agree bit for bit. Taking
+    the magnitude afterwards costs two Abs on the two extremes instead of one
+    per sample, which is the cheaper half of the deal - the pass over the
+    buffer is the expensive half either way.
+
+    Deliberately no Max() over the four values in one expression: the running
+    peak has to be compared last, so a block whose own peak is lower than what
+    is already banked leaves the bank alone. }
+  procedure UpdateMasterPeak(AStart, ACount: Integer);
+  var
+    MnL, MxL, MnR, MxR, Peak: Single;
+  begin
+    VMinMax(@MasterL[AStart], ACount, MnL, MxL);
+    VMinMax(@MasterR[AStart], ACount, MnR, MxR);
+    Peak := Abs(MnL);
+    if Abs(MxL) > Peak then
+      Peak := Abs(MxL);
+    if Abs(MnR) > Peak then
+      Peak := Abs(MnR);
+    if Abs(MxR) > Peak then
+      Peak := Abs(MxR);
+    if Peak > MasterPeakRunning then
+      MasterPeakRunning := Peak;
+  end;
+
   { Sums one sounding clip across a range into ScratchL/R.
 
     Carries its own copy of the transport position, advanced with exactly the
@@ -2331,6 +2379,24 @@ var
       if Project.MasterEffects[e].Kind <> Effects.ekNone then
         RunEffect(MasterEffectState[e], Project.MasterEffects[e],
           MasterL, MasterR, AStart, ACount);
+
+    { master fader, last gain before the clamp - post-inserts so it sets how
+      hard the mix hits the ceiling rather than how hard it hits a master
+      compressor. Read straight off Project.MasterVolume, no command ring,
+      exactly as the per-track fader is.
+
+      The multiply is elementwise over two contiguous buffers, which is
+      VScale2's whole reason for existing (one walk, two independent mul
+      chains) - so it is already scalar Pascal or AVX2 depending on what
+      AVector settled on at startup, and needs nothing new. At unity it is
+      skipped outright: x * 1.0 is x for every finite float, so the branch
+      costs nothing and saves a full pass over the block in the case that is
+      overwhelmingly the common one. }
+    if Project.MasterVolume <> 1.0 then
+      VScale2(@MasterL[AStart], @MasterR[AStart], Project.MasterVolume,
+        Project.MasterVolume, ACount);
+
+    UpdateMasterPeak(AStart, ACount);
 
     { clamp in place first, then interleave. The interleave is a stride-2
       scatter - AVX2 can do it with an unpack/permute pair, but it runs once
@@ -3081,6 +3147,12 @@ begin
   CloseCaptureAndStopThread;
   InputBufferFrames := ANewBufferSize;
   OpenCaptureAndStartThread;
+end;
+
+function AudioEngineTakeMasterPeak: Single;
+begin
+  Result := MasterPeakRunning;
+  MasterPeakRunning := 0;
 end;
 
 function AudioEngineGetInputGainDb: Single;

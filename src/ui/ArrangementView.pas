@@ -115,6 +115,28 @@ type
         line - the volume fader, the send strip, the pan box - is not drawn at
         all, and the track's clips squash into what is left. }
       CollapsedTrackHeight = SendRowHeight;
+      { --- master clip light ------------------------------------------------
+        The one indicator on the Master row: same box as a track's mute button
+        so it reads as part of the same strip, but it is a lamp, not a switch.
+        Green below the warning level, yellow approaching the ceiling, red
+        once the mix has actually exceeded it.
+
+        The warning level is -3 dBFS in linear terms - close enough to unity
+        that yellow means "this is about to clip", not "this is loud". The
+        clip level is exactly 1.0 because that is where AudioEngine's master
+        clamp starts flattening peaks, and the peak the engine reports is
+        measured just before that clamp so the two agree by construction.
+
+        A clip lasts a handful of samples and the meter is polled every
+        ~150ms, so red latches for MasterClipHoldMs to be seen at all;
+        clicking the lamp clears the latch early.
+
+        The three colours are the mute's clLime/clRed with the solo's clYellow
+        between them - the same three accents this header already speaks in,
+        rather than a fourth palette nobody has seen before. }
+      MasterMeterWarnLevel = 0.708;
+      MasterMeterClipLevel = 1.0;
+      MasterClipHoldMs = 1500;
     var
       FOnFileDrop: TFileDropEvent;
       FOnSeek: TSeekEvent;
@@ -141,6 +163,13 @@ type
       FLoopStart: Int64;
       FLoopEnd: Int64;
       FDraggingVolumeTrack: Integer;
+      { the master fader is a separate flag rather than a track index, because
+        the Master row is not a track and has no index to store }
+      FDraggingMasterVolume: Boolean;
+      { 0 green, 1 yellow, 2 red - recomputed only by PollMasterMeter, so
+        painting the row never has to touch the engine }
+      FMasterMeterState: Integer;
+      FMasterClipHoldUntil: QWord;
       { which per-track send level is being dragged, -1 for none; the send
         index of that drag lives alongside it }
       FDraggingSendTrack: Integer;
@@ -194,7 +223,9 @@ type
     function ClipPixelRect(ATrackIndex: Integer; const AClip: TClip): TRect;
     function HitTestClip(ATrackIndex: Integer; X: Integer; out AClipIndex: Integer;
       out AMode: TDragMode): Boolean;
+    function VolumeKnobXFor(AVolume: Single): Integer;
     function VolumeKnobX(ATrackIndex: Integer): Integer;
+    function MasterClipLightRect: TRect;
     function XToVolume(X: Integer): Single;
     function HitTestVolumeSlider(ATrackIndex, Y: Integer): Boolean;
     function MuteButtonRect(ATrackIndex: Integer): TRect;
@@ -253,6 +284,7 @@ type
     procedure KeyDown(var Key: Word; Shift: TShiftState); override;
   public
     constructor Create(AOwner: TComponent); override;
+    procedure PollMasterMeter;
     procedure RefreshTrack(ATrackIndex: Integer);
     procedure RefreshAllTracks;
     procedure PushTrackToEngine(ATrackIndex: Integer);
@@ -313,6 +345,9 @@ begin
   FLoopStart := -1;
   FLoopEnd := -1;
   FDraggingVolumeTrack := -1;
+  FDraggingMasterVolume := False;
+  FMasterMeterState := 0;
+  FMasterClipHoldUntil := 0;
   FDraggingSendTrack := -1;
   FDraggingSendIndex := -1;
   FDraggingReturnSend := -1;
@@ -664,18 +699,36 @@ begin
       end;
 end;
 
-function TArrangementView.VolumeKnobX(ATrackIndex: Integer): Integer;
+{ Knob X for any 0..TrackVolumeMax gain on the header column's full-width
+  fader track. Taken as a value rather than a track index so the Master row's
+  fader - which has no track index - is the same slider, not a copy of it. }
+function TArrangementView.VolumeKnobXFor(AVolume: Single): Integer;
 var
   Range: Integer;
   Value: Single;
 begin
   Range := (Width - VolumeSliderMargin) - (HeaderLeft + VolumeSliderMargin);
-  Value := Project.TrackVolume[ATrackIndex] / TrackVolumeMax;
+  Value := AVolume / TrackVolumeMax;
   if Value < 0 then
     Value := 0;
   if Value > 1 then
     Value := 1;
   Result := (HeaderLeft + VolumeSliderMargin) + Round(Value * Range);
+end;
+
+function TArrangementView.VolumeKnobX(ATrackIndex: Integer): Integer;
+begin
+  Result := VolumeKnobXFor(Project.TrackVolume[ATrackIndex]);
+end;
+
+{ Where the clip lamp sits on the Master row. Project.TrackCount is the Master
+  row's index everywhere in this unit, and the row never collapses, so the
+  mute button's own geometry lands it in exactly the slot a track's mute
+  occupies - one box, one definition, no second set of margins to keep in
+  step. }
+function TArrangementView.MasterClipLightRect: TRect;
+begin
+  Result := MuteButtonRect(Project.TrackCount);
 end;
 
 function TArrangementView.XToVolume(X: Integer): Single;
@@ -1461,8 +1514,10 @@ begin
     end;
   end;
 
-  { master bus row, always the last row, below every real track - no clips,
-    mute, or volume slider, just a click target for the master effects chain }
+  { master bus row, always the last row, below every real track. No clips and
+    no mute - clicking it selects the master effects chain - but it does carry
+    the master fader and the clip lamp, the two things that belong to the mix
+    as a whole rather than to any one track. }
   y := MasterRowTop;
   h := TrackRowHeight(Project.TrackCount);
   if (y >= RulerHeight) and (y + h <= ContentHeight) then
@@ -1479,6 +1534,33 @@ begin
     Canvas.TextOut(HeaderLeft + 8, y + 8, 'Master');
     Canvas.Font.Style := [];
     Canvas.Brush.Style := bsSolid;
+
+    { clip lamp - the mute button's box, but read-only: it reports what the
+      mix is doing rather than setting anything. State comes from
+      PollMasterMeter, never from the engine directly, so a repaint provoked
+      by anything else (a scroll, a clip drag) cannot advance or clear it. }
+    MuteRect := MasterClipLightRect;
+    case FMasterMeterState of
+      2: Canvas.Brush.Color := clRed;
+      1: Canvas.Brush.Color := clYellow;
+    else
+      Canvas.Brush.Color := clLime;
+    end;
+    Canvas.Pen.Color := clWindowFrame;
+    Canvas.Rectangle(MuteRect);
+
+    { master fader - the same slider a track has, in the same place on the
+      row, because it is the same control over the same 0..TrackVolumeMax
+      range and putting it anywhere else would only make it look like a
+      different kind of thing }
+    SliderY := y + VolumeSliderY;
+    Canvas.Pen.Color := clBtnShadow;
+    Canvas.Line(HeaderLeft + VolumeSliderMargin, SliderY, Width - VolumeSliderMargin, SliderY);
+    kx := VolumeKnobXFor(Project.MasterVolume);
+    Canvas.Brush.Color := clHighlight;
+    Canvas.Pen.Color := clWindowFrame;
+    Canvas.Ellipse(kx - VolumeSliderRadius, SliderY - VolumeSliderRadius,
+      kx + VolumeSliderRadius, SliderY + VolumeSliderRadius);
   end;
 end;
 
@@ -1754,6 +1836,42 @@ begin
       ContentHeight - RulerHeight);
     UpdateVScrollBarRange;
   end;
+  Invalidate;
+end;
+
+{ Drains the engine's master peak and works out what colour the clip lamp is.
+  Driven from MainForm's 150ms poll timer, which runs whether or not the
+  transport is - input monitoring makes sound with the playhead parked, and a
+  meter that only worked during playback would be dark exactly when someone is
+  setting a guitar's level.
+
+  The engine's peak accumulates across every block since the last call, so
+  nothing is missed between polls; the red latch then holds it long enough to
+  be read. Repaints only when the colour actually changes - at 6-7 polls a
+  second, invalidating unconditionally would be a permanent repaint of the
+  whole arrangement for a 16-pixel box. }
+procedure TArrangementView.PollMasterMeter;
+var
+  Peak: Single;
+  NowMs: QWord;
+  NewState: Integer;
+begin
+  Peak := AudioEngineTakeMasterPeak;
+  { NowMs, not Now: SysUtils.Now is a TDateTime and this is a tick count }
+  NowMs := GetTickCount64;
+  if Peak >= MasterMeterClipLevel then
+    FMasterClipHoldUntil := NowMs + MasterClipHoldMs;
+
+  if NowMs < FMasterClipHoldUntil then
+    NewState := 2
+  else if Peak >= MasterMeterWarnLevel then
+    NewState := 1
+  else
+    NewState := 0;
+
+  if NewState = FMasterMeterState then
+    Exit;
+  FMasterMeterState := NewState;
   Invalidate;
 end;
 
@@ -2034,6 +2152,28 @@ begin
   if (X >= HeaderLeft) and (Y >= MasterRowTop) and
     (Y < MasterRowTop + TrackRowHeight(Project.TrackCount)) then
   begin
+    { the clip lamp is not a switch, but a latched red that cannot be cleared
+      is a light that stops meaning anything after the first clip of the
+      session - so clicking it drops the latch and lets the next poll say
+      what the mix is doing now }
+    if PtInRect(MasterClipLightRect, Point(X, Y)) then
+    begin
+      FMasterClipHoldUntil := 0;
+      FMasterMeterState := 0;
+      Invalidate;
+      Exit;
+    end;
+
+    { Project.TrackCount is the Master row, and it never collapses, so the
+      per-track fader hit test lands on exactly the line drawn above }
+    if HitTestVolumeSlider(Project.TrackCount, Y) then
+    begin
+      FDraggingMasterVolume := True;
+      Project.MasterVolume := XToVolume(X);
+      Invalidate;
+      Exit;
+    end;
+
     SelectClip(-1, -1);
     if FKeyboardTrack <> Project.BusMaster then
     begin
@@ -2225,6 +2365,13 @@ var
 begin
   inherited MouseMove(Shift, X, Y);
 
+  if FDraggingMasterVolume then
+  begin
+    Project.MasterVolume := XToVolume(X);
+    Invalidate;
+    Exit;
+  end;
+
   if FDraggingVolumeTrack >= 0 then
   begin
     Project.TrackVolume[FDraggingVolumeTrack] := XToVolume(X);
@@ -2405,6 +2552,7 @@ begin
   end;
 
   FDraggingVolumeTrack := -1;
+  FDraggingMasterVolume := False;
   FDraggingSendTrack := -1;
   FDraggingReturnSend := -1;
 
