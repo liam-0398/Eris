@@ -7,7 +7,7 @@ interface
 uses
   { Theme last - it shadows Graphics' system colours; see Theme.pas }
   Classes, SysUtils, Controls, Graphics, LCLType, SampleTypes, Project,
-  Waveform, InstrumentEditor, Theme;
+  Waveform, WaveformDraw, InstrumentEditor, Theme;
 
 const
   { same lower-row QWERTY layout as MainForm's KeyToSemitoneOffset, boxes

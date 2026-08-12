@@ -7,7 +7,7 @@ interface
 uses
   Classes, SysUtils, Math, Types, Forms, Controls, Graphics, LCLType, LCLIntf,
   Buttons, StdCtrls, FileBrowser, SampleTypes, Project, AudioEngine, Waveform,
-  ThemeScrollBar,
+  WaveformDraw, ThemeScrollBar,
   { last on purpose - Theme shadows Graphics' clBtnFace/clWindow/... with the
     themed palette, and only wins if it is resolved after Graphics }
   ClipOverwrite, Theme;

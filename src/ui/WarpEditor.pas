@@ -7,7 +7,7 @@ interface
 uses
   { Theme last - it shadows Graphics' system colours; see Theme.pas }
   Classes, SysUtils, Controls, Graphics, LCLType, SampleTypes, Project,
-  AudioEngine, Waveform, Theme;
+  AudioEngine, Waveform, WaveformDraw, Theme;
 
 const
   WarpDefaultPixelsPerSecond = 150;

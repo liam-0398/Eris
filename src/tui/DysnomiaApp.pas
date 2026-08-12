@@ -1,9 +1,11 @@
 unit DysnomiaApp;
 
 { Stage 1 Free Vision application shell: menu bar, status line, transport
-  bar, docked file/track/timeline panes, bottom bar. Nothing here reaches
-  into aengine, abackend or project - see tui.md, "Build stages", stage 1
-  is UI only. }
+  bar, docked file/track/timeline panes, bottom bar. Still reaches into
+  no aengine or abackend - see tui.md, "Build stages", that's stage 6.
+  Stage 5 links Project and Config (util) so they compile/link clean
+  through the isolated unit path; nothing in the panes reads from them
+  yet, that's stage 6/7. }
 
 {$mode objfpc}{$H+}
 
@@ -11,7 +13,8 @@ interface
 
 uses
   SysUtils, Objects, Drivers, Views, Menus, Dialogs, App,
-  DysGeometry, DysWidgets, DysFilePane, DysTrackPane, DysTimeline;
+  DysGeometry, DysWidgets, DysFilePane, DysTrackPane, DysTimeline,
+  Project, Config;
 
 const
   cmAbout = 1000;
@@ -25,6 +28,7 @@ type
     TrackPane: PDysTrackPane;
     Timeline: PDysTimeline;
     constructor Init;
+    destructor Done; virtual;
     procedure InitMenuBar; virtual;
     procedure InitStatusLine; virtual;
     procedure InitDeskTop; virtual;
@@ -101,6 +105,13 @@ end;
 
 constructor TDysnomiaApp.Init;
 begin
+  { Same eris.conf Eris itself reads/writes (Config.ConfigFilePath is
+    platform-derived, not app-specific) - loaded before InitDeskTop so a
+    later stage's panes can read Config.Cfg from their own Init. Nothing
+    here consumes it yet; this just proves util links clean, per stage 5
+    in tui.md. }
+  ConfigLoad;
+
   inherited Init;
   { Nothing is Current anywhere by default - Insert() doesn't select what
     it inserts, so without this no view anywhere would receive keyboard
@@ -114,6 +125,14 @@ begin
     of reaching Self (the Application). }
   if FilePane <> nil then
     FilePane^.FocusPane;
+end;
+
+{ Round-trips Cfg straight back out unchanged - nothing here edits it yet,
+  this only proves the save half of the same link. }
+destructor TDysnomiaApp.Done;
+begin
+  ConfigSave;
+  inherited Done;
 end;
 
 procedure TDysnomiaApp.InitMenuBar;
