@@ -11,6 +11,9 @@ program Dysnomia;
 {$mode objfpc}{$H+}
 
 uses
+  {$IFDEF UNIX}
+  cthreads,
+  {$ENDIF}
   DysnomiaApp;
 
 var
