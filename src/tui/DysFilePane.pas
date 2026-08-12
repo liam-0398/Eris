@@ -1,16 +1,22 @@
 unit DysFilePane;
 
 { Left dock: a real directory listing (".." to go up, Enter to select,
-  Ctrl+I to drop straight in as an instrument track - see Bindings in
+  Ctrl+T to drop straight in as an instrument track - see Bindings in
   tui.md). Stage 7: Enter on a real file decodes it, adds it to the sample
   pool, and hands it to the timeline as a pending overlay on whatever
   track DysTrackPane.SelectedTrackIndex reports - see DysTimeline for what
-  happens next (Left/Right/Up/Down/Enter/Esc). Ctrl+I decodes the file the
+  happens next (Left/Right/Up/Down/Enter/Esc). Ctrl+T decodes the file the
   same way and assigns it straight to Project.TrackInstrument on that same
   track, skipping the overlay - which is also what flips that track's A/I/S
   letter on the timeline to 'I' (see DysTimeline.TrackTypeChar, which reads
-  Project state fresh on every Draw). Actually driving the track live from
-  a MIDI/computer keyboard once assigned is still stage 8. }
+  Project state fresh on every Draw). NOT Ctrl+I: on a raw terminal Ctrl+I
+  literally IS the Tab byte (0x09) - Free Vision's Unix keyboard driver
+  hard-maps that byte to the Tab scancode unconditionally (packages/
+  rtl-console/src/unix/keyboard.pp, EvalScan's "$09: EvalScan := $0F"),
+  so kbCtrlI can never arrive here; Tab is already claimed app-wide for
+  pane-cycling (DysWidgets.TDysPane.HandleEvent) and eats the byte first.
+  Driving the track live from the bottom effects pane's keyboard once
+  assigned - see DysWidgets.TDysEffectsContent. }
 
 {$mode objfpc}{$H+}
 
@@ -201,7 +207,7 @@ begin
       SelectItem(Focused);
     ClearEvent(Event);
   end
-  else if Event.KeyCode = kbCtrlI then
+  else if Event.KeyCode = kbCtrlT then
   begin
     if Focused < Range then
       SelectAsInstrument(Focused);
