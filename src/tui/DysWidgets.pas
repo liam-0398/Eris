@@ -384,6 +384,21 @@ end;
   it to Project.TempoBPM and reflects the clamped value back into the
   field. No SysUtils in this unit (see the top-of-implementation note) so
   parsing/formatting goes through Val/Str, not StrToInt/IntToStr. }
+{ Writes Tempo^.Data^ directly rather than calling TInputLine.SetData -
+  SetData's Rec parameter is untyped and it does a raw Move(Rec, Data^[0],
+  DataSize) of exactly MaxLen+1 (7) bytes starting at Rec's own address,
+  not a real string assignment. That's fine when Rec is itself a fixed
+  string[6] (7 bytes, length byte + 6 chars - same layout Data^ has, which
+  is how the original hardcoded '120.0' setup called it), but S here is a
+  plain `string` - under this unit's long-string mode, that's AnsiString:
+  an 8-byte heap pointer, not inline character data. SetData(S) would have copied
+  the first 7 bytes of that POINTER's own bit pattern into Data^ as if
+  they were a length byte plus six characters - garbage almost by
+  definition, and exactly the "random foreign characters, uneditable"
+  symptom this fixed. Data (PString = PShortString, Objects.pas) is a
+  genuine ShortString pointer; Data^ := S does a real, correctly-sized
+  AnsiString-to-ShortString conversion instead, safe here since Value is
+  always <=3 digits, well under MaxLen (6). }
 procedure TDysToolBar.CommitTempo;
 var
   S: string;
@@ -403,7 +418,7 @@ begin
     Value := 999;
   Project.TempoBPM := Value;
   Str(Value, S);
-  Tempo^.SetData(S);
+  Tempo^.Data^ := S;
   Tempo^.DrawView;
 end;
 
@@ -417,7 +432,7 @@ var
   S: string;
 begin
   Str(Round(Project.TempoBPM), S);
-  Tempo^.SetData(S);
+  Tempo^.Data^ := S;
   if State and sfVisible <> 0 then
     Tempo^.DrawView;
 end;
