@@ -29,6 +29,7 @@ type
     procedure InitStatusLine; virtual;
     procedure InitDeskTop; virtual;
     procedure HandleEvent(var Event: TEvent); virtual;
+    function GetPalette: PPalette; virtual;
   private
     procedure ShowAbout;
     procedure ShowTooSmall(Body: TRect; const Layout: TDysLayout);
@@ -38,6 +39,52 @@ implementation
 
 uses
   MsgBox;
+
+{ App-wide colour override. See DysWidgets.TDysPane's comment for why the
+  panes need CGrayDialog rather than a plain window palette; this is the
+  other half - recolouring what CGrayDialog's indices actually resolve
+  to, without touching anything else CAppColor (App.pas) drives (menu
+  bar, status line, blue/cyan window and dialog variants).
+
+  Attribute byte layout here is the classic one: bit 7 = blink, bits 4-6
+  = background (0-7), bits 0-3 = foreground (0-15). Every stock palette
+  byte in CAppColor keeps bit 7 clear - it's reserved as the Drivers.
+  ErrorAttr ($CF) signal for "palette index out of range", which is
+  exactly the red-blink Dysnomia was showing before CGrayDialog was
+  wired in. So bit 7 stays off here too: "dark grey background" isn't
+  representable as an intentional bg colour in this model (that needs a
+  4th background bit, which doesn't exist without reusing the blink
+  bit) - background 0 (black) is the closest safe substitute, and it's
+  what most terminal "black" themes render as anyway. }
+var
+  DysAppPalette: TPalette;
+  DysAppPaletteReady: Boolean = False;
+
+procedure InitDysAppPalette;
+const
+  BgAttr   = $07; { black bg, light grey fg - desktop background pattern }
+  PaneNorm = $0F; { black bg, bright white fg - pane text }
+  PaneSel  = $F0; { white bg, black fg - focused/selected list item }
+  PaneDim  = $08; { black bg, dark grey fg }
+var
+  I: Integer;
+begin
+  DysAppPalette := CAppColor;
+  DysAppPalette[1] := Chr(BgAttr);
+  for I := 32 to 63 do            { the CGrayDialog block, local idx 1..32 }
+    DysAppPalette[I] := Chr(PaneNorm);
+  DysAppPalette[32 + 26 - 1] := Chr(PaneSel); { CListViewer local idx 26 }
+  DysAppPalette[32 + 27 - 1] := Chr(PaneSel); { CListViewer local idx 27 }
+  DysAppPalette[32 + 28 - 1] := Chr(PaneDim); { CListViewer local idx 28 }
+  DysAppPaletteReady := True;
+end;
+
+function TDysnomiaApp.GetPalette: PPalette;
+begin
+  if not DysAppPaletteReady then
+    InitDysAppPalette;
+  GetPalette := @DysAppPalette;
+end;
 
 constructor TDysnomiaApp.Init;
 begin
@@ -126,6 +173,12 @@ begin
   Local.Move(-BodyR.A.X, -BodyR.A.Y);
   Timeline := New(PDysTimeline, InitPane(Local));
   DeskTop^.Insert(Timeline);
+
+  { Nothing is Current anywhere by default - Insert() doesn't select what
+    it inserts, so without this no view anywhere ever receives keyboard
+    input. Focus climbs the whole Owner chain (App -> DeskTop -> pane),
+    so one call establishes it end to end. }
+  FilePane^.FocusPane;
 end;
 
 procedure TDysnomiaApp.ShowAbout;

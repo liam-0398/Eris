@@ -65,6 +65,7 @@ begin
   R := ContentRect;
   Listing := New(PDysTrackListBox, Init(R));
   Insert(Listing);
+  Focusable := Listing;
 end;
 
 end.

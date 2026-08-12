@@ -1,20 +1,11 @@
 unit DysFilePane;
 
-{ Left dock: a real directory listing (".." to go up, Enter to select).
-  This only touches the filesystem, never aengine/abackend/project, so it
-  stays inside stage 1's "not hooked up to anything" - dropping a file on
-  a track, and the shift-enter instrument-track shortcut, are stage 7
-  work once there is a track/timeline to drop onto.
-
-  Shift+Enter is designed but not implemented: a raw terminal has no way
-  to report it. Shift does not change the byte(s) Enter sends (still CR),
-  so xterm's basic key reporting is indistinguishable from plain Enter -
-  unlike Ctrl+Enter, which FV already defines as kbCtrlEnter because
-  Ctrl+M is a genuinely different byte (LF, $0A) from CR ($0D). Getting
-  Shift+Enter to work needs a terminal-side extended keyboard protocol
-  (e.g. xterm's modifyOtherKeys, or the kitty keyboard protocol) which
-  Tiger's X11 xterm does not have, so it needs a decision before stage 7,
-  not a guess baked in here. }
+{ Left dock: a real directory listing (".." to go up, Enter to select,
+  Ctrl+I to drop straight in as an instrument track - see Bindings in
+  tui.md). This only touches the filesystem, never aengine/abackend/
+  project, so it stays inside stage 1's "not hooked up to anything" -
+  actually dropping a file on a track, and creating a real instrument
+  track, are stage 7 work once there is a track/timeline to drop onto. }
 
 {$mode objfpc}{$H+}
 
@@ -30,6 +21,7 @@ type
     constructor Init(Bounds: TRect);
     procedure Reload;
     procedure SelectItem(Item: Sw_Integer); virtual;
+    procedure SelectAsInstrument(Item: Sw_Integer);
     procedure HandleEvent(var Event: TEvent); virtual;
   end;
 
@@ -97,13 +89,33 @@ begin
       nil, mfInformation or mfOKButton);
 end;
 
+procedure TDysFileListBox.SelectAsInstrument(Item: Sw_Integer);
+var
+  Name: string;
+begin
+  Name := PString(List^.At(Item))^;
+  if (Length(Name) > 0) and (Name[Length(Name)] <> '/') and (Name <> '..')
+  then
+    MessageBox('Would drop "' + Name +
+      '" straight in as a new instrument track with the MIDI keyboard' +
+      ' live - stage 7.', nil, mfInformation or mfOKButton);
+end;
+
 procedure TDysFileListBox.HandleEvent(var Event: TEvent);
 begin
   inherited HandleEvent(Event);
-  if (Event.What = evKeyDown) and (Event.KeyCode = kbEnter) then
+  if Event.What <> evKeyDown then
+    Exit;
+  if Event.KeyCode = kbEnter then
   begin
     if Focused < Range then
       SelectItem(Focused);
+    ClearEvent(Event);
+  end
+  else if Event.KeyCode = kbCtrlI then
+  begin
+    if Focused < Range then
+      SelectAsInstrument(Focused);
     ClearEvent(Event);
   end;
 end;
@@ -116,6 +128,7 @@ begin
   R := ContentRect;
   Listing := New(PDysFileListBox, Init(R));
   Insert(Listing);
+  Focusable := Listing;
 end;
 
 end.

@@ -22,11 +22,25 @@ const
   cmDropdownStub    = 2006;
 
 type
-  { A docked, fixed pane: border and title only, no move/grow/close. }
+  { A docked, fixed pane: border and title only, no move/grow/close.
+
+    GetPalette returns CGrayDialog rather than TWindow's own (8-entry)
+    window palette: a TListBox's palette (CListViewer, Views.pas) indexes
+    up to 29, which is out of range for an 8-entry window palette and
+    falls back to Drivers.ErrorAttr ($CF - blink, red background). That
+    was the "red and blinking" pane. CGrayDialog is 32 entries, the size
+    Free Vision's own dialogs use precisely because they host controls
+    like list boxes - this is the framework's own fix for this, not a
+    workaround. TDysnomiaApp.GetPalette recolors that block to black on
+    white; see its comment for why "dark grey" isn't literally possible. }
   PDysPane = ^TDysPane;
   TDysPane = object(TWindow)
+    Focusable: PView; { the pane's own interactive child, if it has one }
     constructor InitPane(Bounds: TRect; const ATitle: string);
     function ContentRect: TRect;
+    function GetPalette: PPalette; virtual;
+    procedure HandleEvent(var Event: TEvent); virtual;
+    procedure FocusPane;
   end;
 
   PDysToolBar = ^TDysToolBar;
@@ -61,12 +75,54 @@ begin
   inherited Init(Bounds, ATitle, wnNoNumber);
   Flags := 0;      { no move, grow or close - this is a dock, not a window }
   GrowMode := 0;   { the app repositions panes itself on layout, not FV }
+  Focusable := nil;
 end;
 
 function TDysPane.ContentRect: TRect;
 begin
   GetExtent(Result);
   Result.Grow(-1, -1);
+end;
+
+function TDysPane.GetPalette: PPalette;
+const
+  P: string[Length(CGrayDialog)] = CGrayDialog;
+begin
+  GetPalette := @P;
+end;
+
+procedure TDysPane.FocusPane;
+begin
+  if Focusable <> nil then
+    Focusable^.Focus
+  else
+    Self.Focus;
+end;
+
+{ Tab/Shift+Tab cycle between docked panes (see Bindings in tui.md)
+  instead of Free Vision's own TWindow.HandleEvent, which would just
+  cycle focus among this one pane's own children - there's only one, so
+  by default Tab does nothing visible at all. Intercepting before
+  "inherited" means our single child never gets a chance to eat the key
+  first. }
+procedure TDysPane.HandleEvent(var Event: TEvent);
+begin
+  if (Event.What = evKeyDown) and
+     ((Event.KeyCode = kbTab) or (Event.KeyCode = kbShiftTab)) and
+     (Owner <> nil) then
+  begin
+    { TGroup.FindNext/SetCurrent are private to Views.pas, so this goes
+      through the two public calls instead: SelectNext moves the desktop's
+      Current to the next pane, then FocusPane on that pane re-walks the
+      chain down into its own listbox (SelectNext alone only sets
+      Owner.Current, it does not touch the target pane's own Current). }
+    Owner^.SelectNext(Event.KeyCode = kbTab);
+    if (Owner^.Current <> nil) and (Owner^.Current <> @Self) then
+      PDysPane(Owner^.Current)^.FocusPane;
+    ClearEvent(Event);
+    Exit;
+  end;
+  inherited HandleEvent(Event);
 end;
 
 { TDysToolBar }
