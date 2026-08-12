@@ -517,6 +517,12 @@ begin
   inherited Idle;
   if (Timeline <> nil) and (Timeline^.Content <> nil) then
     Timeline^.Content^.UpdatePlayhead;
+  { Same "no timer, poll on Idle instead" reasoning as the playhead above -
+    reflects AudioEngineRecordState onto the Record button and finalizes a
+    take the engine auto-stopped on its own (see TDysToolBar.
+    PollRecordState). }
+  if ActiveToolBar <> nil then
+    ActiveToolBar^.PollRecordState;
 end;
 
 procedure TDysnomiaApp.HandleEvent(var Event: TEvent);

@@ -178,7 +178,21 @@ type
 var
   ActiveTimelineContent: PDysTimelineContent = nil;
 
+{ Wired to DysWidgets.TDysToolBar's Record button (see that unit's own
+  StartRecordingProc/FinalizeRecordingProc comment for why the wiring is a
+  callback var instead of a direct call: TDysToolBar lives in DysWidgets,
+  which DysTimeline itself `uses` for TDysPane, so the reverse import would
+  be circular). Live here rather than in DysEffectsRack.pas (which already
+  hosts the other two toolbar callbacks) because both need PushTrackToEngine/
+  TClip-building machinery that's private to this unit - moving THAT out
+  instead would be the bigger, riskier change for no real benefit. }
+procedure DysStartRecording;
+procedure DysFinalizeRecording;
+
 implementation
+
+uses
+  DysTrackPane;
 
 { The clip clipboard: a single TClip, not Eris's array-of-(RelTrack,TClip) -
   there's no multi-track range selection here to copy, just "the clip under
@@ -397,6 +411,98 @@ begin
   end;
 
   AudioEngineSetTrackClips(ATrackIndex, Items, Count);
+end;
+
+var
+  { The track/frame a take was started against - captured at StartRecording
+    time same as MainForm's own FRecordTrackIndex/FRecordStartFrame, since
+    SelectedTrackIndex/CursorFrame can both drift (Tab elsewhere, cursor
+    keys) over however long a count-in plus take actually runs. }
+  RecordTrackIndex: Integer = -1;
+  RecordStartFrame: Int64 = 0;
+
+{ Mirrors MainForm.RecordClick (src/ui) - same track/instrument checks, same
+  count-in-unless-line-in split, just targeting DysTrackPane.
+  SelectedTrackIndex/DysTimeline.ActiveTimelineContent^.CursorFrame instead
+  of ArrangementView's KeyboardTrack/CursorFrame. Only called (via
+  DysWidgets.StartRecordingProc) when AudioEngineRecordState is already
+  confirmed Idle - see TDysToolBar's own Record button handling. }
+procedure DysStartRecording;
+begin
+  RecordTrackIndex := SelectedTrackIndex;
+  if RecordTrackIndex < 0 then
+    Exit;
+  RecordStartFrame := 0;
+  if ActiveTimelineContent <> nil then
+    RecordStartFrame := ActiveTimelineContent^.CursorFrame;
+  AudioEngineSeek(RecordStartFrame);
+
+  if Project.TrackIsInput[RecordTrackIndex] then
+  begin
+    { line-in take: no keyboard instrument to check for, no count-in - see
+      MainForm.RecordClick's identical comment. }
+    AudioEngineStartRecording(RecordTrackIndex);
+    Exit;
+  end;
+
+  if not Project.TrackIsSampler[RecordTrackIndex] and
+    (Project.TrackInstrument[RecordTrackIndex] < 0) then
+  begin
+    MessageBox('Load an instrument for this track first.', nil,
+      mfInformation or mfOKButton);
+    Exit;
+  end;
+
+  AudioEngineStartCountIn(RecordTrackIndex);
+end;
+
+{ Mirrors MainForm.FinalizeRecording (src/ui): stops the engine's capture
+  (a no-op if it was only counting in and never actually reached Recording,
+  same as there) and, if anything was actually captured, wraps it as a new
+  TSample/TClip and commits it to RecordTrackIndex at RecordStartFrame -
+  same field set PlaceOverlay's own commit above uses, then the same
+  PushTrackToEngine call so the engine picks it up immediately. Called both
+  from the Record button (manual stop) and from TDysToolBar's Idle-driven
+  poll of AudioEngineRecordState (the engine auto-stopping on its own
+  recording-length cap, same as MainForm's timer-driven equivalent). }
+procedure DysFinalizeRecording;
+var
+  WasRecording: Boolean;
+  Data: PSingle;
+  FrameCount: Integer;
+  Sample: TSample;
+  NewClip: TClip;
+begin
+  WasRecording := AudioEngineRecordState = RecordStateRecording;
+  AudioEngineStopRecording;
+  if not WasRecording then
+    Exit; { cancelled during count-in - nothing to keep }
+  if not AudioEngineTakeRecordedAudio(Data, FrameCount) then
+    Exit;
+  if RecordTrackIndex < 0 then
+    Exit;
+
+  FillChar(Sample, SizeOf(Sample), 0);
+  Sample.Data := Data;
+  Sample.FrameCount := FrameCount;
+  Sample.Channels := 2;
+  Sample.SampleRate := AudioEngine.ProjectSampleRate;
+  Sample.BaseNote := 60.0;
+
+  FillChar(NewClip, SizeOf(NewClip), 0);
+  NewClip.SampleID := Project.AddSampleToPool(Sample,
+    'Recording ' + IntToStr(Length(Project.SamplePool)), '');
+  NewClip.Offset := 0;
+  NewClip.Length := FrameCount;
+  NewClip.Position := RecordStartFrame;
+  NewClip.TrackID := RecordTrackIndex;
+  NewClip.Gain := 1.0;
+  NewClip.PitchSemitones := 0;
+  NewClip.WarpMode := WarpModeAudio;
+
+  Project.PushUndoSnapshot(RecordTrackIndex);
+  Project.CommitClipToTrack(RecordTrackIndex, NewClip);
+  PushTrackToEngine(RecordTrackIndex);
 end;
 
 { The 'w' key: re-warp a clip's length to the nearest power-of-two bar count
@@ -1315,5 +1421,12 @@ begin
   Insert(Content);
   Focusable := Content;
 end;
+
+initialization
+  { Wires DysWidgets.TDysToolBar's Record button to the real
+    implementations - see DysWidgets.pas's own comment on why it can't
+    `uses DysTimeline` directly to call these itself. }
+  StartRecordingProc := @DysStartRecording;
+  FinalizeRecordingProc := @DysFinalizeRecording;
 
 end.

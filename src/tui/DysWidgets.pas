@@ -72,7 +72,7 @@ type
   TDysToolBar = object(TGroup)
     Tempo: PInputLine;
     MetronomeBtn, StopBtn, PlayBtn, RecordBtn, IntervalBtn: PButton;
-    MetronomeOn, Playing, Recording: Boolean;
+    MetronomeOn, Playing: Boolean;
     IntervalIdx: Integer;
     constructor Init(Bounds: TRect);
     procedure HandleEvent(var Event: TEvent); virtual;
@@ -87,6 +87,14 @@ type
       Pause label after forcing Playing := False on a project change - was
       private, no external caller needed it before that. }
     procedure UpdateButtons;
+    { Called from TDysnomiaApp.Idle (Free Vision has no timer - see that
+      unit's own comment) every pass of the event loop, same "poll instead
+      of a callback from the audio thread" shape MainForm's timer used for
+      this. Reflects AudioEngineRecordState onto the Record button's label
+      and, if the engine dropped back to Idle on its own (hit its recording
+      length cap) without RecordBtn's own click handler having done it,
+      finalizes the take the same way a manual click would have. }
+    procedure PollRecordState;
   private
     procedure SetTitle(B: PButton; const S: string);
   end;
@@ -129,6 +137,19 @@ function DysKeyToSemitoneOffset(AChar: Char; out AOffset: Integer): Boolean;
 var
   TriggerKeyboardNoteProc: procedure(ASemitoneOffset: Integer) = nil;
   AdjustKeyboardOctaveProc: procedure(ADelta: Integer) = nil;
+
+{ DysStartRecording/DysFinalizeRecording (DysTimeline.pas) do the actual
+  work - they need Project/AudioEngine/DysTrackPane.SelectedTrackIndex/
+  DysTimeline.ActiveTimelineContent, none of which DysWidgets can `uses`
+  without the same circularity noted above (DysTimeline itself `uses
+  DysWidgets` for TDysPane). DysTimeline's own `initialization` section
+  points these at the real implementations. StartRecordingProc is only
+  ever invoked while AudioEngineRecordState is confirmed Idle, and
+  FinalizeRecordingProc only while it's CountIn or Recording - see
+  TDysToolBar.HandleEvent's cmTransportRecord case and PollRecordState. }
+var
+  StartRecordingProc: procedure = nil;
+  FinalizeRecordingProc: procedure = nil;
 
 implementation
 
@@ -329,8 +350,13 @@ begin
     SetTitle(PlayBtn, 'Pause')
   else
     SetTitle(PlayBtn, 'Play');
-  RecordBtn^.SetState(sfSelected, Recording);
-  RecordBtn^.DrawView;
+  { Record's own caption is driven entirely by AudioEngineRecordState, via
+    PollRecordState - not by anything tracked locally here (there used to
+    be a local Recording: Boolean, same shape as Playing/MetronomeOn, but
+    unlike Play/Stop the engine can drop out of Recording on its own - see
+    PollRecordState's own comment - so a local flag would drift out of
+    sync with reality the moment that happened; reading the engine's own
+    state directly on every Idle pass can't drift). }
   SetTitle(IntervalBtn, IntervalNames[IntervalIdx]);
 end;
 
@@ -339,11 +365,19 @@ end;
   so Play on an empty project does nothing rather than silently "playing"
   nothing. Factored out of the Play button's own cmTransportPlay case so
   the timeline's Space key (tui.md's Bindings) triggers the exact same
-  logic and button-label update, via ActiveToolBar. }
+  logic and button-label update, via ActiveToolBar. Finalizes an in-
+  progress take first, same as MainForm.PlayPauseClick - stopping playback
+  mid-recording would otherwise leave the engine's capture dangling. }
 procedure TDysToolBar.TogglePlayPause;
 begin
   if AudioEngineIsPlaying then
   begin
+    if (AudioEngineRecordState <> RecordStateIdle) and
+       Assigned(FinalizeRecordingProc) then
+    begin
+      FinalizeRecordingProc;
+      SetTitle(RecordBtn, 'Rec');
+    end;
     AudioEngineStop;
     Playing := False;
   end
@@ -353,6 +387,30 @@ begin
     Playing := True;
   end;
   UpdateButtons;
+end;
+
+{ See this type's own declaration comment. }
+procedure TDysToolBar.PollRecordState;
+begin
+  case AudioEngineRecordState of
+    RecordStateCountIn:
+      SetTitle(RecordBtn, 'Cnt');
+    RecordStateRecording:
+      SetTitle(RecordBtn, 'REC');
+    RecordStateIdle:
+      if (RecordBtn^.Title <> nil) and (RecordBtn^.Title^ <> 'Rec') then
+      begin
+        { The button's own caption is the only record of "were we counting
+          in or recording a moment ago" available here - RecordState
+          having already dropped back to Idle on its own (the engine hit
+          its recording length cap) means whatever RecordButtonProc would
+          normally do on a manual stop-click never ran, so run its
+          finalize half now instead. }
+        if Assigned(FinalizeRecordingProc) then
+          FinalizeRecordingProc;
+        SetTitle(RecordBtn, 'Rec');
+      end;
+  end;
 end;
 
 { Reads Tempo's text, clamps it the same way MainForm.TempoEditEditingDone
@@ -417,6 +475,50 @@ procedure TDysToolBar.HandleEvent(var Event: TEvent);
 var
   Offset: Integer;
 begin
+  { The instrument keyboard (QWERTY -> note) only plays while the top
+    (transport) pane is the one selected - it used to live on the bottom
+    effects pane instead (moved here wholesale, see DysEffectsRack.pas's
+    session note). MUST run BEFORE `inherited HandleEvent`, not after:
+    Tempo is this pane's default focus target (TDysToolBarPane.InitPane's
+    Focusable := Bar^.Tempo) and stays Current across most of a session
+    unless Up/Down explicitly moves off it, so `inherited HandleEvent`
+    (TGroup.HandleEvent, which dispatches a focused evKeyDown to Current)
+    routes every plain letter/digit straight into Tempo's own TInputLine.
+    HandleEvent first - which happily accepts ANY printable character as
+    text (it validates as a BPM number only later, in CommitTempo, not per
+    keystroke) and clears the event. Checking AFTER inherited (the first
+    version of this fix) meant the note keys were already consumed and
+    gone by the time this code ran, and the keyboard looked completely
+    dead - exactly the reported symptom. Explicitly skipped while Tempo
+    itself is focused, so it can still be typed into normally; every other
+    Current (one of the four buttons, or nothing yet) falls through to
+    this unconditionally. Ctrl+Z/Ctrl+X (genuinely distinct bytes, not the
+    raw letters, so no collision with the note keys themselves) shift the
+    octave instead of playing a note. }
+  if (Event.What = evKeyDown) and (Tempo^.State and sfFocused = 0) then
+  begin
+    if Event.KeyCode = kbCtrlZ then
+    begin
+      if Assigned(AdjustKeyboardOctaveProc) then
+        AdjustKeyboardOctaveProc(-1);
+      ClearEvent(Event);
+      Exit;
+    end;
+    if Event.KeyCode = kbCtrlX then
+    begin
+      if Assigned(AdjustKeyboardOctaveProc) then
+        AdjustKeyboardOctaveProc(1);
+      ClearEvent(Event);
+      Exit;
+    end;
+    if DysKeyToSemitoneOffset(Event.CharCode, Offset) then
+    begin
+      if Assigned(TriggerKeyboardNoteProc) then
+        TriggerKeyboardNoteProc(Offset);
+      ClearEvent(Event);
+      Exit;
+    end;
+  end;
   inherited HandleEvent(Event);
   { Tab/Shift+Tab is reserved app-wide for pane switching (see TDysPane),
     so moving between this pane's own widgets - Tempo, then the four
@@ -447,42 +549,6 @@ begin
     ClearEvent(Event);
     Exit;
   end;
-  { The instrument keyboard (QWERTY -> note) only plays while the top
-    (transport) pane is the one selected - it used to live on the bottom
-    effects pane instead (moved here wholesale, see DysEffectsRack.pas's
-    session note), which meant typing anywhere that pane happened to still
-    be focused - e.g. naming a file, editing a param's numeric readout -
-    could trigger notes as a side effect. `inherited HandleEvent` above
-    already ran and would have cleared Event.What (set it to evNothing) if
-    Tempo was focused and consumed this as a printed character, so a plain
-    letter/digit only reaches here at all when Tempo ISN'T eating it - no
-    extra focus check needed. Ctrl+Z/Ctrl+X (genuinely distinct bytes, not
-    the raw letters, so no collision with the note keys themselves) shift
-    the octave instead of playing a note. }
-  if Event.What = evKeyDown then
-  begin
-    if Event.KeyCode = kbCtrlZ then
-    begin
-      if Assigned(AdjustKeyboardOctaveProc) then
-        AdjustKeyboardOctaveProc(-1);
-      ClearEvent(Event);
-      Exit;
-    end;
-    if Event.KeyCode = kbCtrlX then
-    begin
-      if Assigned(AdjustKeyboardOctaveProc) then
-        AdjustKeyboardOctaveProc(1);
-      ClearEvent(Event);
-      Exit;
-    end;
-    if DysKeyToSemitoneOffset(Event.CharCode, Offset) then
-    begin
-      if Assigned(TriggerKeyboardNoteProc) then
-        TriggerKeyboardNoteProc(Offset);
-      ClearEvent(Event);
-      Exit;
-    end;
-  end;
   if Event.What = evCommand then
   begin
     case Event.Command of
@@ -493,19 +559,38 @@ begin
         end;
       cmTransportStop:
         begin
+          { Mirrors MainForm.StopClick: finalize an in-progress take before
+            stopping/seeking, same reasoning as TogglePlayPause's own
+            finalize-first step. }
+          if (AudioEngineRecordState <> RecordStateIdle) and
+             Assigned(FinalizeRecordingProc) then
+          begin
+            FinalizeRecordingProc;
+            SetTitle(RecordBtn, 'Rec');
+          end;
           AudioEngineStop;
           AudioEngineSeek(0);
           Playing := False;
-          Recording := False;
           UpdateButtons;
         end;
       cmTransportPlay:
         TogglePlayPause;
       cmTransportRecord:
+        { Mirrors MainForm.RecordClick: a click while counting in or
+          recording stops/finalizes; a click while Idle starts a count-in
+          (or, for a line-in track, starts capturing immediately - see
+          DysStartRecording). PollRecordState (Idle-driven, see its own
+          comment) reflects the resulting state onto this button's caption
+          on the very next event-loop pass - no caption change needed
+          here, only the engine calls themselves. }
+        if AudioEngineRecordState <> RecordStateIdle then
         begin
-          Recording := not Recording;
-          UpdateButtons;
-        end;
+          if Assigned(FinalizeRecordingProc) then
+            FinalizeRecordingProc;
+          SetTitle(RecordBtn, 'Rec');
+        end
+        else if Assigned(StartRecordingProc) then
+          StartRecordingProc;
       cmCycleInterval:
         begin
           IntervalIdx := (IntervalIdx + 1) mod Length(IntervalNames);
