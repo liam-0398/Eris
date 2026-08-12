@@ -59,6 +59,7 @@ type
       else only start if there's a clip" rule either way gets there. }
     procedure TogglePlayPause;
     procedure CommitTempo;
+    procedure SyncTempoDisplay;
   private
     procedure SetTitle(B: PButton; const S: string);
     procedure UpdateButtons;
@@ -283,7 +284,6 @@ constructor TDysToolBar.Init(Bounds: TRect);
 var
   R: TRect;
   X: Integer;
-  TempoDefault: string[6];
 begin
   inherited Init(Bounds);
   GrowMode := 0;
@@ -295,8 +295,6 @@ begin
 
   R.Assign(X, 0, X + 6, 1);
   Tempo := New(PInputLine, Init(R, 6));
-  TempoDefault := '120.0';
-  Tempo^.SetData(TempoDefault);
   Insert(Tempo);
   X := X + 7;
 
@@ -327,6 +325,16 @@ begin
   Insert(IntervalBtn);
 
   ActiveToolBar := @Self;
+  { Was hardcoded to the text '120.0' regardless of Project.TempoBPM's own
+    default (160.0, Project.DefaultTempoBPM) - the field never actually
+    reflected the project's real tempo from the moment the app started,
+    which is what made it look "garbage": editing it and hitting Enter
+    (CommitTempo) worked, but the number shown before that had never once
+    corresponded to anything real. SyncTempoDisplay is the read-direction
+    counterpart to CommitTempo's write direction - see RefreshAfterProject
+    Change (DysnomiaApp.pas) for the other place this needs to run, after
+    a project load/New changes TempoBPM out from under this field. }
+  SyncTempoDisplay;
 end;
 
 procedure TDysToolBar.SetTitle(B: PButton; const S: string);
@@ -397,6 +405,21 @@ begin
   Str(Value, S);
   Tempo^.SetData(S);
   Tempo^.DrawView;
+end;
+
+{ Read-direction counterpart to CommitTempo: pushes Project.TempoBPM's
+  current value into the field, rather than reading the field into the
+  project. Called once from Init (see its comment) and again from
+  DysnomiaApp.RefreshAfterProjectChange whenever a project load/New
+  changes TempoBPM without going through this field at all. }
+procedure TDysToolBar.SyncTempoDisplay;
+var
+  S: string;
+begin
+  Str(Round(Project.TempoBPM), S);
+  Tempo^.SetData(S);
+  if State and sfVisible <> 0 then
+    Tempo^.DrawView;
 end;
 
 procedure TDysToolBar.HandleEvent(var Event: TEvent);

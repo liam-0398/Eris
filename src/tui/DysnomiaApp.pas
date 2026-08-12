@@ -330,6 +330,15 @@ end;
   project that just closed. }
 procedure TDysnomiaApp.RefreshAfterProjectChange;
 begin
+  { Project.TempoBPM can change out from under the transport bar's own
+    field on a load/New (a loaded project's saved tempo, or NewProject's
+    reset to DefaultTempoBPM) - the field only ever wrote TO TempoBPM
+    (CommitTempo, on Enter) until this, so it would otherwise still be
+    showing whatever was last typed (or the stale 120.0 startup value)
+    while the actual project tempo underneath had already moved on. See
+    DysWidgets.TDysToolBar.SyncTempoDisplay. }
+  if ActiveToolBar <> nil then
+    ActiveToolBar^.SyncTempoDisplay;
   if Timeline <> nil then
   begin
     Timeline^.Content^.CursorTrack := 0;

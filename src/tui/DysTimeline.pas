@@ -38,10 +38,13 @@ uses
   SampleTypes, AudioEngine, Waveform;
 
 const
-  { Fixed timeline scale: this many terminal columns per second of audio.
-    No zoom/scroll yet - keep it simple until a real need for one shows up
-    in daily use (stage 9). }
-  PixelsPerSecond = 10;
+  { Startup timeline scale, in terminal columns per second of audio - now
+    adjustable at runtime (see PxPerSec, SetZoom, the '+'/'-' keys) rather
+    than the fixed constant this used to be. Kept as the field's initial
+    value and SetZoom's implicit "back to default" reference point. }
+  DefaultPixelsPerSecond = 10;
+  MinPixelsPerSecond = 1;
+  MaxPixelsPerSecond = 100;
   LabelWidth = 5;
 
 type
@@ -57,7 +60,16 @@ type
     Pending: Boolean;
     PendingSampleID: Integer;
     PendingLength: Int64;
+    { Runtime zoom level (columns/second) and its derived frames-per-column -
+      see SetZoom. Both replace what used to be the fixed PixelsPerSecond
+      constant. }
+    PxPerSec: Integer;
     FramesPerCol: Int64;
+    { The frame drawn at the leftmost grid column (LabelWidth) - horizontal
+      scroll position. 0 until something moves it: manual nudging past the
+      visible edge (EnsureFrameVisible) or the playhead auto-following
+      during playback (UpdatePlayhead). }
+    ViewStartFrame: Int64;
     ShowPlayhead: Boolean;
     PlayheadFrame: Int64;
     { Transport loop range, -1 = unset - there's no per-clip/per-track loop
@@ -105,6 +117,23 @@ type
       position or play/stopped state actually changed, since Idle fires far
       more often than that. }
     procedure UpdatePlayhead;
+    { Timeline zoom (the '+'/'-' keys, see HandleEvent) - clamps to
+      Min/MaxPixelsPerSecond, recomputes FramesPerCol, and re-anchors the
+      scroll position so the cursor stays visible at the new scale. }
+    procedure SetZoom(ANewPxPerSec: Integer);
+    { Scrolls just enough (not a full re-centre) to bring AFrame back into
+      the visible grid, used both after a manual cursor move past the
+      current edge and by UpdatePlayhead's autoscroll. }
+    procedure EnsureFrameVisible(AFrame: Int64);
+    { How many frames the visible grid (Size.X - LabelWidth columns) spans
+      at the current zoom - 0 before the view has ever been sized. }
+    function VisibleFrameSpan: Int64;
+    { The frame step Left/Right nudges the cursor (and a pending overlay)
+      by - wired to the toolbar's interval cycle button (ActiveToolBar^.
+      IntervalIdx: 1/4, 1/8, 1/16, 1 bar) instead of a fixed column, so the
+      button actually does something (see tui.md). Falls back to one grid
+      column if tempo/interval state isn't available yet. }
+    function GridStepFrames: Int64;
   end;
 
   PDysTimeline = ^TDysTimeline;
@@ -203,7 +232,7 @@ end;
   column is "spent" on the divider rather than either clip, which is the
   best this grid's resolution (FramesPerCol frames/column) can do. }
 procedure DrawAdjoiningSeparators(var B: TDrawBuffer; ATrack: Integer;
-  AFramesPerCol: Int64; AWidth: Integer);
+  AFramesPerCol: Int64; AWidth: Integer; AViewStart: Int64);
 var
   i, j, Col: Integer;
   EndA, PosB: Int64;
@@ -219,10 +248,12 @@ begin
       PosB := Project.Tracks[ATrack].Clips[j].Position;
       if PosB <> EndA then
         Continue;
+      if PosB < AViewStart then
+        Continue; { off the left edge of the visible grid }
       if SampleShadeAttr(Project.Tracks[ATrack].Clips[j].SampleID) <>
          SampleShadeAttr(Project.Tracks[ATrack].Clips[i].SampleID) then
         Continue;
-      Col := LabelWidth + (PosB div AFramesPerCol);
+      Col := LabelWidth + ((PosB - AViewStart) div AFramesPerCol);
       if (Col >= LabelWidth) and (Col <= AWidth - 1) then
         MoveChar(B[Col], BlockChar, SeparatorAttr, 1);
     end;
@@ -426,7 +457,9 @@ begin
   Pending := False;
   PendingSampleID := -1;
   PendingLength := 0;
-  FramesPerCol := AudioEngine.ProjectSampleRate div PixelsPerSecond;
+  PxPerSec := DefaultPixelsPerSecond;
+  FramesPerCol := AudioEngine.ProjectSampleRate div PxPerSec;
+  ViewStartFrame := 0;
   ShowPlayhead := False;
   PlayheadFrame := 0;
   LoopStart := -1;
@@ -438,14 +471,18 @@ end;
   lands, in column space - shared by the committed-clip loop and the
   pending-overlay draw below. }
 procedure DrawSpan(var B: TDrawBuffer; AFramesPerCol: Int64; AWidth: Integer;
-  APos, ALen: Int64; AAttr: Word);
+  APos, ALen: Int64; AAttr: Word; AViewStart: Int64);
 var
   StartCol, EndCol: Integer;
 begin
   if (ALen <= 0) or (AFramesPerCol <= 0) then
     Exit;
-  StartCol := LabelWidth + (APos div AFramesPerCol);
-  EndCol := LabelWidth + ((APos + ALen - 1) div AFramesPerCol);
+  if APos + ALen <= AViewStart then
+    Exit; { entirely scrolled off the left edge - division below truncates
+            toward zero, not floor, so a raw negative-column calc here
+            could otherwise land back inside the visible range by mistake }
+  StartCol := LabelWidth + ((APos - AViewStart) div AFramesPerCol);
+  EndCol := LabelWidth + ((APos + ALen - 1 - AViewStart) div AFramesPerCol);
   if StartCol < LabelWidth then
     StartCol := LabelWidth;
   if EndCol > AWidth - 1 then
@@ -464,7 +501,7 @@ begin
   PlayCol := -1;
   if ShowPlayhead then
   begin
-    PlayCol := LabelWidth + (PlayheadFrame div FramesPerCol);
+    PlayCol := LabelWidth + ((PlayheadFrame - ViewStartFrame) div FramesPerCol);
     if (PlayCol < LabelWidth) or (PlayCol > Size.X - 1) then
       PlayCol := -1; { off the visible grid - draw nothing rather than clamp
                         it to an edge, which would misleadingly suggest the
@@ -474,30 +511,34 @@ begin
   LoopStartCol := -1;
   if LoopStart >= 0 then
   begin
-    LoopStartCol := LabelWidth + (LoopStart div FramesPerCol);
+    LoopStartCol := LabelWidth + ((LoopStart - ViewStartFrame) div FramesPerCol);
     if (LoopStartCol < LabelWidth) or (LoopStartCol > Size.X - 1) then
       LoopStartCol := -1;
   end;
   LoopEndCol := -1;
   if LoopEnd >= 0 then
   begin
-    LoopEndCol := LabelWidth + (LoopEnd div FramesPerCol);
+    LoopEndCol := LabelWidth + ((LoopEnd - ViewStartFrame) div FramesPerCol);
     if (LoopEndCol < LabelWidth) or (LoopEndCol > Size.X - 1) then
       LoopEndCol := -1;
   end;
 
-  { Ruler: a tick every column, the elapsed second written out at every
-    whole-second column. Jumping Col past a multi-digit label (rather than
-    just Inc(Col)) matters once Sec reaches two digits - otherwise the next
+  { Ruler: a tick every column, the elapsed second (from the true frame at
+    that column, ViewStartFrame plus however many columns in - not just the
+    column's own offset from the left edge, since scrolling means the left
+    edge is no longer necessarily frame 0) written out at every whole-
+    second column. Jumping Col past a multi-digit label (rather than just
+    Inc(Col)) matters once Sec reaches two digits - otherwise the next
     column's '.' would immediately overwrite the label's second digit. }
   MoveChar(B, ' ', NormalAttr, Size.X);
   MoveStr(B, StringOfChar(' ', LabelWidth), NormalAttr);
   Col := LabelWidth;
   while Col < Size.X do
   begin
-    if ((Col - LabelWidth) mod PixelsPerSecond) = 0 then
+    if ((Col - LabelWidth) mod PxPerSec) = 0 then
     begin
-      Sec := (Col - LabelWidth) div PixelsPerSecond;
+      Sec := (ViewStartFrame + (Col - LabelWidth) * FramesPerCol) div
+        AudioEngine.ProjectSampleRate;
       SecStr := IntToStr(Sec);
       MoveStr(B[Col], SecStr, NormalAttr);
       Inc(Col, Length(SecStr));
@@ -535,7 +576,7 @@ begin
     Col := LabelWidth;
     while Col < Size.X do
     begin
-      if ((Col - LabelWidth) mod PixelsPerSecond) = 0 then
+      if ((Col - LabelWidth) mod PxPerSec) = 0 then
         MoveChar(B[Col], '|', NormalAttr, 1)
       else
         MoveChar(B[Col], '.', NormalAttr, 1);
@@ -545,11 +586,12 @@ begin
     for i := 0 to High(Project.Tracks[Track].Clips) do
       DrawSpan(B, FramesPerCol, Size.X, Project.Tracks[Track].Clips[i].Position,
         Project.Tracks[Track].Clips[i].Length,
-        SampleShadeAttr(Project.Tracks[Track].Clips[i].SampleID));
-    DrawAdjoiningSeparators(B, Track, FramesPerCol, Size.X);
+        SampleShadeAttr(Project.Tracks[Track].Clips[i].SampleID), ViewStartFrame);
+    DrawAdjoiningSeparators(B, Track, FramesPerCol, Size.X, ViewStartFrame);
 
     if Pending and (Track = CursorTrack) then
-      DrawSpan(B, FramesPerCol, Size.X, CursorFrame, PendingLength, PendingAttr);
+      DrawSpan(B, FramesPerCol, Size.X, CursorFrame, PendingLength, PendingAttr,
+        ViewStartFrame);
 
     if LoopStartCol >= 0 then
       MoveChar(B[LoopStartCol], LoopChar, LoopAttr, 1);
@@ -564,7 +606,7 @@ begin
       this marker are never both showing for the same track at once. }
     if (Track = CursorTrack) and (not CursorInLabel) then
     begin
-      CursorCol := LabelWidth + (CursorFrame div FramesPerCol);
+      CursorCol := LabelWidth + ((CursorFrame - ViewStartFrame) div FramesPerCol);
       if (CursorCol >= LabelWidth) and (CursorCol <= Size.X - 1) then
         MoveChar(B[CursorCol], BlockChar, CursorAttr, 1);
     end;
@@ -605,9 +647,10 @@ begin
               CursorInLabel := True
             else
             begin
-              Dec(CursorFrame, FramesPerCol);
+              Dec(CursorFrame, GridStepFrames);
               if CursorFrame < 0 then
                 CursorFrame := 0;
+              EnsureFrameVisible(CursorFrame);
             end;
           end;
           DrawView;
@@ -619,7 +662,10 @@ begin
           if CursorInLabel then
             CursorInLabel := False
           else
-            Inc(CursorFrame, FramesPerCol);
+          begin
+            Inc(CursorFrame, GridStepFrames);
+            EnsureFrameVisible(CursorFrame);
+          end;
           DrawView;
           ClearEvent(Event);
           Exit;
@@ -693,6 +739,20 @@ begin
         end;
     end;
     case UpCase(Event.CharCode) of
+      '+', '=':
+        begin
+          { '=' too - the unshifted key sharing that cap on most keyboards,
+            so zoom-in doesn't strictly require Shift. }
+          SetZoom(PxPerSec + 1);
+          ClearEvent(Event);
+          Exit;
+        end;
+      '-':
+        begin
+          SetZoom(PxPerSec - 1);
+          ClearEvent(Event);
+          Exit;
+        end;
       'W':
         begin
           ClipIdx := ClipIndexAtFrame(CursorTrack, CursorFrame);
@@ -922,6 +982,90 @@ begin
     PushTrackToEngine(t);
 end;
 
+function TDysTimelineContent.VisibleFrameSpan: Int64;
+begin
+  if Size.X <= LabelWidth then
+    Result := 0
+  else
+    Result := (Size.X - LabelWidth) * FramesPerCol;
+end;
+
+{ Scrolls the minimum amount to bring AFrame back inside the visible grid -
+  not a re-centre, so a manual nudge past the edge only moves the view by
+  one step, and the playhead crossing the right edge during playback keeps
+  scrolling forward column-by-column rather than jumping. Landing AFrame
+  exactly one column shy of the far edge (rather than flush against it)
+  means the newly-revealed column isn't immediately re-crossed next tick. }
+procedure TDysTimelineContent.EnsureFrameVisible(AFrame: Int64);
+var
+  VF: Int64;
+begin
+  VF := VisibleFrameSpan;
+  if VF <= 0 then
+    Exit;
+  if AFrame < ViewStartFrame then
+    ViewStartFrame := AFrame
+  else if AFrame >= ViewStartFrame + VF then
+    ViewStartFrame := AFrame - VF + FramesPerCol;
+  if ViewStartFrame < 0 then
+    ViewStartFrame := 0;
+end;
+
+procedure TDysTimelineContent.SetZoom(ANewPxPerSec: Integer);
+begin
+  if ANewPxPerSec < MinPixelsPerSecond then
+    ANewPxPerSec := MinPixelsPerSecond
+  else if ANewPxPerSec > MaxPixelsPerSecond then
+    ANewPxPerSec := MaxPixelsPerSecond;
+  if ANewPxPerSec = PxPerSec then
+    Exit;
+  PxPerSec := ANewPxPerSec;
+  FramesPerCol := AudioEngine.ProjectSampleRate div PxPerSec;
+  if FramesPerCol <= 0 then
+    FramesPerCol := 1;
+  { Re-anchor on whatever should still be visible after the scale change -
+    the playhead while playing (otherwise zooming during playback could
+    scroll it straight out of view), the cursor otherwise. }
+  if ShowPlayhead then
+    EnsureFrameVisible(PlayheadFrame)
+  else
+    EnsureFrameVisible(CursorFrame);
+  DrawView;
+end;
+
+{ BarFrames (above) at the toolbar's currently-selected interval - see
+  DysWidgets.IntervalNames ('1/4', '1/8', '1/16', '1bar'), same order as
+  IntervalIdx cycles. Falls back to one grid column if BarFrames can't be
+  computed yet (TempoBPM <= 0) or the toolbar doesn't exist yet (shouldn't
+  happen once the app's fully constructed, but Init order isn't this
+  method's business to assume). }
+function TDysTimelineContent.GridStepFrames: Int64;
+var
+  Frames: Int64;
+begin
+  Frames := BarFrames;
+  if Frames <= 0 then
+  begin
+    Result := FramesPerCol;
+    Exit;
+  end;
+  if ActiveToolBar = nil then
+  begin
+    Result := Frames div 4;
+    Exit;
+  end;
+  case ActiveToolBar^.IntervalIdx of
+    0: Result := Frames div 4;  { 1/4 }
+    1: Result := Frames div 8;  { 1/8 }
+    2: Result := Frames div 16; { 1/16 }
+    3: Result := Frames;        { 1 bar }
+  else
+    Result := Frames div 4;
+  end;
+  if Result <= 0 then
+    Result := FramesPerCol;
+end;
+
 procedure TDysTimelineContent.UpdatePlayhead;
 var
   NewShow: Boolean;
@@ -933,6 +1077,8 @@ begin
   begin
     ShowPlayhead := NewShow;
     PlayheadFrame := NewFrame;
+    if NewShow then
+      EnsureFrameVisible(PlayheadFrame);
     DrawView;
   end;
 end;
