@@ -3,8 +3,10 @@ unit DysWidgets;
 { Stage 1 shell widgets: a fixed (non-draggable, non-closable) docked pane
   built on TWindow so border/title drawing reuses the framework's own
   tested TFrame code, and the transport bar / bottom bar for the rows
-  above and below the desktop. Nothing here calls into aengine, abackend
-  or project - local UI state only, per tui.md stage 1. }
+  above and below the desktop. Stage 7: Play/Stop on the transport bar
+  call into AudioEngine for real (see TDysToolBar.HandleEvent) - metronome,
+  record and the interval cycle button are still local UI state only,
+  stage 8. }
 
 {$mode objfpc}{$H+}
 
@@ -67,6 +69,9 @@ const
   IntervalNames: array[0..3] of string = ('1/4', '1/8', '1/16', '1bar');
 
 implementation
+
+uses
+  AudioEngine;
 
 { TDysPane }
 
@@ -215,13 +220,28 @@ begin
         end;
       cmTransportStop:
         begin
+          AudioEngineStop;
+          AudioEngineSeek(0);
           Playing := False;
           Recording := False;
           UpdateButtons;
         end;
       cmTransportPlay:
         begin
-          Playing := not Playing;
+          { Mirrors MainForm.PlayPauseClick: Stop wins if already playing,
+            otherwise only start if there's actually a clip somewhere - see
+            AudioEngineHasClip - so Play on an empty project does nothing
+            rather than silently "playing" nothing. }
+          if AudioEngineIsPlaying then
+          begin
+            AudioEngineStop;
+            Playing := False;
+          end
+          else if AudioEngineHasClip then
+          begin
+            AudioEnginePlay;
+            Playing := True;
+          end;
           UpdateButtons;
         end;
       cmTransportRecord:

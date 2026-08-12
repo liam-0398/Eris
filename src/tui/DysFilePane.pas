@@ -2,17 +2,20 @@ unit DysFilePane;
 
 { Left dock: a real directory listing (".." to go up, Enter to select,
   Ctrl+I to drop straight in as an instrument track - see Bindings in
-  tui.md). This only touches the filesystem, never aengine/abackend/
-  project, so it stays inside stage 1's "not hooked up to anything" -
-  actually dropping a file on a track, and creating a real instrument
-  track, are stage 7 work once there is a track/timeline to drop onto. }
+  tui.md). Stage 7: Enter on a real file decodes it, adds it to the sample
+  pool, and hands it to the timeline as a pending overlay on whatever
+  track DysTrackPane.SelectedTrackIndex reports - see DysTimeline for what
+  happens next (Left/Right/Up/Down/Enter/Esc). Ctrl+I (drop straight in as
+  an instrument track) is still a stub - that needs a MIDI-live track
+  concept the timeline doesn't have yet, stage 8. }
 
 {$mode objfpc}{$H+}
 
 interface
 
 uses
-  SysUtils, Objects, Drivers, Views, Dialogs, MsgBox, DysWidgets;
+  SysUtils, Objects, Drivers, Views, Dialogs, MsgBox, DysWidgets, DysTimeline,
+  DysTrackPane, Project, SampleTypes, WavDecoder;
 
 type
   PDysFileListBox = ^TDysFileListBox;
@@ -69,7 +72,9 @@ end;
 
 procedure TDysFileListBox.SelectItem(Item: Sw_Integer);
 var
-  Name: string;
+  Name, FullPath: string;
+  Sample: TSample;
+  SampleID: Integer;
 begin
   Name := PString(List^.At(Item))^;
   if Name = '..' then
@@ -83,10 +88,20 @@ begin
     CurDir := CurDir + Name;
     Reload;
   end
-  else
-    MessageBox('Would overlay "' + Name +
-      '" on the track under the cursor and drop it on Enter - stage 7.',
-      nil, mfInformation or mfOKButton);
+  else if ActiveTimelineContent <> nil then
+  begin
+    FullPath := CurDir + Name;
+    if DecodeSampleFile(FullPath, Sample) then
+    begin
+      SampleID := Project.AddSampleToPool(Sample, Name, FullPath);
+      ActiveTimelineContent^.CursorTrack := SelectedTrackIndex;
+      ActiveTimelineContent^.BeginOverlay(SampleID, Sample.FrameCount);
+      ActiveTimelineContent^.Focus;
+    end
+    else
+      MessageBox('Could not decode "' + Name + '" as audio.', nil,
+        mfError or mfOKButton);
+  end;
 end;
 
 procedure TDysFileListBox.SelectAsInstrument(Item: Sw_Integer);
