@@ -22,7 +22,7 @@ interface
 uses
   Objects, Drivers, Views, Dialogs, Menus, App, DysWidgets,
   Effects, Project, Quadraverb, BBE422A, Alesis3630, BossFZ2, DysTrackPane,
-  Math, AudioEngine, SampleTypes;
+  Math, AudioEngine, SampleTypes, Waveform;
 
 const
   { cmAddEffectBase + Effects.ekXxx is the popup menu's command for adding
@@ -142,8 +142,36 @@ type
     procedure HandleEvent(var Event: TEvent); virtual;
   end;
 
-  { The bottom dock: hosts TDysEffectsContent above. Lives here rather than
-    in DysWidgets.pas (which every other docked pane's type does) because
+  { The bottom pane's other content: a hand-rolled ASCII waveform (min/max
+    peaks, same source Waveform.ComputeWaveformPeaks already provides -
+    WaveformDraw.pas's own rendering is src/ui/LCL and unreachable here,
+    see the Isolation rule, so this is a fresh raw-attribute renderer, same
+    "skip GetColor, build a TDrawBuffer per row" convention DysTimeline's
+    grid already uses) of whatever clip the timeline's 'k' key last marked
+    (DysTimeline.TDysTimelineContent.MarkClipUnderCursor, via
+    SetWaveformClipProc - DysWidgets.pas's own comment explains why that's
+    a callback and not a direct call). Peaks are computed once per mark
+    (SetClip), not per Draw - ComputeWaveformPeaks walks the whole clip
+    span, and Draw can run far more often than the marked clip changes. }
+  PDysWaveformContent = ^TDysWaveformContent;
+  TDysWaveformContent = object(TView)
+    SampleID: Integer; { -1 = nothing marked yet }
+    ClipOffset, ClipLength: Int64;
+    ClipGain, ClipDetune: Single;
+    ClipWarpMode: Integer;
+    Peaks: TWaveformPeaks;
+    constructor Init(Bounds: TRect);
+    procedure SetClip(ASampleID: Integer; AOffset, ALength: Int64;
+      AGain, ADetune: Single; AWarpMode: Integer);
+    procedure Draw; virtual;
+  end;
+
+  { The bottom dock: hosts TDysEffectsContent and TDysWaveformContent,
+    Ctrl+W (app-wide - see TDysnomiaApp.HandleEvent) toggling which one is
+    actually shown/focusable, one hides while the other shows rather than
+    both existing side by side - there's only the one dock's worth of
+    screen space this pane ever had. Lives here rather than in DysWidgets.
+    pas (which every other docked pane's type does) because
     TDysEffectsContent itself needs DysTrackPane (for SelectedTrackIndex/
     ActiveTrackPane) and DysTrackPane needs DysWidgets (for its own base
     class, TDysPane) - putting TDysBottomPane in DysWidgets too would close
@@ -154,6 +182,8 @@ type
   PDysBottomPane = ^TDysBottomPane;
   TDysBottomPane = object(TDysPane)
     Content: PDysEffectsContent;
+    WaveformView: PDysWaveformContent;
+    ShowingWaveform: Boolean;
     constructor InitPane(Bounds: TRect);
     { Rebuilds the rack from whatever track DysTrackPane's cursor is on NOW,
       every time Tab/Shift+Tab brings focus into this pane - see
@@ -162,6 +192,10 @@ type
       rebuild, instead of a track-changed broadcast this app has no
       equivalent of yet. }
     procedure FocusPane; virtual;
+    { Ctrl+W. Public so TDysnomiaApp.HandleEvent (DysnomiaApp.pas, which
+      already `uses DysEffectsRack` directly - no callback needed for this
+      direction) can call it straight from its own app-wide key check. }
+    procedure ToggleContent;
   end;
 
 function DysEffectKindName(AKind: Integer): string;
@@ -173,6 +207,12 @@ function DysEffectKindName(AKind: Integer): string;
   comment for why that can't just Dispose(Self) directly). }
 var
   ActiveEffectsContent: PDysEffectsContent = nil;
+
+{ Set once, by TDysBottomPane.InitPane - there is exactly one bottom dock
+  in this single-window app. TDysnomiaApp.HandleEvent's Ctrl+W handling
+  reaches through this to call ToggleContent. }
+var
+  ActiveBottomPane: PDysBottomPane = nil;
 
 implementation
 
@@ -278,6 +318,204 @@ begin
   else
     Result := 'Effect';
   end;
+end;
+
+function DysWarpModeName(AMode: Integer): string;
+begin
+  case AMode of
+    SampleTypes.WarpModeBeats: Result := 'Beats';
+    SampleTypes.WarpModeRePitch: Result := 'RePitch';
+    SampleTypes.WarpModeTones: Result := 'Tones';
+    SampleTypes.WarpModeAudio: Result := 'Audio';
+  else
+    Result := '?';
+  end;
+end;
+
+{ TDysWaveformContent }
+
+constructor TDysWaveformContent.Init(Bounds: TRect);
+begin
+  inherited Init(Bounds);
+  GrowMode := 0;
+  EventMask := EventMask or evKeyDown;
+  Options := Options or (ofSelectable + ofFirstClick);
+  SampleID := -1;
+  ClipOffset := 0;
+  ClipLength := 0;
+  ClipGain := 1.0;
+  ClipDetune := 0;
+  ClipWarpMode := SampleTypes.WarpModeAudio;
+end;
+
+{ Called from DysSetWaveformClip (this unit's own callback target for
+  DysWidgets.SetWaveformClipProc - see that var's comment). Computes peaks
+  once, over just the CLIP's own played span rather than the whole
+  underlying sample file (a clip's Offset/Length can be a small slice of a
+  much longer recording), by handing ComputeWaveformPeaks a windowed copy
+  of the TSample header pointing at the clip's own first frame - the
+  function only reads Data/FrameCount/Channels, never writes, so aliasing
+  the original buffer this way is safe. }
+procedure TDysWaveformContent.SetClip(ASampleID: Integer; AOffset, ALength: Int64;
+  AGain, ADetune: Single; AWarpMode: Integer);
+var
+  Windowed: TSample;
+  Avail: Int64;
+begin
+  SampleID := ASampleID;
+  ClipOffset := AOffset;
+  ClipLength := ALength;
+  ClipGain := AGain;
+  ClipDetune := ADetune;
+  ClipWarpMode := AWarpMode;
+
+  Peaks.Mins := nil;
+  Peaks.Maxs := nil;
+  if (SampleID < 0) or (SampleID > High(Project.SamplePool)) then
+  begin
+    DrawView;
+    Exit;
+  end;
+
+  Windowed := Project.SamplePool[SampleID];
+  Avail := Windowed.FrameCount - AOffset;
+  if Avail < 0 then
+    Avail := 0;
+  if ALength < Avail then
+    Avail := ALength;
+  if (Windowed.Data = nil) or (Avail <= 0) then
+  begin
+    DrawView;
+    Exit;
+  end;
+  Windowed.Data := @Windowed.Data[AOffset * Windowed.Channels];
+  Windowed.FrameCount := Avail;
+  Peaks := ComputeWaveformPeaks(Windowed);
+  DrawView;
+end;
+
+{ One row's worth of a single waveform bar column, given the bar's own
+  continuous vertical span (ATop..ABot, in fractional-row units where row 0
+  is this row's own top edge and row 1 its bottom) against THIS row's fixed
+  [0,1) slice. TDrawBuffer stores one CP437 byte per cell (views.pas:
+  `TDrawBuffer = array[...] of Word`, low byte character/high byte
+  attribute) - there is no sub-cell pixel or dot-matrix addressing
+  reachable through Free Vision's draw pipeline at all (checked the Unix
+  video driver, rtl-console/src/unix/video.pp: UTF-8 output is a FIXED
+  256-entry CP437-to-Unicode translation table, and Braille (U+2800+) isn't
+  one of the 256 characters it can ever produce). This is the closest
+  approximation CP437 actually allows: a full block for a row entirely
+  inside the bar, a half-block (upper or lower, whichever half the bar
+  reaches) for a row roughly half-covered, and a plain ASCII sliver
+  ('`'/'.') for anything finer than that - four visually distinct levels
+  per row edge from a combination of block-drawing and plain text
+  characters, instead of one (solid block or nothing). }
+function WaveRowGlyph(ATop, ABot: Double): Char;
+var
+  OverlapTop, OverlapBot, Frac: Double;
+  FillsFromTop: Boolean;
+begin
+  OverlapTop := ATop;
+  if OverlapTop < 0 then
+    OverlapTop := 0;
+  OverlapBot := ABot;
+  if OverlapBot > 1 then
+    OverlapBot := 1;
+  if OverlapBot <= OverlapTop then
+    Exit(' ');
+  Frac := OverlapBot - OverlapTop;
+  if Frac >= 0.9 then
+    Exit(Chr(219)); { full block }
+  FillsFromTop := OverlapTop <= (1 - OverlapBot);
+  if Frac >= 0.4 then
+  begin
+    if FillsFromTop then
+      Exit(Chr(223)) { upper half block }
+    else
+      Exit(Chr(220)); { lower half block }
+  end;
+  if FillsFromTop then
+    Exit('''')
+  else
+    Exit('.');
+end;
+
+procedure TDysWaveformContent.Draw;
+var
+  B: TDrawBuffer;
+  Row, Col, WaveRows, BinCount, BinLo, BinHi, i: Integer;
+  MidRow, MinV, MaxV, Top, Bot: Double;
+  Hdr, IdStr, GainStr, DetuneStr: string;
+  C: Word;
+begin
+  C := GetColor(1);
+  WaveRows := Size.Y - 1;
+  if WaveRows < 1 then
+    WaveRows := 1;
+
+  MoveChar(B, ' ', C, Size.X);
+  if SampleID < 0 then
+    Hdr := ' waveform: (none marked - press k on a clip in the timeline) '
+  else
+  begin
+    Str(SampleID, IdStr);
+    Str(ClipGain:0:2, GainStr);
+    Str(ClipDetune:0:1, DetuneStr);
+    Hdr := ' waveform: sample ' + IdStr + '  gain ' + GainStr +
+      '  detune ' + DetuneStr + 'st  warp ' + DysWarpModeName(ClipWarpMode) + ' ';
+  end;
+  MoveStr(B, Hdr, C);
+  WriteLine(0, 0, Size.X, 1, B);
+
+  BinCount := Length(Peaks.Maxs);
+  MidRow := WaveRows / 2;
+  for Row := 0 to WaveRows - 1 do
+  begin
+    MoveChar(B, ' ', C, Size.X);
+    if BinCount > 0 then
+      for Col := 0 to Size.X - 1 do
+      begin
+        { Group whichever peak bins land in this column (there are
+          typically far more bins - up to MaxWaveformBins - than terminal
+          columns) exactly like DrawSpan's own column mapping, min-of-mins/
+          max-of-maxs across the group so a transient inside the group is
+          never averaged away. }
+        BinLo := (Col * BinCount) div Size.X;
+        BinHi := ((Col + 1) * BinCount) div Size.X - 1;
+        if BinHi < BinLo then
+          BinHi := BinLo;
+        if BinHi > BinCount - 1 then
+          BinHi := BinCount - 1;
+        MinV := Peaks.Mins[BinLo];
+        MaxV := Peaks.Maxs[BinLo];
+        for i := BinLo + 1 to BinHi do
+        begin
+          if Peaks.Mins[i] < MinV then
+            MinV := Peaks.Mins[i];
+          if Peaks.Maxs[i] > MaxV then
+            MaxV := Peaks.Maxs[i];
+        end;
+        Top := MidRow - MaxV * MidRow;
+        Bot := MidRow - MinV * MidRow;
+        if Bot < Top + 0.02 then
+          Bot := Top + 0.02; { silence still shows a hairline, not nothing }
+        MoveChar(B[Col], WaveRowGlyph(Top - Row, Bot - Row), C, 1);
+      end;
+    WriteLine(0, 1 + Row, Size.X, 1, B);
+  end;
+end;
+
+{ Wired to DysWidgets.SetWaveformClipProc from this unit's own
+  `initialization` section - see that var's own comment. }
+procedure DysSetWaveformClip(ASampleID: Integer; AOffset, ALength: Int64;
+  AGain, ADetune: Single; AWarpMode: Integer);
+begin
+  if ActiveBottomPane = nil then
+    Exit;
+  ActiveBottomPane^.WaveformView^.SetClip(ASampleID, AOffset, ALength,
+    AGain, ADetune, AWarpMode);
+  if not ActiveBottomPane^.ShowingWaveform then
+    ActiveBottomPane^.ToggleContent;
 end;
 
 { Builds the Ctrl+Enter/right-click "add effect" popup, categories mirroring
@@ -1035,13 +1273,56 @@ begin
   R := ContentRect;
   Content := New(PDysEffectsContent, Init(R));
   Insert(Content);
+  WaveformView := New(PDysWaveformContent, Init(R));
+  Insert(WaveformView);
+  WaveformView^.Hide; { Effects is the default view - see ShowingWaveform }
   Focusable := Content;
+  ShowingWaveform := False;
+  ActiveBottomPane := @Self;
 end;
 
 procedure TDysBottomPane.FocusPane;
 begin
-  Content^.RebuildBoxes;
+  { Nothing to rebuild for WaveformView - its content only ever changes via
+    SetClip (the 'k' key), not by which track/pane last had focus. }
+  if not ShowingWaveform then
+    Content^.RebuildBoxes;
   inherited FocusPane;
+end;
+
+{ Ctrl+W, app-wide - see TDysnomiaApp.HandleEvent. Swaps which of Content/
+  WaveformView is visible/focusable and relabels the pane's own title
+  (DisposeStr/NewStr - same pattern TDysToolBar.SetTitle already uses for a
+  button's Title - followed by Frame^.DrawView, since TFrame, not this
+  view itself, is what actually paints the title text; see views.pas'
+  TFrame.Draw). If this pane currently holds keyboard focus, hands it to
+  whichever view just became visible so Ctrl+W's own effect is immediately
+  usable rather than leaving focus on a now-hidden view. }
+procedure TDysBottomPane.ToggleContent;
+begin
+  ShowingWaveform := not ShowingWaveform;
+  if ShowingWaveform then
+  begin
+    Content^.Hide;
+    WaveformView^.Show;
+    Focusable := WaveformView;
+    if Title <> nil then
+      DisposeStr(Title);
+    Title := NewStr('Waveform');
+  end
+  else
+  begin
+    WaveformView^.Hide;
+    Content^.Show;
+    Focusable := Content;
+    if Title <> nil then
+      DisposeStr(Title);
+    Title := NewStr('Effects');
+  end;
+  if Frame <> nil then
+    Frame^.DrawView;
+  if State and sfFocused <> 0 then
+    FocusPane;
 end;
 
 initialization
@@ -1050,5 +1331,6 @@ initialization
     can't `uses DysEffectsRack` directly to call these itself. }
   TriggerKeyboardNoteProc := @TriggerDysKeyboardNote;
   AdjustKeyboardOctaveProc := @AdjustDysKeyboardOctave;
+  SetWaveformClipProc := @DysSetWaveformClip;
 
 end.

@@ -104,6 +104,21 @@ type
     MoveClipIndex: Integer;
     MoveLength: Int64;
     MovePosition: Int64;
+    { 'k': marks the clip under the cursor as the one whose waveform is
+      shown in the bottom pane's waveform widget (Ctrl+W toggles that pane
+      between it and the effects rack - see DysWidgets/DysEffectsRack).
+      Blinks (MarkedAttr) the same "still there, just visually flagged"
+      way Pending/ResizeActive/MoveActive's spans do, but unlike those
+      three this isn't a transient edit-in-progress state that gets
+      cleared on commit/Esc - it just sits on whatever clip was last
+      marked until something else marks a different one. -1 = nothing
+      marked. Bounds-checked against the track's current clip count on
+      every Draw rather than cleared on every edit that could invalidate
+      it (split/delete/duplicate shifting indices) - simpler, and a stale
+      mark just stops rendering rather than pointing at the wrong clip. }
+    MarkedTrack: Integer;
+    MarkedClipIndex: Integer;
+    procedure MarkClipUnderCursor;
     constructor Init(Bounds: TRect);
     procedure Draw; virtual;
     procedure HandleEvent(var Event: TEvent); virtual;
@@ -215,6 +230,12 @@ const
     hue - "blink until committed" (Enter/PlaceOverlay clears Pending and
     the block redraws in its real per-sample shade, see PlaceOverlay). }
   PendingAttr = $DF;
+  { Blue bg, bright white fg, BLINKING - a distinct hue from PendingAttr's
+    magenta so "marked for the waveform widget" (an indefinitely-lived
+    flag) doesn't read as "still pending/being edited" (a transient
+    edit-in-progress state that clears on Enter/Esc) - see MarkedTrack's
+    own field comment. }
+  MarkedAttr = $9F;
   PlayheadAttr = $4F; { red bg, bright white fg - distinct from both clip colours }
   LoopAttr = $2F; { green bg, bright white fg - transport loop markers }
   BlockChar = #219; { CP437 solid block - see tui.md "Half-block glyphs" }
@@ -655,6 +676,8 @@ begin
   ResizeClipIndex := -1;
   MoveActive := False;
   MoveClipIndex := -1;
+  MarkedTrack := -1;
+  MarkedClipIndex := -1;
   ActiveTimelineContent := @Self;
 end;
 
@@ -801,6 +824,19 @@ begin
     if MoveActive and (Track = MoveTrack) then
       DrawSpan(B, FramesPerCol, Size.X, MovePosition, MoveLength, PendingAttr,
         ViewStartFrame);
+
+    { 'k' - see MarkedTrack's own field comment on why this is bounds-
+      checked here rather than cleared by every edit that could move/
+      invalidate the index: a split/delete/duplicate on this track since
+      the mark was set could have shifted or removed it entirely, and
+      re-checking Length on every Draw is simpler than hunting down every
+      place that would otherwise need to fix the mark up. }
+    if (Track = MarkedTrack) and (MarkedClipIndex >= 0) and
+       (MarkedClipIndex <= High(Project.Tracks[Track].Clips)) then
+      DrawSpan(B, FramesPerCol, Size.X,
+        Project.Tracks[Track].Clips[MarkedClipIndex].Position,
+        Project.Tracks[Track].Clips[MarkedClipIndex].Length,
+        MarkedAttr, ViewStartFrame);
 
     if LoopStartCol >= 0 then
       MoveChar(B[LoopStartCol], LoopChar, LoopAttr, 1);
@@ -1065,6 +1101,12 @@ begin
           ClearEvent(Event);
           Exit;
         end;
+      'k', 'K':
+        begin
+          MarkClipUnderCursor;
+          ClearEvent(Event);
+          Exit;
+        end;
       'l', 'L':
         begin
           { Three-press cycle: start marker, end marker, clear - see tui.md.
@@ -1274,6 +1316,28 @@ begin
   Project.RemoveClipAt(CursorTrack, ClipIdx);
   PushTrackToEngine(CursorTrack);
   DrawView;
+end;
+
+{ 'k' - see the MarkedTrack/MarkedClipIndex field comment. Hands the
+  clip's SampleID/Offset/Length off to the bottom pane's waveform widget
+  via SetWaveformClipProc (DysWidgets.pas's own comment on why this is a
+  callback rather than a direct call) - that call also switches the
+  bottom pane onto the waveform view if it wasn't already showing it, so
+  marking a clip gives immediate visual feedback rather than silently
+  updating a widget that might be hidden behind the effects rack. }
+procedure TDysTimelineContent.MarkClipUnderCursor;
+var
+  ClipIdx: Integer;
+begin
+  ClipIdx := ClipIndexAtFrame(CursorTrack, CursorFrame);
+  if ClipIdx < 0 then
+    Exit;
+  MarkedTrack := CursorTrack;
+  MarkedClipIndex := ClipIdx;
+  DrawView;
+  if Assigned(SetWaveformClipProc) then
+    with Project.Tracks[CursorTrack].Clips[ClipIdx] do
+      SetWaveformClipProc(SampleID, Offset, Length, Gain, PitchSemitones, WarpMode);
 end;
 
 procedure TDysTimelineContent.SolidifyResize;

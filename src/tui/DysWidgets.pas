@@ -151,6 +151,21 @@ var
   StartRecordingProc: procedure = nil;
   FinalizeRecordingProc: procedure = nil;
 
+{ Called from DysTimeline.TDysTimelineContent.MarkClipUnderCursor (the 'k'
+  key) to hand the marked clip off to the bottom pane's waveform widget -
+  same circularity as the two callbacks above (DysTimeline `uses
+  DysWidgets`, so the reverse call can't be direct), except this one's real
+  implementation is in DysEffectsRack.pas (the unit that actually owns
+  TDysBottomPane/the waveform widget), which points it there from its own
+  `initialization` section alongside the note-trigger/octave callbacks.
+  AGain/ADetune/AWarpMode are the clip's own TClip.Gain/PitchSemitones/
+  WarpMode fields - the waveform widget displays them alongside the
+  waveform itself (same info EditsRack/the WarpEditor show in src/ui,
+  display-only here, no editing yet). }
+var
+  SetWaveformClipProc: procedure(ASampleID: Integer; AOffset, ALength: Int64;
+    AGain, ADetune: Single; AWarpMode: Integer) = nil;
+
 implementation
 
 uses

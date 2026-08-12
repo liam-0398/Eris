@@ -527,6 +527,24 @@ end;
 
 procedure TDysnomiaApp.HandleEvent(var Event: TEvent);
 begin
+  { Ctrl+W toggles the bottom pane between the effects rack and the
+    waveform widget, from ANYWHERE in the app - not just while that pane
+    itself is focused. Checked BEFORE `inherited HandleEvent`, same
+    "intercept first" reasoning as every other global-feeling binding in
+    this codebase (see fvdoc.md): inherited's own focused-event dispatch
+    would otherwise hand this to whatever specific control currently has
+    focus first, and nothing guarantees that control leaves it uncleared.
+    Safe to intercept unconditionally regardless of what's focused: Ctrl+W
+    is a genuinely distinct byte ($17, below the printable range), so no
+    text field (Tempo, a param's numeric edit, the file filter) could ever
+    have produced it as normal typed input. }
+  if (Event.What = evKeyDown) and (Event.KeyCode = kbCtrlW) then
+  begin
+    if ActiveBottomPane <> nil then
+      ActiveBottomPane^.ToggleContent;
+    ClearEvent(Event);
+    Exit;
+  end;
   inherited HandleEvent(Event);
   if Event.What = evCommand then
   begin
