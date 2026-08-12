@@ -160,29 +160,29 @@ begin
   X := X + 7;
 
   R.Assign(X, 0, X + 3, 1);
-  MetronomeBtn := New(PButton, Init(R, 'M', cmToggleMetronome, bfBroadcast));
+  MetronomeBtn := New(PButton, Init(R, 'M', cmToggleMetronome, bfNormal));
   Insert(MetronomeBtn);
   X := X + 4;
 
   R.Assign(X, 0, X + 6, 1);
-  StopBtn := New(PButton, Init(R, 'Stop', cmTransportStop, bfBroadcast));
+  StopBtn := New(PButton, Init(R, 'Stop', cmTransportStop, bfNormal));
   Insert(StopBtn);
   X := X + 7;
 
   R.Assign(X, 0, X + 6, 1);
-  PlayBtn := New(PButton, Init(R, 'Play', cmTransportPlay, bfBroadcast));
+  PlayBtn := New(PButton, Init(R, 'Play', cmTransportPlay, bfNormal));
   Insert(PlayBtn);
   X := X + 7;
 
   R.Assign(X, 0, X + 5, 1);
-  RecordBtn := New(PButton, Init(R, 'Rec', cmTransportRecord, bfBroadcast));
+  RecordBtn := New(PButton, Init(R, 'Rec', cmTransportRecord, bfNormal));
   Insert(RecordBtn);
   X := X + 6;
 
   IntervalIdx := 0;
   R.Assign(X, 0, X + 6, 1);
   IntervalBtn := New(PButton, Init(R, IntervalNames[0], cmCycleInterval,
-    bfBroadcast));
+    bfNormal));
   Insert(IntervalBtn);
 end;
 
