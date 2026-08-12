@@ -34,6 +34,7 @@ type
     procedure InitDeskTop; virtual;
     procedure HandleEvent(var Event: TEvent); virtual;
     function GetPalette: PPalette; virtual;
+    procedure Idle; virtual;
   private
     procedure ShowAbout;
     procedure ShowTooSmall(Body: TRect; const Layout: TDysLayout);
@@ -231,6 +232,19 @@ begin
   MessageBox('Dysnomia - Free Vision frontend for Eris'#13#13 +
     'Stage 1: UI shell, not hooked up to the engine yet.', nil,
     mfInformation or mfOKButton);
+end;
+
+{ Free Vision has no timer - TProgram.Idle (see app.pas) is called on every
+  pass of the event loop that finds no key/mouse event waiting, which is the
+  closest thing to one. Without this the transport buttons worked (Play did
+  call AudioEnginePlay) but nothing in the UI ever showed it: no playhead
+  moving, so a press looked like it "did nothing" even when audio was
+  genuinely running. }
+procedure TDysnomiaApp.Idle;
+begin
+  inherited Idle;
+  if (Timeline <> nil) and (Timeline^.Content <> nil) then
+    Timeline^.Content^.UpdatePlayhead;
 end;
 
 procedure TDysnomiaApp.HandleEvent(var Event: TEvent);

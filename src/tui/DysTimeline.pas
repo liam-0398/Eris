@@ -36,12 +36,21 @@ type
     PendingSampleID: Integer;
     PendingLength: Int64;
     FramesPerCol: Int64;
+    ShowPlayhead: Boolean;
+    PlayheadFrame: Int64;
     constructor Init(Bounds: TRect);
     procedure Draw; virtual;
     procedure HandleEvent(var Event: TEvent); virtual;
     procedure BeginOverlay(ASampleID: Integer; ALength: Int64);
     procedure CancelOverlay;
     procedure PlaceOverlay;
+    { Polled from TDysnomiaApp.Idle (see DysnomiaApp.pas) - Free Vision has
+      no timer, but TProgram.Idle runs on every pass of the event loop that
+      finds no key/mouse event waiting, which is close enough to "as fast
+      as the terminal can be redrawn" for a playhead. Only redraws when the
+      position or play/stopped state actually changed, since Idle fires far
+      more often than that. }
+    procedure UpdatePlayhead;
   end;
 
   PDysTimeline = ^TDysTimeline;
@@ -65,7 +74,9 @@ const
   CursorAttr = $70; { light grey bg, black fg, no blink - matches PaneSel }
   ClipAttr   = $1F; { blue bg, bright white fg - a committed clip }
   PendingAttr = $5F; { magenta bg, bright white fg - not placed yet }
+  PlayheadAttr = $4F; { red bg, bright white fg - distinct from both clip colours }
   BlockChar = #219; { CP437 solid block - see tui.md "Half-block glyphs" }
+  PlayheadChar = '|';
 
 { Ported from ArrangementView.PushTrackToEngine (src/ui) - same translation
   from Project's TClip array to the engine's TPlaybackClip array, just not a
@@ -132,12 +143,24 @@ begin
   inherited Init(Bounds);
   GrowMode := 0;
   EventMask := EventMask or evMouseDown or evKeyDown;
+  { Bare TView.Init leaves Options at 0 - ofSelectable is what makes
+    TView.Select (and so Focus, which calls it at every level on the way
+    down - see tui.md's Free Vision notes) actually assign Owner^.Current
+    to Self. Every stock interactive control sets this in its own Init
+    (see TListViewer.Init); a hand-rolled TView descendant has to do the
+    same or Focus silently no-ops on it while still returning True, so
+    keyboard input never actually reaches it - exactly the "Enter does
+    nothing" bug this fixed. ofFirstClick for the same reason mouse focus
+    works on every other pane's content. }
+  Options := Options or (ofSelectable + ofFirstClick);
   CursorTrack := 0;
   CursorFrame := 0;
   Pending := False;
   PendingSampleID := -1;
   PendingLength := 0;
   FramesPerCol := AudioEngine.ProjectSampleRate div PixelsPerSecond;
+  ShowPlayhead := False;
+  PlayheadFrame := 0;
   ActiveTimelineContent := @Self;
 end;
 
@@ -165,9 +188,19 @@ end;
 procedure TDysTimelineContent.Draw;
 var
   B: TDrawBuffer;
-  Col, Track, Row, i, Sec: Integer;
+  Col, Track, Row, i, Sec, PlayCol: Integer;
   Lbl, SecStr: string;
 begin
+  PlayCol := -1;
+  if ShowPlayhead then
+  begin
+    PlayCol := LabelWidth + (PlayheadFrame div FramesPerCol);
+    if (PlayCol < LabelWidth) or (PlayCol > Size.X - 1) then
+      PlayCol := -1; { off the visible grid - draw nothing rather than clamp
+                        it to an edge, which would misleadingly suggest the
+                        playhead is still in view }
+  end;
+
   { Ruler: a tick every column, the elapsed second written out at every
     whole-second column. Jumping Col past a multi-digit label (rather than
     just Inc(Col)) matters once Sec reaches two digits - otherwise the next
@@ -190,6 +223,8 @@ begin
       Inc(Col);
     end;
   end;
+  if PlayCol >= 0 then
+    MoveChar(B[PlayCol], PlayheadChar, PlayheadAttr, 1);
   WriteLine(0, 0, Size.X, 1, B);
 
   { One grid row per track, clipped to however many rows actually fit. }
@@ -224,6 +259,9 @@ begin
 
     if Pending and (Track = CursorTrack) then
       DrawSpan(B, FramesPerCol, Size.X, CursorFrame, PendingLength, PendingAttr);
+
+    if PlayCol >= 0 then
+      MoveChar(B[PlayCol], PlayheadChar, PlayheadAttr, 1);
 
     WriteLine(0, Row, Size.X, 1, B);
   end;
@@ -328,6 +366,21 @@ begin
   Pending := False;
   PendingSampleID := -1;
   DrawView;
+end;
+
+procedure TDysTimelineContent.UpdatePlayhead;
+var
+  NewShow: Boolean;
+  NewFrame: Int64;
+begin
+  NewShow := AudioEngineIsPlaying;
+  NewFrame := AudioEngineGetPosition;
+  if (NewShow <> ShowPlayhead) or (NewShow and (NewFrame <> PlayheadFrame)) then
+  begin
+    ShowPlayhead := NewShow;
+    PlayheadFrame := NewFrame;
+    DrawView;
+  end;
 end;
 
 { TDysTimeline }
