@@ -112,6 +112,24 @@ const
 var
   ActiveToolBar: PDysToolBar = nil;
 
+{ Rudimentary dual-octave QWERTY tracker keyboard - lives here (rather than
+  DysEffectsRack.pas, where the actual note-triggering used to happen) so
+  TDysToolBar.HandleEvent, below, can check a typed key against it without
+  DysWidgets needing to `uses DysEffectsRack` (would be circular: DysEffects
+  Rack already `uses DysWidgets` for TDysPane/TDysBottomPane's own ancestor).
+  Same key table as MainForm.KeyToSemitoneOffset (src/ui). }
+function DysKeyToSemitoneOffset(AChar: Char; out AOffset: Integer): Boolean;
+
+{ TriggerDysKeyboardNote/AdjustDysKeyboardOctave (DysEffectsRack.pas) do the
+  actual work - they need Project/AudioEngine/DysTrackPane.SelectedTrackIndex,
+  none of which DysWidgets can `uses` without the same circularity noted
+  above. DysEffectsRack's own `initialization` section (see its comment)
+  points these at its real implementations before any event ever reaches
+  TDysToolBar - nil here only until then. }
+var
+  TriggerKeyboardNoteProc: procedure(ASemitoneOffset: Integer) = nil;
+  AdjustKeyboardOctaveProc: procedure(ADelta: Integer) = nil;
+
 implementation
 
 uses
@@ -122,6 +140,44 @@ uses
   anywhere in this unit's uses chain shadows Objects.NewStr - the very
   thing TDysToolBar.SetTitle, below, needs. }
 
+function DysKeyToSemitoneOffset(AChar: Char; out AOffset: Integer): Boolean;
+begin
+  Result := True;
+  case UpCase(AChar) of
+    'Z': AOffset := 0;
+    'S': AOffset := 1;
+    'X': AOffset := 2;
+    'D': AOffset := 3;
+    'C': AOffset := 4;
+    'V': AOffset := 5;
+    'G': AOffset := 6;
+    'B': AOffset := 7;
+    'H': AOffset := 8;
+    'N': AOffset := 9;
+    'J': AOffset := 10;
+    'M': AOffset := 11;
+    'Q': AOffset := 12;
+    '2': AOffset := 13;
+    'W': AOffset := 14;
+    '3': AOffset := 15;
+    'E': AOffset := 16;
+    'R': AOffset := 17;
+    '5': AOffset := 18;
+    'T': AOffset := 19;
+    '6': AOffset := 20;
+    'Y': AOffset := 21;
+    '7': AOffset := 22;
+    'U': AOffset := 23;
+    'I': AOffset := 24;
+    '9': AOffset := 25;
+    'O': AOffset := 26;
+    '0': AOffset := 27;
+    'P': AOffset := 28;
+  else
+    Result := False;
+  end;
+end;
+
 { TDysPane }
 
 constructor TDysPane.InitPane(Bounds: TRect; const ATitle: string);
@@ -130,6 +186,19 @@ begin
   Flags := 0;      { no move, grow or close - this is a dock, not a window }
   GrowMode := 0;   { the app repositions panes itself on layout, not FV }
   Focusable := nil;
+  { Without ofFirstClick, TView.HandleEvent's own generic mouse-down check
+    (views.pas: "If (Focus = False) OR (Options and ofFirstClick = 0) Then
+    ClearEvent") swallows the very click that focuses an unfocused pane -
+    standard Turbo Vision "click once to wake the window, again to actually
+    do anything" behaviour. With five docked panes and Tab/Shift+Tab as the
+    normal way to move between them, that was easy to not notice; it became
+    obvious once the effects rack started actually rendering its boxes and
+    got clicked on a lot - switching to any OTHER pane by mouse afterwards
+    needed one throwaway click before the second one actually landed on
+    anything, which read as "the mouse stopped working" for every pane but
+    whichever one was already focused. ofFirstClick here means the same
+    click that focuses a pane is also delivered to whatever's under it. }
+  Options := Options or ofFirstClick;
 end;
 
 function TDysPane.ContentRect: TRect;
@@ -345,6 +414,8 @@ begin
 end;
 
 procedure TDysToolBar.HandleEvent(var Event: TEvent);
+var
+  Offset: Integer;
 begin
   inherited HandleEvent(Event);
   { Tab/Shift+Tab is reserved app-wide for pane switching (see TDysPane),
@@ -375,6 +446,42 @@ begin
     CommitTempo;
     ClearEvent(Event);
     Exit;
+  end;
+  { The instrument keyboard (QWERTY -> note) only plays while the top
+    (transport) pane is the one selected - it used to live on the bottom
+    effects pane instead (moved here wholesale, see DysEffectsRack.pas's
+    session note), which meant typing anywhere that pane happened to still
+    be focused - e.g. naming a file, editing a param's numeric readout -
+    could trigger notes as a side effect. `inherited HandleEvent` above
+    already ran and would have cleared Event.What (set it to evNothing) if
+    Tempo was focused and consumed this as a printed character, so a plain
+    letter/digit only reaches here at all when Tempo ISN'T eating it - no
+    extra focus check needed. Ctrl+Z/Ctrl+X (genuinely distinct bytes, not
+    the raw letters, so no collision with the note keys themselves) shift
+    the octave instead of playing a note. }
+  if Event.What = evKeyDown then
+  begin
+    if Event.KeyCode = kbCtrlZ then
+    begin
+      if Assigned(AdjustKeyboardOctaveProc) then
+        AdjustKeyboardOctaveProc(-1);
+      ClearEvent(Event);
+      Exit;
+    end;
+    if Event.KeyCode = kbCtrlX then
+    begin
+      if Assigned(AdjustKeyboardOctaveProc) then
+        AdjustKeyboardOctaveProc(1);
+      ClearEvent(Event);
+      Exit;
+    end;
+    if DysKeyToSemitoneOffset(Event.CharCode, Offset) then
+    begin
+      if Assigned(TriggerKeyboardNoteProc) then
+        TriggerKeyboardNoteProc(Offset);
+      ClearEvent(Event);
+      Exit;
+    end;
   end;
   if Event.What = evCommand then
   begin

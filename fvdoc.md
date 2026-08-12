@@ -255,6 +255,38 @@ existing in `Drivers.pas` is not evidence a real terminal can generate it;
 check the driver's own sequence table (or the raw-byte case for a
 Ctrl+<letter>) before relying on any KeyCode this framework predefines.
 
+**A selectable `ofTopSelect` view without `ofFirstClick` eats its own
+focusing click.** `TView.HandleEvent`'s generic mouse-down handling
+(`views.pas`):
+
+```pascal
+If (Event.What = evMouseDown) Then
+  If (State AND (sfSelected OR sfDisabled) = 0)
+    AND (Options AND ofSelectable <> 0) Then
+    If (Focus = False) OR (Options AND ofFirstClick = 0)
+      Then ClearEvent(Event);
+```
+
+reads as: on a mouse-down that also happens to focus an unfocused
+selectable view, `ClearEvent` it (swallow it) *unless* `ofFirstClick` is
+set - the classic Turbo-Vision "click once just to wake the window, click
+again to actually do anything" behavior. This runs as part of `Inherited
+HandleEvent` at the top of `TGroup.HandleEvent`/`TWindow.HandleEvent`, so
+it applies to the view *receiving the click*, not just leaf controls - a
+`TWindow`-descendant dock (`ofSelectable` by inheritance) that never
+explicitly sets `ofFirstClick` on itself will always eat its own first
+click this way, even though the click DID succeed at focusing it. In a
+single-window app with several docked panes (see Dysnomia's `TDysPane`)
+this means switching to any unfocused pane by mouse always costs a
+throwaway click before a second click lands on anything inside it - easy
+to miss if Tab/Shift+Tab is the usual way to move focus, but reads as "the
+mouse doesn't work" once mouse-driven pane-switching actually gets used.
+Fix: set `ofFirstClick` on whatever level's `Options` actually receives
+`ofSelectable` (here, the pane base class, in its own `InitPane`/`Init`) -
+not on its children, since the swallow happens at the level that
+`Focus`-succeeds, which is the outermost still-unfocused selectable
+ancestor of whatever got clicked.
+
 **LazUtils is not LCL - `build-dysnomia.sh` now adds its source dir to the
 unit path.** `src/project/ProjectFile.pas` (Eris source, untouched) uses
 `FileUtil.DeleteDirectory`; `FileUtil` lives in the `lazutils` Lazarus

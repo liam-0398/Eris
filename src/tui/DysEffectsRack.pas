@@ -182,49 +182,6 @@ implementation
   scope unshadowed. Str()/Val() (System, no unit needed) cover every number
   <-> string conversion this file needs. }
 
-{ Rudimentary dual-octave QWERTY tracker keyboard - moved here from
-  DysWidgets.pas along with TDysEffectsContent itself, unchanged: same key
-  table as MainForm.KeyToSemitoneOffset (src/ui), ported by hand since this
-  object has no access to Eris's LCL form. Only lives in the bottom
-  (effects) pane per tui.md's Bindings: Esc here leaves it. }
-function DysKeyToSemitoneOffset(AChar: Char; out AOffset: Integer): Boolean;
-begin
-  Result := True;
-  case UpCase(AChar) of
-    'Z': AOffset := 0;
-    'S': AOffset := 1;
-    'X': AOffset := 2;
-    'D': AOffset := 3;
-    'C': AOffset := 4;
-    'V': AOffset := 5;
-    'G': AOffset := 6;
-    'B': AOffset := 7;
-    'H': AOffset := 8;
-    'N': AOffset := 9;
-    'J': AOffset := 10;
-    'M': AOffset := 11;
-    'Q': AOffset := 12;
-    '2': AOffset := 13;
-    'W': AOffset := 14;
-    '3': AOffset := 15;
-    'E': AOffset := 16;
-    'R': AOffset := 17;
-    '5': AOffset := 18;
-    'T': AOffset := 19;
-    '6': AOffset := 20;
-    'Y': AOffset := 21;
-    '7': AOffset := 22;
-    'U': AOffset := 23;
-    'I': AOffset := 24;
-    '9': AOffset := 25;
-    'O': AOffset := 26;
-    '0': AOffset := 27;
-    'P': AOffset := 28;
-  else
-    Result := False;
-  end;
-end;
-
 { Mirrors MainForm.TriggerKeyboardNote (src/ui), targeting DysTrackPane's
   SelectedTrackIndex rather than ArrangementView.KeyboardTrack - moved here
   unchanged from DysWidgets.pas. }
@@ -252,6 +209,27 @@ begin
   AudioEngineTriggerNote(Track, @Sample.Data[StartFrame * Sample.Channels],
     TrimmedCount, Sample.Channels, TotalOffset,
     Power(10, Project.TrackInstrumentGainDb[Track] / 20));
+end;
+
+{ Ctrl+Z/Ctrl+X on the transport pane (see TDysToolBar.HandleEvent,
+  DysWidgets.pas) - -4..4 matches MainForm.SamplerOctaveDownClick/
+  UpClick's own clamp (src/ui), the only other place TrackOctave is
+  ever adjusted. }
+procedure AdjustDysKeyboardOctave(ADelta: Integer);
+var
+  Track: Integer;
+begin
+  Track := SelectedTrackIndex;
+  if ADelta < 0 then
+  begin
+    if Project.TrackOctave[Track] > -4 then
+      Dec(Project.TrackOctave[Track]);
+  end
+  else
+  begin
+    if Project.TrackOctave[Track] < 4 then
+      Inc(Project.TrackOctave[Track]);
+  end;
 end;
 
 { The A/I/S-plus-number badge at the very left of row 0 - moved here
@@ -853,10 +831,22 @@ end;
   DysnomiaApp.RefreshAfterProjectChange's own engine-slot clear settled on
   (see tui.md) - there are at most 24 effects on a track, so the cost is
   irrelevant next to correctness. }
+{ Shelf packing, one column of width EffBoxWidth at a time: a box is
+  stacked under whatever's already in the current column as long as it
+  still fits there; once it doesn't (either the column's already full, or
+  this one box alone is taller than the column has room left for), a new
+  column starts to its right and the box goes at the top of THAT one
+  instead. A box's own height is always clamped to fit within a single
+  column (Size.Y - 1, see H below) before this decision is made, so "one
+  box alone is taller than the column" can only happen for the SECOND-plus
+  box in a column, never the first - a lone box that's tall always gets
+  its own column outright rather than being squeezed or clipped. This is
+  what makes two short effects stack one above the other while a tall one
+  pushes over to the right instead of overlapping either of them. }
 procedure TDysEffectsContent.RebuildBoxes;
 var
   V: PView;
-  I, X, H, RowCount, Trk, Count: Integer;
+  I, X, Y, H, RowCount, Trk, Count: Integer;
   Box: PDysEffectBox;
   R: TRect;
 begin
@@ -877,20 +867,26 @@ begin
   Count := Project.TrackEffectCount[Trk];
   EffectCount := Count;
   X := 0;
+  Y := 1; { row 0 is the track-badge/hint line, boxes start below it }
   for I := 0 to Count - 1 do
   begin
-    if X + EffBoxWidth > Size.X then
-      Break; { no horizontal scroll yet - later boxes just don't fit }
     RowCount := EffectRowCounts[Project.TrackEffects[Trk][I].Kind];
     H := RowCount + 2;
     if H > Size.Y - 1 then
       H := Size.Y - 1;
     if H < 2 then
       H := 2;
-    R.Assign(X, 1, X + EffBoxWidth, 1 + H);
+    if (Y > 1) and (Y + H > Size.Y) then
+    begin
+      X := X + EffBoxWidth + 1;
+      Y := 1;
+    end;
+    if X + EffBoxWidth > Size.X then
+      Break; { no horizontal scroll yet - later boxes just don't fit }
+    R.Assign(X, Y, X + EffBoxWidth, Y + H);
     Box := New(PDysEffectBox, Init(R, Trk, I));
     Insert(Box);
-    X := X + EffBoxWidth + 1;
+    Y := Y + H;
   end;
   DrawView;
 end;
@@ -979,7 +975,6 @@ end;
   is fixing (see tui.md's session note). }
 procedure TDysEffectsContent.HandleEvent(var Event: TEvent);
 var
-  Offset: Integer;
   Pt: TPoint;
 begin
   { A mouse click doesn't grant keyboard focus by itself (see fvdoc's
@@ -1014,21 +1009,18 @@ begin
     ClearEvent(Event);
     Exit;
   end;
-  if Event.What = evKeyDown then
+  { Esc: back to the track list. The instrument keyboard itself no longer
+    lives on this pane at all - see DysWidgets.TDysToolBar.HandleEvent -
+    typing here (naming things, editing a param's numeric readout, etc.)
+    used to also risk triggering notes as a side effect of whatever pane
+    happened to be focused; now only the transport pane's own keystrokes
+    ever reach TriggerKeyboardNoteProc. }
+  if (Event.What = evKeyDown) and (Event.KeyCode = kbEsc) then
   begin
-    if Event.KeyCode = kbEsc then
-    begin
-      if ActiveTrackPane <> nil then
-        ActiveTrackPane^.FocusPane;
-      ClearEvent(Event);
-      Exit;
-    end;
-    if DysKeyToSemitoneOffset(Event.CharCode, Offset) then
-    begin
-      TriggerDysKeyboardNote(Offset);
-      ClearEvent(Event);
-      Exit;
-    end;
+    if ActiveTrackPane <> nil then
+      ActiveTrackPane^.FocusPane;
+    ClearEvent(Event);
+    Exit;
   end;
   inherited HandleEvent(Event);
 end;
@@ -1051,5 +1043,12 @@ begin
   Content^.RebuildBoxes;
   inherited FocusPane;
 end;
+
+initialization
+  { Wires DysWidgets.TDysToolBar.HandleEvent's two callback vars to the
+    real implementations - see DysWidgets.pas's own comment on why it
+    can't `uses DysEffectsRack` directly to call these itself. }
+  TriggerKeyboardNoteProc := @TriggerDysKeyboardNote;
+  AdjustKeyboardOctaveProc := @AdjustDysKeyboardOctave;
 
 end.
