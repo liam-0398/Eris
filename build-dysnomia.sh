@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# Build Dysnomia, the Free Vision frontend for Eris, for the host
-# (x86_64-linux). This is the development target only - Dysnomia ships on
-# powerpc-darwin, see build-dysnomia-ppc.sh.
+# Build Dysnomia, the Free Vision frontend for Eris, for x64 linux. This is
+# the primary target until Dysnomia works as a real application here; the
+# PowerPC port comes after, see build-dysnomia-ppc.sh.
 #
 # Plain fpc, no lazbuild, no LCL. The unit search path below is the whole
 # isolation mechanism: src/ui and src/themeengine are deliberately absent,

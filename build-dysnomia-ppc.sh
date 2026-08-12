@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 #
-# Cross-build Dysnomia for powerpc-darwin (G4, Tiger+). This is the target
-# that matters - Dysnomia exists so Eris has a frontend that ships on PPC.
+# Cross-build Dysnomia for powerpc-darwin (G4, Tiger+). Phase 2 only - the
+# x64 build is the one to work against until Dysnomia is a finished
+# application, see tui.md. This script exists now so the PPC path is never
+# a surprise, not so it gets used yet.
 #
-# Same source, same flags as the host build, different target triple.
+# Same source, same flags as the x64 build, different target triple.
 # Because no Lazarus is involved there is no Carbon widgetset to satisfy
 # and no host Mac needed - this produces a shippable binary. A TUI binary
 # is a plain CLI executable, so no .app bundle is required.
