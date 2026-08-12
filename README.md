@@ -90,10 +90,14 @@ export.
 
 ## Dysnomia
 
-A TUI frontend for Eris aiming to implement as many features as possible.
+A **WIP** TUI frontend for Eris aiming to implement as many features as possible.
 
-- **Incredibly Resource Efficeint**
-- **Cross-Platform**: A bi motivator for making this is to run on anything and
+- **Less bloat, more power**: Keyboard driven (mouse optional) interface that 
+gives you the choice to run this on practically a toaster and have the full power
+of a complex audio engine availible anywhere on any of your tech. (Effects count 
+and buffer size obviously dependant on if you are trying to run this on an M68k
+or not lol)
+- **Cross-Platform**: A big motivator for making this is to run on anything and
 everything, including running over SSH. Support for PowerPC Macs is coming soon
 and it will target G4s, optimized with Altivec and inline asm for the absolute
 best performance. Theoretically it will compile on any platform FPC and FPC's 

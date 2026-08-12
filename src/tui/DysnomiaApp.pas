@@ -14,7 +14,7 @@ interface
 uses
   SysUtils, Objects, Drivers, Views, Menus, Dialogs, App,
   DysGeometry, DysWidgets, DysFilePane, DysTrackPane, DysTimeline,
-  DysPreferences, Project, Config;
+  DysPreferences, DysFileDialog, Project, Config, ProjectFile;
 
 const
   cmAbout = 1000;
@@ -40,11 +40,14 @@ const
 type
   PDysnomiaApp = ^TDysnomiaApp;
   TDysnomiaApp = object(TApplication)
-    ToolBar: PDysToolBar;
-    BottomBar: PDysBottomBar;
+    ToolBarPane: PDysToolBarPane;
+    BottomPane: PDysBottomPane;
     FilePane: PDysFilePane;
     TrackPane: PDysTrackPane;
     Timeline: PDysTimeline;
+    { '' = no project opened/saved yet this session - Save falls back to
+      Save As until this is set, same as MainForm.FCurrentProjectPath. }
+    CurrentProjectPath: string;
     constructor Init;
     destructor Done; virtual;
     procedure InitMenuBar; virtual;
@@ -56,6 +59,11 @@ type
   private
     procedure ShowAbout;
     procedure ShowTooSmall(Body: TRect; const Layout: TDysLayout);
+    procedure WaitForEngineIdle;
+    procedure RefreshAfterProjectChange;
+    procedure DoFileOpen;
+    procedure DoFileSave;
+    procedure DoFileSaveAs;
   end;
 
 implementation
@@ -227,9 +235,18 @@ begin
     ' - currently ' + IntToStr(Layout.Cols) + 'x' + IntToStr(Layout.Rows))));
 end;
 
+{ All five docks are now siblings in one DeskTop group (rather than the
+  toolbar/bottom bar living directly in the App, outside DeskTop, as they
+  did as plain 1-row bars) - TDysPane's Tab/Shift+Tab handler works off
+  Owner^.SelectNext, so panes only cycle together with Tab if they share
+  the same Owner. DeskTop now spans the WHOLE body (menu bar to status
+  line), not just the middle strip between the two bars; ToolBarPane and
+  BottomPane occupy their own rows within it exactly like before, just as
+  DeskTop children instead of App children. Insertion order is the Tab
+  order: top, then left-to-right across the middle, then bottom. }
 procedure TDysnomiaApp.InitDeskTop;
 var
-  R, BodyR, Local: TRect;
+  R, Local: TRect;
   Layout: TDysLayout;
 begin
   GetExtent(R);
@@ -245,28 +262,132 @@ begin
     Exit;
   end;
 
-  ToolBar := New(PDysToolBar, Init(Layout.ToolBar));
-  Insert(ToolBar);
-  BottomBar := New(PDysBottomBar, Init(Layout.BottomBar));
-  Insert(BottomBar);
+  DeskTop := New(PDeskTop, Init(R));
 
-  BodyR.Assign(R.A.X, Layout.ToolBar.B.Y, R.B.X, Layout.BottomBar.A.Y);
-  DeskTop := New(PDeskTop, Init(BodyR));
+  Local := Layout.ToolBar;
+  Local.Move(-R.A.X, -R.A.Y);
+  ToolBarPane := New(PDysToolBarPane, InitPane(Local));
+  DeskTop^.Insert(ToolBarPane);
 
   Local := Layout.FilePane;
-  Local.Move(-BodyR.A.X, -BodyR.A.Y);
+  Local.Move(-R.A.X, -R.A.Y);
   FilePane := New(PDysFilePane, InitPane(Local));
   DeskTop^.Insert(FilePane);
 
+  Local := Layout.Timeline;
+  Local.Move(-R.A.X, -R.A.Y);
+  Timeline := New(PDysTimeline, InitPane(Local));
+  DeskTop^.Insert(Timeline);
+
   Local := Layout.TrackPane;
-  Local.Move(-BodyR.A.X, -BodyR.A.Y);
+  Local.Move(-R.A.X, -R.A.Y);
   TrackPane := New(PDysTrackPane, InitPane(Local));
   DeskTop^.Insert(TrackPane);
 
-  Local := Layout.Timeline;
-  Local.Move(-BodyR.A.X, -BodyR.A.Y);
-  Timeline := New(PDysTimeline, InitPane(Local));
-  DeskTop^.Insert(Timeline);
+  Local := Layout.BottomBar;
+  Local.Move(-R.A.X, -R.A.Y);
+  BottomPane := New(PDysBottomPane, InitPane(Local));
+  DeskTop^.Insert(BottomPane);
+end;
+
+{ Mirrors MainForm.WaitForEngineIdle (src/ui): a queued AudioEngineStop
+  hasn't necessarily drained the playback thread yet, and LoadProject/
+  NewProject free every sample's memory - freeing it out from under a
+  thread that's still reading TrackClips is a use-after-free, not just a
+  stopped-too-late cosmetic issue. No timeout/cancel here (Dysnomia has no
+  background-busy flag to bail out through like MainForm's FBackgroundBusy
+  does) - Load/Save block the whole TUI until this returns, acceptable for
+  a first cut per tui.md's stage list. }
+procedure TDysnomiaApp.WaitForEngineIdle;
+begin
+  while AudioEngineIsBusy do
+    Sleep(1);
+end;
+
+{ Common to Open and (implicitly, via Project.NewProject) New: the track
+  count, clip contents and sample pool can all have changed size or gone
+  away entirely, so every pane that caches anything derived from Project
+  state needs a fresh Draw, and the timeline's cursor needs to land
+  somewhere guaranteed valid rather than wherever it happened to be in the
+  project that just closed. }
+procedure TDysnomiaApp.RefreshAfterProjectChange;
+begin
+  if Timeline <> nil then
+  begin
+    Timeline^.Content^.CursorTrack := 0;
+    Timeline^.Content^.CursorFrame := 0;
+    Timeline^.Content^.CursorInLabel := True;
+    Timeline^.Content^.CancelOverlay;
+    Timeline^.Content^.LoopStart := -1;
+    Timeline^.Content^.LoopEnd := -1;
+    Timeline^.Content^.DrawView;
+  end;
+  if TrackPane <> nil then
+    TrackPane^.Listing^.DrawView;
+  if FilePane <> nil then
+    FilePane^.Listing^.DrawView;
+end;
+
+procedure TDysnomiaApp.DoFileOpen;
+var
+  Path: string;
+  StartDir: string;
+begin
+  if CurrentProjectPath <> '' then
+    StartDir := ExtractFileDir(CurrentProjectPath)
+  else
+    StartDir := DysFilePane.DefaultBrowseDir;
+  if not DysFileDialog.RunFileDialog(fdmOpen, StartDir, '', Path) then
+    Exit;
+
+  AudioEngineStop;
+  WaitForEngineIdle;
+  if not ProjectFile.LoadProject(Path) then
+  begin
+    MessageBox('Could not open "' + Path + '" as an Eris project.', nil,
+      mfError or mfOKButton);
+    Exit;
+  end;
+  CurrentProjectPath := Path;
+  RefreshAfterProjectChange;
+end;
+
+procedure TDysnomiaApp.DoFileSave;
+begin
+  if CurrentProjectPath = '' then
+  begin
+    DoFileSaveAs;
+    Exit;
+  end;
+  if not ProjectFile.SaveProject(CurrentProjectPath) then
+    MessageBox('Could not save "' + CurrentProjectPath + '".', nil,
+      mfError or mfOKButton);
+end;
+
+procedure TDysnomiaApp.DoFileSaveAs;
+var
+  Path: string;
+  StartDir, StartName: string;
+begin
+  if CurrentProjectPath <> '' then
+  begin
+    StartDir := ExtractFileDir(CurrentProjectPath);
+    StartName := ExtractFileName(CurrentProjectPath);
+  end
+  else
+  begin
+    StartDir := DysFilePane.DefaultBrowseDir;
+    StartName := '';
+  end;
+  if not DysFileDialog.RunFileDialog(fdmSaveAs, StartDir, StartName, Path) then
+    Exit;
+
+  if not ProjectFile.SaveProject(Path) then
+  begin
+    MessageBox('Could not save "' + Path + '".', nil, mfError or mfOKButton);
+    Exit;
+  end;
+  CurrentProjectPath := Path;
 end;
 
 procedure TDysnomiaApp.ShowAbout;
@@ -298,25 +419,21 @@ begin
       cmAbout: ShowAbout;
       cmFileNew:
         begin
-          { The one File item that's real, not a stub - see tui.md: it
-            touches no disk, so it's exempt from "don't implement load/save
-            yet". Mirrors MainForm.FileNewClick's Project half (no
-            standalone-bundle/undo/title-bar bookkeeping to mirror here). }
+          { Mirrors MainForm.FileNewClick: stop and drain the engine before
+            NewProject frees every sample's memory out from under it (see
+            WaitForEngineIdle), same protocol Open now follows too. }
+          AudioEngineStop;
+          WaitForEngineIdle;
           Project.NewProject;
-          if Timeline <> nil then
-            Timeline^.Content^.DrawView;
-          if TrackPane <> nil then
-            TrackPane^.Listing^.DrawView;
+          CurrentProjectPath := '';
+          RefreshAfterProjectChange;
         end;
       cmFileOpen:
-        MessageBox('Open is not wired yet - project load/save is future work.',
-          nil, mfInformation or mfOKButton);
+        DoFileOpen;
       cmFileSave:
-        MessageBox('Save is not wired yet - project load/save is future work.',
-          nil, mfInformation or mfOKButton);
+        DoFileSave;
       cmFileSaveAs:
-        MessageBox('Save As is not wired yet - project load/save is future work.',
-          nil, mfInformation or mfOKButton);
+        DoFileSaveAs;
       cmFileExport:
         MessageBox('Export is not wired yet - project load/save is future work.',
           nil, mfInformation or mfOKButton);

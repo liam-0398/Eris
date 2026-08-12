@@ -37,10 +37,12 @@ type
     constructor InitPane(Bounds: TRect);
   end;
 
-implementation
-
 const
+  { Shared with DysFileDialog (project Load/Save/Save As), which browses
+    from the same starting point as this pane's own sample browser. }
   DefaultBrowseDir = '/NFS/Music/Production';
+
+implementation
 
 { Plain insertion sort, case-insensitive - the lists this sorts (one
   directory's worth of entries) are never long enough for anything fancier

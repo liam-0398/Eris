@@ -53,20 +53,50 @@ type
     IntervalIdx: Integer;
     constructor Init(Bounds: TRect);
     procedure HandleEvent(var Event: TEvent); virtual;
+    { Shared by the Play button's own cmTransportPlay case and the
+      timeline's Space key (see DysTimeline.HandleEvent / tui.md's
+      Bindings) - one implementation, same "Stop wins if already playing,
+      else only start if there's a clip" rule either way gets there. }
+    procedure TogglePlayPause;
   private
     procedure SetTitle(B: PButton; const S: string);
     procedure UpdateButtons;
   end;
 
-  PDysBottomBar = ^TDysBottomBar;
-  TDysBottomBar = object(TView)
+  { Wraps TDysToolBar in a docked, titled, Tab-reachable pane - same
+    border/focus machinery as the file/track/timeline docks (TDysPane),
+    so the transport bar joins the same Tab/Shift+Tab cycle instead of
+    living outside it. See tui.md's Layout/Bindings. }
+  PDysToolBarPane = ^TDysToolBarPane;
+  TDysToolBarPane = object(TDysPane)
+    Bar: PDysToolBar;
+    constructor InitPane(Bounds: TRect);
+  end;
+
+  { The bottom dock: blank for now (stage 7 stub, see tui.md) - just the
+    pane and its Ctrl+Enter/right-click dropdown stub, no widgets yet. }
+  PDysEffectsContent = ^TDysEffectsContent;
+  TDysEffectsContent = object(TView)
     constructor Init(Bounds: TRect);
     procedure Draw; virtual;
     procedure HandleEvent(var Event: TEvent); virtual;
   end;
 
+  PDysBottomPane = ^TDysBottomPane;
+  TDysBottomPane = object(TDysPane)
+    Content: PDysEffectsContent;
+    constructor InitPane(Bounds: TRect);
+  end;
+
 const
   IntervalNames: array[0..3] of string = ('1/4', '1/8', '1/16', '1bar');
+
+{ Set once, by TDysToolBar.Init - there is exactly one transport bar in
+  this single-window app. DysTimeline reaches through this to run Space's
+  play/pause (see tui.md's Bindings), the same "global points at the one
+  instance" pattern ActiveTrackPane/ActiveTimelineContent already use. }
+var
+  ActiveToolBar: PDysToolBar = nil;
 
 implementation
 
@@ -184,6 +214,8 @@ begin
   IntervalBtn := New(PButton, Init(R, IntervalNames[0], cmCycleInterval,
     bfNormal));
   Insert(IntervalBtn);
+
+  ActiveToolBar := @Self;
 end;
 
 procedure TDysToolBar.SetTitle(B: PButton; const S: string);
@@ -207,9 +239,44 @@ begin
   SetTitle(IntervalBtn, IntervalNames[IntervalIdx]);
 end;
 
+{ Mirrors MainForm.PlayPauseClick: Stop wins if already playing, otherwise
+  only start if there's actually a clip somewhere - see AudioEngineHasClip -
+  so Play on an empty project does nothing rather than silently "playing"
+  nothing. Factored out of the Play button's own cmTransportPlay case so
+  the timeline's Space key (tui.md's Bindings) triggers the exact same
+  logic and button-label update, via ActiveToolBar. }
+procedure TDysToolBar.TogglePlayPause;
+begin
+  if AudioEngineIsPlaying then
+  begin
+    AudioEngineStop;
+    Playing := False;
+  end
+  else if AudioEngineHasClip then
+  begin
+    AudioEnginePlay;
+    Playing := True;
+  end;
+  UpdateButtons;
+end;
+
 procedure TDysToolBar.HandleEvent(var Event: TEvent);
 begin
   inherited HandleEvent(Event);
+  { Tab/Shift+Tab is reserved app-wide for pane switching (see TDysPane),
+    so moving between this pane's own widgets - Tempo, then the four
+    buttons - uses Up/Down instead, same as any other in-pane cursor
+    move; Enter/Space then activate whatever's focused via Free Vision's
+    own default-button/press handling, no extra code needed for that
+    part. Left/Right are deliberately left alone: Tempo is a text field
+    and needs them for cursor movement within its own contents. }
+  if (Event.What = evKeyDown) and
+     ((Event.KeyCode = kbUp) or (Event.KeyCode = kbDown)) then
+  begin
+    SelectNext(Event.KeyCode = kbDown);
+    ClearEvent(Event);
+    Exit;
+  end;
   if Event.What = evCommand then
   begin
     case Event.Command of
@@ -227,23 +294,7 @@ begin
           UpdateButtons;
         end;
       cmTransportPlay:
-        begin
-          { Mirrors MainForm.PlayPauseClick: Stop wins if already playing,
-            otherwise only start if there's actually a clip somewhere - see
-            AudioEngineHasClip - so Play on an empty project does nothing
-            rather than silently "playing" nothing. }
-          if AudioEngineIsPlaying then
-          begin
-            AudioEngineStop;
-            Playing := False;
-          end
-          else if AudioEngineHasClip then
-          begin
-            AudioEnginePlay;
-            Playing := True;
-          end;
-          UpdateButtons;
-        end;
+        TogglePlayPause;
       cmTransportRecord:
         begin
           Recording := not Recording;
@@ -261,29 +312,52 @@ begin
   end;
 end;
 
-{ TDysBottomBar }
+{ TDysToolBarPane }
 
-constructor TDysBottomBar.Init(Bounds: TRect);
+constructor TDysToolBarPane.InitPane(Bounds: TRect);
+var
+  R: TRect;
+begin
+  inherited InitPane(Bounds, 'Transport');
+  R := ContentRect;
+  Bar := New(PDysToolBar, Init(R));
+  Insert(Bar);
+  Focusable := Bar^.Tempo;
+end;
+
+{ TDysEffectsContent }
+
+constructor TDysEffectsContent.Init(Bounds: TRect);
 begin
   inherited Init(Bounds);
   GrowMode := 0;
   EventMask := EventMask or evMouseDown or evKeyDown;
+  { Same reason DysTimelineContent needs this - see tui.md's Free Vision
+    notes ("Nothing is focused by default"): a hand-rolled TView has to
+    opt itself into Select/Focus, a stock control does this in its own
+    Init already. }
+  Options := Options or (ofSelectable + ofFirstClick);
 end;
 
-procedure TDysBottomBar.Draw;
+procedure TDysEffectsContent.Draw;
 var
   B: TDrawBuffer;
   C: Word;
   S: string;
+  Row: Integer;
 begin
   C := GetColor(1);
-  MoveChar(B, ' ', C, Size.X);
   S := ' effects: (none yet - Ctrl+Enter or right-click to add) ';
-  MoveStr(B, S, C);
-  WriteLine(0, 0, Size.X, 1, B);
+  for Row := 0 to Size.Y - 1 do
+  begin
+    MoveChar(B, ' ', C, Size.X);
+    if Row = 0 then
+      MoveStr(B, S, C);
+    WriteLine(0, Row, Size.X, 1, B);
+  end;
 end;
 
-procedure TDysBottomBar.HandleEvent(var Event: TEvent);
+procedure TDysEffectsContent.HandleEvent(var Event: TEvent);
 begin
   inherited HandleEvent(Event);
   if ((Event.What = evKeyDown) and (Event.KeyCode = kbCtrlEnter)) or
@@ -294,6 +368,19 @@ begin
       mfInformation or mfOKButton);
     ClearEvent(Event);
   end;
+end;
+
+{ TDysBottomPane }
+
+constructor TDysBottomPane.InitPane(Bounds: TRect);
+var
+  R: TRect;
+begin
+  inherited InitPane(Bounds, 'Effects');
+  R := ContentRect;
+  Content := New(PDysEffectsContent, Init(R));
+  Insert(Content);
+  Focusable := Content;
 end;
 
 end.

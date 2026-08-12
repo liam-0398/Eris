@@ -21,6 +21,11 @@ TARGET=${TARGET:-x86_64-linux}
 OUTDIR=${OUTDIR:-dysnomia-bin}
 UNITDIR=${UNITDIR:-dysnomia-units/$TARGET}
 OPT=${OPT:--O3}
+# LazUtils source (FileUtil etc., pulled in by src/project/ProjectFile.pas
+# for Load/Save) - a Lazarus-IDE-adjacent package, not LCL: no widgetset,
+# no Forms/Graphics, safe under the Isolation rule in tui.md (only src/ui
+# and src/themeengine are actually forbidden).
+LAZUTILSDIR=${LAZUTILSDIR:-$HOME/fpcupdeluxe/lazarus/components/lazutils}
 
 mkdir -p "$OUTDIR" "$UNITDIR"
 
@@ -28,6 +33,7 @@ mkdir -p "$OUTDIR" "$UNITDIR"
   -Mobjfpc -Sh $OPT -Xs \
   -FE"$OUTDIR" -FU"$UNITDIR" \
   -Fu"$FPCDIR/units/$TARGET/fv" \
+  -Fu"$LAZUTILSDIR" \
   -Fusrc/tui \
   -Fusrc/aengine -Fusrc/abackend -Fusrc/project -Fusrc/util \
   -dERIS_TUI \

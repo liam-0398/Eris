@@ -586,6 +586,19 @@ begin
           ClearEvent(Event);
           Exit;
         end;
+      { Space is play/pause ONLY here, with the timeline focused - see
+        tui.md's Bindings. Everywhere else Space is left alone (a file
+        pane row, a track row, a toolbar button all have their own
+        meaning for it, or none). Routed through DysWidgets.ActiveToolBar
+        so this runs the exact same AudioEngineIsPlaying/HasClip logic
+        and button-label update the Play button itself uses. }
+      kbSpaceBar:
+        begin
+          if ActiveToolBar <> nil then
+            ActiveToolBar^.TogglePlayPause;
+          ClearEvent(Event);
+          Exit;
+        end;
       { Same operations the Edit menu's Copy/Paste/Duplicate/Split/Delete
         items call (DysnomiaApp.HandleEvent) - bound directly here too, same
         dual-binding ArrangementView.KeyDown/MainForm's Edit menu use in

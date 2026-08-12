@@ -13,7 +13,10 @@ uses
 
 const
   MinCols = 100;
-  MinRows = 30;
+  { ToolBarHeight (3) + BottomBarHeight (= FilePaneWidth, 24) + enough body
+    rows left over for File/Track/Timeline to still be usable (bordered
+    panes need at least 3: top border, one content row, bottom border). }
+  MinRows = 40;
 
   { Legacy xterm mouse mode (1000) encodes column/row in one byte each and
     caps at 223. SGR mode (1006) lifts that cap but Tiger's X11 shipped an
@@ -40,8 +43,13 @@ const
 
   FilePaneWidth = 24;
   TrackPaneWidth = 8;
-  ToolBarHeight = 1;
-  BottomBarHeight = 1;
+  { The transport bar is now a bordered TDysPane (see DysWidgets) so it can
+    take part in Tab/Shift+Tab pane cycling like every other dock - 3, not
+    1: one row of content plus a top and bottom border row. }
+  ToolBarHeight = 3;
+  { The effects/widgets pane at the bottom is square with the file pane
+    rotated on its side - as tall as the file pane is wide - per tui.md. }
+  BottomBarHeight = FilePaneWidth;
 
 type
   TDysLayout = record
