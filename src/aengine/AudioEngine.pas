@@ -1704,73 +1704,79 @@ begin
 end;
 
 const
-  { AU aims for this synthesis hop and then rounds it to the nearest whole
-    number of fundamental periods. That rounding is the entire mechanism: it
-    puts the timeline grid the grains sit on and the source grid their reads
-    snap to on the SAME lattice - see the header below. }
-  AudioTargetHopMs = 28;
-  { declick across an anchor handover, where one grain lattice ends and the
+  { declick across an anchor handover, where one region's read ends and the
     next one begins. It lands in the pre-attack gap by construction, since
     DetectTransients already backs every boundary off into the quietest block
     before the attack, so it never softens the attack itself. }
   AudioAnchorFadeFrames = 64;
 
 { ---------------------------------------------------------------------------
-  Audio warp ("AU"): period-synchronous overlap-add, for sustained HARMONIC
-  material - pads, played instruments, the recorded output of a sampler.
+  Audio warp ("AU"): sparse period splicing, for sustained material that is
+  neither drums nor monophonic bass - pads, played instruments, chopped
+  sample-and-hold recordings, the recorded output of a sampler.
 
   Beats cannot serve this material and no setting makes it. A stretched Beats
   slice fills its surplus timeline by ping-ponging over its own back half, so
-  a pad gets played backwards for a fifth of every slice at the ratios a
-  quantise produces, on a fixed cycle - that periodicity is the warble. Beats
-  is right for drums, where the slices are whole hits and the fill lands in a
-  decay nobody is tracking pitch through. LF is right for monophonic sub. AU
-  is for the polyphonic sustained middle, and fills time by inserting or
-  deleting whole waveform PERIODS instead of reversing anything.
+  the audio plays BACKWARDS for a fifth of every slice at the ratios a quantise
+  produces, on a fixed cycle - that periodicity is the warble. Beats is right
+  for drums, where the slices are whole hits and the fill lands in a decay
+  nobody tracks pitch through. LF is right for monophonic sub. AU covers the
+  middle, and buys its time by repeating or dropping whole waveform PERIODS
+  rather than reversing anything.
 
-  Why this is not the thing TonesClipSample's header rejects. That header is
-  right: snapping grain starts to a whole multiple of the detected period,
-  on its own, sawtooths - every N grains it duplicates or skips a cycle, and
-  where two grains land anti-phase they cancel and where they land in phase
-  they sum to +6dB. Both of those come from the SYNTHESIS hop being unrelated
-  to the period, which leaves the snap correcting an error it also keeps
-  re-creating. Here the hop is itself a whole number of periods, so:
+  The thing to understand about this design is where the artifacts are allowed
+  to live. Between splices the read is a plain 1:1 walk through the source -
+  not a blend, not a resample, bit-identical to the original audio. ALL of the
+  stretch is paid for at discrete splice points, spaced
 
-    grain n reads   Src(n) = Anchor + round(n * Hop / (ratio * P)) * P
-    grain n plays at    TL(n) = AnchorTL + n * Hop,   Hop = m * P
+    Step = P * SegTimelineLen / |SegTimelineLen - SegSourceLen|
 
-  and the source offset between the two grains overlapping any output frame
-  is Hop - (Src(n+1) - Src(n)) = (m - j) * P for integer j. An exact whole
-  number of periods, always. Every harmonic of the fundamental is therefore
-  phase-aligned across the overlap - there is no anti-phase case to cancel,
-  and no phase jump when a cycle is duplicated or dropped, because a repeated
-  period IS the waveform continuing. What is left is a timing error bounded by
-  P/2 (about 4.5ms on a 110Hz root, 1ms at 440Hz), which is invisible against
-  the sixteenth-note corrections this exists to make.
+  timeline frames apart, where the read jumps back by exactly one period (to
+  stretch) or forward by one (to compress), crossfaded over a window of about
+  a period. So the fraction of output that is a crossfade at all is roughly
+  Fade/Step, which at the ratios a quantise produces is small and at ratio 1
+  is zero.
 
-  The +6dB is separately excluded: the two grain windows are amplitude-
-  complementary (w and 1-w), not power-complementary. Power-complementary is
-  correct for summing UNCORRELATED signals and would indeed give +6dB here,
-  because these two are deliberately correlated. Amplitude-complementary sums
-  correlated content to exactly unity, which is what this needs.
+  That fraction is the entire quality story, and it is why this replaced a
+  50%-overlap OLA that snapped its grain starts to the period lattice. That
+  version was correct about phase - the two overlapping grains really did
+  differ by a whole number of periods - but it was ALWAYS crossfading, so
+  whenever that whole number was not zero the output combed continuously, and
+  it alternated between combing and transparent at the hop rate. Around 35Hz,
+  heard as a fast tearing roughness rather than a wobble. Being right about
+  phase does not help if the material's phase is not what the period says it
+  is, which brings us to:
 
-  That leaves the third objection in TonesClipSample's header, which is not
-  answerable and is instead the reason both modes exist: the snap assumes ONE
-  period for the whole sample. A gliding 808 does not have one - so it keeps
-  LF. A pad, a held chord, a sampled instrument does, which is exactly the
-  material AU is for.
+  Perfect period alignment is NOT assumed, because on the real material it is
+  not available. An orchestral chop, a chord, anything with strings, brass,
+  room or reverb in it is substantially INHARMONIC - its partials are not
+  multiples of whatever DetectFundamentalPeriod settled on, so shifting by P
+  does not bring them back into phase and a crossfade across that shift combs
+  them. There is no period that fixes that. What there is instead is the
+  option to spend as little time as possible inside a crossfade, which is what
+  this does: the harmonic part of the signal splices cleanly because P suits
+  it, the inharmonic part combs for Fade frames every Step frames, and the
+  rest of the time nothing is happening to the audio at all.
+
+  This is also why TonesClipSample's header rejects period snapping and is
+  right to. Its objections were that the snap sawtooths, and that where two
+  grains land anti-phase they cancel while in phase they sum to +6dB. Both are
+  properties of a continuous overlap, and neither survives here: outside a
+  splice there is only one read, so there is nothing to cancel against and
+  nothing to sum. Its third objection - that a single P for a whole sample is
+  a fiction on gliding material - stands, and is why LF still exists for 808s.
 
   Two properties worth keeping true when editing this:
 
-  * Ratio 1 is bit-transparent. Hop = m * P makes n * Hop / P the integer
-    n * m, so the snap is exact, both grains resolve to the SAME read
-    position, and w * x + (1 - w) * x = x for any w - the window never has to
-    be exact for the passthrough to be.
+  * Ratio 1 is bit-transparent, and so is every frame outside a splice at any
+    ratio. SegTimelineLen = SegSourceLen makes Step infinite, the splice
+    machinery drops out entirely and the read is AnchorSrc + u.
 
-  * Transients are never granulated across. The lattice restarts at every
-    detected onset, and at a restart grain 0 sits at w = 1 reading the anchor
-    itself, so an attack is reproduced exactly rather than repeated or
-    truncated. This is always on; there is nothing to configure.
+  * Transients are never spliced across. The read restarts at every detected
+    onset, exactly on the onset, and the first splice cannot occur until
+    Step/2 frames after it - so an attack and the audio immediately behind it
+    are reproduced untouched rather than repeated or crossfaded. This is
+    always on; there is nothing to configure.
   --------------------------------------------------------------------------- }
 function AudioClipSample(Clip: PPlaybackClip; AClipRelativeFrame: Int64;
   AChannel: Integer; AHintK: PInteger): Single;
@@ -1778,7 +1784,7 @@ var
   k: Integer;
   SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen, SegEnd: Int64;
   FirstTrans, TransInSeg: Integer;
-  P, Hop, NominalSrc: Int64;
+  P, NominalSrc: Int64;
   CurIdx, CurSrc, CurTL, PrevSrc, t: Int64;
   CurVal, PrevVal, w: Double;
   HavePrev: Boolean;
@@ -1892,45 +1898,84 @@ var
       Inc(Result);
   end;
 
-  { One anchor region's output: the two grains of its lattice that overlap
-    this frame. Exactly two, always, and both derivable from the frame number
-    alone - no running state, so this stays a pure function of the timeline
-    frame like every other renderer here.
+  { One anchor region's output at this frame: a 1:1 read displaced by whole
+    periods, crossfaded only in the immediate neighbourhood of a splice.
+    Derivable from the frame number alone - no running state, so this stays a
+    pure function of the timeline frame like every other renderer here.
 
     Reading past the region's own end (which the anchor crossfade below asks
     for) is deliberate and safe: that is contiguous real source audio, the
     literal continuation of what the region was already playing. }
   function RegionSample(AAnchorSrc, AAnchorTL: Int64): Single;
   var
-    u, n, a: Int64;
-    q, w0: Double;
-
-    { grain AN's source start, snapped onto the period lattice. The nominal
-      analysis position is AN * Hop scaled by this segment's own ratio; the
-      snap is what buys phase coherence, and it costs at most P/2 of timing. }
-    function GrainSrc(AN: Int64): Double;
-    begin
-      Result := AAnchorSrc +
-        Round((AN * Hop) * (SegSourceLen / SegTimelineLen) / P) * P;
-    end;
-
+    u, Num, k0, kNb: Int64;
+    StepSigned, Step, z, zf, dLow, dHigh, dNear, Fade, w: Double;
   begin
     u := AClipRelativeFrame - AAnchorTL;
     if u < 0 then
       u := 0;
-    n := u div Hop;
-    a := u - n * Hop;
 
-    { amplitude-complementary by construction - see the header on why this
-      must not be power-complementary. Smoothstep rather than a raised
-      cosine: same endpoints, same zero slope at both ends, no cos() on the
-      realtime thread, and the partner term is 1 - w0 so the pair sums to
-      exactly unity whatever the curve is. }
-    q := a / Hop;
-    w0 := 1 - q * q * (3 - 2 * q);
+    { how much timeline this segment owes over its own source length. Zero
+      means nothing to pay for and the whole splice mechanism drops out - see
+      the header's transparency note. }
+    Num := SegTimelineLen - SegSourceLen;
+    if Num = 0 then
+      Exit(SafeInterp(AAnchorSrc + u));
 
-    Result := SafeInterp(GrainSrc(n) + a) * w0 +
-      SafeInterp(GrainSrc(n + 1) + a - Hop) * (1 - w0);
+    { timeline frames per one-period displacement, signed: positive when the
+      segment is stretched (the read falls behind and periods get repeated),
+      negative when compressed (the read runs ahead and periods get dropped) }
+    StepSigned := (Double(SegTimelineLen) * P) / Num;
+    Step := Abs(StepSigned);
+    if Step < 1 then
+      Exit(SafeInterp(AAnchorSrc + u));
+
+    { which displacement this frame is under. Splices sit on the half-integer
+      boundaries of z, so the nearest one is whichever of the two bracketing
+      boundaries is closer in TIME - computed in u rather than z so the sign
+      of StepSigned needs no special-casing. }
+    z := u / StepSigned;
+    zf := z + 0.5;
+    k0 := Trunc(zf);
+    if (zf < 0) and (zf <> k0) then
+      Dec(k0);
+
+    dLow := Abs(u - (k0 - 0.5) * StepSigned);
+    dHigh := Abs(u - (k0 + 0.5) * StepSigned);
+    if dLow <= dHigh then
+    begin
+      dNear := dLow;
+      kNb := k0 - 1;
+    end
+    else
+    begin
+      dNear := dHigh;
+      kNb := k0 + 1;
+    end;
+
+    { about a period: the shortest crossfade that does not chop a cycle in
+      half. Clamped so two splices can never overlap - past that point there
+      would be a third branch to sum and this would stop being two reads. }
+    Fade := P;
+    if Fade > Step * 0.5 then
+      Fade := Step * 0.5;
+    if Fade < 1 then
+      Fade := 1;
+
+    if dNear >= Fade * 0.5 then
+      { the common case by a wide margin: untouched 1:1 source audio }
+      Exit(SafeInterp(AAnchorSrc + u - k0 * P));
+
+    { inside a splice. Amplitude-complementary (w and 1 - w), never power-
+      complementary: the two branches are the same audio one period apart and
+      so are correlated, and power-complementary summing of correlated content
+      is exactly the +6dB TonesClipSample's header warns about. Smoothstep for
+      the curve - zero slope at both ends like a raised cosine, without a cos()
+      on the realtime thread. }
+    w := 0.5 + dNear / Fade;
+    w := w * w * (3 - 2 * w);
+    Result := SafeInterp(AAnchorSrc + u - k0 * P) * w +
+      SafeInterp(AAnchorSrc + u - kNb * P) * (1 - w);
   end;
 
 begin
@@ -1949,13 +1994,6 @@ begin
   LoadSegment(k);
   if (SegTimelineLen <= 0) or (SegSourceLen <= 0) then
     Exit(SafeInterp(SegStartSource));
-
-  { round the target hop to whole periods, never below one - this single line
-    is what makes the overlap phase-coherent, see the header }
-  Hop := (AudioTargetHopMs * ProjectSampleRate) div 1000;
-  Hop := ((Hop + P div 2) div P) * P;
-  if Hop < P then
-    Hop := P;
 
   NominalSrc := SegStartSource +
     ((AClipRelativeFrame - SegStartTimeline) * SegSourceLen) div SegTimelineLen;

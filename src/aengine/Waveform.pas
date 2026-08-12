@@ -779,14 +779,14 @@ begin
 end;
 
 const
-  { see AudioEngine.AudioTargetHopMs / AudioAnchorFadeFrames }
-  AudioTargetHopMs = 28;
+  { see AudioEngine.AudioAnchorFadeFrames }
   AudioAnchorFadeFrames = 64;
 
 { Audio ("AU") renderer - the offline/shared copy of
-  AudioEngine.AudioClipSample. See that function's header for why the hop is
-  itself a whole number of periods, and why that is what separates this from
-  the period snapping TonesClipSample's header rejects. }
+  AudioEngine.AudioClipSample. See that function's header for why the stretch
+  is paid for at sparse splices rather than by a continuous overlap, and why
+  that is what separates this from the period snapping TonesClipSample's
+  header rejects. }
 function AudioSourceSample(const AMarkers: TWarpMarkerArray;
   ATimelineFrame: Int64; AClipLength: Int64; AOffset: Int64; AData: PSingle;
   AFrameCount: Integer; AChannels: Integer; ASampleRate: Integer;
@@ -796,7 +796,7 @@ var
   k: Integer;
   SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen, SegEnd: Int64;
   FirstTrans, TransInSeg: Integer;
-  P, Hop, NominalSrc: Int64;
+  P, NominalSrc: Int64;
   CurIdx, CurSrc, CurTL, PrevSrc, t: Int64;
   CurVal, PrevVal, w: Double;
   HavePrev: Boolean;
@@ -902,27 +902,54 @@ var
 
   function RegionSample(AAnchorSrc, AAnchorTL: Int64): Single;
   var
-    u, n, a: Int64;
-    q, w0: Double;
-
-    function GrainSrc(AN: Int64): Double;
-    begin
-      Result := AAnchorSrc +
-        Round((AN * Hop) * (SegSourceLen / SegTimelineLen) / P) * P;
-    end;
-
+    u, Num, k0, kNb: Int64;
+    StepSigned, Step, z, zf, dLow, dHigh, dNear, Fade, w: Double;
   begin
     u := ATimelineFrame - AAnchorTL;
     if u < 0 then
       u := 0;
-    n := u div Hop;
-    a := u - n * Hop;
 
-    q := a / Hop;
-    w0 := 1 - q * q * (3 - 2 * q);
+    Num := SegTimelineLen - SegSourceLen;
+    if Num = 0 then
+      Exit(SafeInterp(AAnchorSrc + u));
 
-    Result := SafeInterp(GrainSrc(n) + a) * w0 +
-      SafeInterp(GrainSrc(n + 1) + a - Hop) * (1 - w0);
+    StepSigned := (Double(SegTimelineLen) * P) / Num;
+    Step := Abs(StepSigned);
+    if Step < 1 then
+      Exit(SafeInterp(AAnchorSrc + u));
+
+    z := u / StepSigned;
+    zf := z + 0.5;
+    k0 := Trunc(zf);
+    if (zf < 0) and (zf <> k0) then
+      Dec(k0);
+
+    dLow := Abs(u - (k0 - 0.5) * StepSigned);
+    dHigh := Abs(u - (k0 + 0.5) * StepSigned);
+    if dLow <= dHigh then
+    begin
+      dNear := dLow;
+      kNb := k0 - 1;
+    end
+    else
+    begin
+      dNear := dHigh;
+      kNb := k0 + 1;
+    end;
+
+    Fade := P;
+    if Fade > Step * 0.5 then
+      Fade := Step * 0.5;
+    if Fade < 1 then
+      Fade := 1;
+
+    if dNear >= Fade * 0.5 then
+      Exit(SafeInterp(AAnchorSrc + u - k0 * P));
+
+    w := 0.5 + dNear / Fade;
+    w := w * w * (3 - 2 * w);
+    Result := SafeInterp(AAnchorSrc + u - k0 * P) * w +
+      SafeInterp(AAnchorSrc + u - kNb * P) * (1 - w);
   end;
 
 begin
@@ -946,11 +973,6 @@ begin
   LoadSegment(k);
   if (SegTimelineLen <= 0) or (SegSourceLen <= 0) then
     Exit(SafeInterp(SegStartSource));
-
-  Hop := (AudioTargetHopMs * ASampleRate) div 1000;
-  Hop := ((Hop + P div 2) div P) * P;
-  if Hop < P then
-    Hop := P;
 
   NominalSrc := SegStartSource +
     ((ATimelineFrame - SegStartTimeline) * SegSourceLen) div SegTimelineLen;
