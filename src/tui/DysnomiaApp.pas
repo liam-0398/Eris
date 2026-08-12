@@ -71,6 +71,23 @@ implementation
 uses
   MsgBox, AudioEngine;
 
+const
+  { DysTrackPane's list is a fixed PlaceholderTrackCount (8) rows regardless
+    of Project.TrackCount (see DysTrackPane.pas) - Project.DefaultTrackCount
+    is 4, Eris's own default, and that's Eris source (not to be touched, per
+    tui.md's RULES). Topping TrackCount up to 8 here, Dysnomia-side only,
+    is what makes the timeline's own "one row per Project.TrackCount" loop
+    (DysTimeline.Draw) actually draw all 8 rows the track pane already
+    shows, instead of leaving 4 of them looking like they don't exist. }
+  DysStartTrackCount = 8;
+
+procedure EnsureDysTrackCount(ACount: Integer);
+begin
+  while Project.TrackCount < ACount do
+    if not Project.AddTrack then
+      Break;
+end;
+
 { App-wide colour override. See DysWidgets.TDysPane's comment for why the
   panes need CGrayDialog rather than a plain window palette; this is the
   other half - recolouring what CGrayDialog's indices actually resolve
@@ -142,6 +159,7 @@ begin
     PipeWire server says otherwise) as eris.lpr/MainForm.pas - see
     AudioEngineInit. Nothing Dysnomia-specific here. }
   AudioEngineInit;
+  EnsureDysTrackCount(DysStartTrackCount);
 
   inherited Init;
   { Nothing is Current anywhere by default - Insert() doesn't select what
@@ -425,6 +443,7 @@ begin
           AudioEngineStop;
           WaitForEngineIdle;
           Project.NewProject;
+          EnsureDysTrackCount(DysStartTrackCount);
           CurrentProjectPath := '';
           RefreshAfterProjectChange;
         end;

@@ -315,12 +315,26 @@ end;
   whatever markers already existed for a mid-drag edit), this always treats
   the clip's current Length as the whole source span and replaces the
   marker list outright - simpler, and correct for warping an entire clip in
-  one keypress rather than dragging one edge of it. }
+  one keypress rather than dragging one edge of it.
+
+  BUG FIXED: the original picked the target bar count via
+  Round(Ln(LenBars)/Ln(2)) - "nearest" in LOG space, rounded with FPC's
+  round-half-to-even. Any clip landing near the geometric mean of two
+  candidates (LenBars close to sqrt(2)*2^k, e.g. ~1.41 bars) is exactly the
+  0.5 tie Round resolves to the EVEN Pow2, silently rounding down instead of
+  to the clip's actual nearest neighbour - "warp a ~1.9-bar clip and
+  sometimes get something short instead of 2 bars" was this: LenBars near a
+  tie in log-space is not the same clip as LenBars near a tie in real bar
+  count, so log-space "nearest" disagreed with what the user actually saw
+  onscreen. Fixed by comparing the two power-of-two CANDIDATES directly in
+  bar space (LenBars, not its logarithm) and picking whichever is closer -
+  no log(), no Round() tie-break, "nearest" now means what it looks like. }
 procedure WarpClipToNearestPow2Bar(ATrack, AClipIndex: Integer);
 var
   Frames, Bars, OrigLength, TargetLength: Int64;
   LenBars: Double;
-  Pow2: Integer;
+  Pow2Lo: Integer;
+  BarsLo, BarsHi: Int64;
 begin
   Frames := BarFrames;
   if (Frames <= 0) or (AClipIndex < 0) then
@@ -329,10 +343,35 @@ begin
   if OrigLength <= 0 then
     Exit;
   LenBars := OrigLength / Frames;
-  Pow2 := Round(Ln(LenBars) / Ln(2));
-  if Pow2 < 0 then
-    Pow2 := 0; { floor of one bar - never warp a clip down to nothing }
-  Bars := Int64(1) shl Pow2;
+  { Floor to the power-of-two AT OR BELOW LenBars, then compare LenBars
+    against that candidate and the next one up directly (in bars, not
+    logs) - ties (equidistant) favour the higher candidate, matching
+    "round half up" rather than the banker's-rounding tie-break Round()
+    would otherwise apply in log space. }
+  Pow2Lo := Trunc(Ln(LenBars) / Ln(2));
+  if Pow2Lo < 0 then
+    Pow2Lo := 0;
+  BarsLo := Int64(1) shl Pow2Lo;
+  while BarsLo > LenBars do
+  begin
+    Dec(Pow2Lo);
+    if Pow2Lo < 0 then
+    begin
+      Pow2Lo := 0;
+      Break;
+    end;
+    BarsLo := Int64(1) shl Pow2Lo;
+  end;
+  BarsHi := BarsLo * 2;
+  while BarsLo * 2 <= LenBars do
+  begin
+    BarsLo := BarsLo * 2;
+    BarsHi := BarsLo * 2;
+  end;
+  if (LenBars - BarsLo) < (BarsHi - LenBars) then
+    Bars := BarsLo
+  else
+    Bars := BarsHi;
   TargetLength := Bars * Frames;
 
   Project.Tracks[ATrack].Clips[AClipIndex].WarpMode := SampleTypes.WarpModeRePitch;
