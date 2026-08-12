@@ -38,10 +38,12 @@ type
 var
   ActiveTrackPane: PDysTrackPane = nil;
 
-{ 0-based, clamped to Project.TrackCount - 1: the list box shows
-  PlaceholderTrackCount (8) rows regardless of how many tracks the project
-  actually has, so a focused row past the real track count would otherwise
-  hand DysFilePane an out-of-range Project.Tracks index. }
+{ 0-based, clamped to Project.TrackCount - 1: the list box shows one blank
+  row (aligns row 1 of the list with row 1 of the timeline grid, whose row 0
+  is the seconds ruler - see DysTimeline.Draw) followed by PlaceholderTrackCount
+  (8) numbered rows regardless of how many tracks the project actually has,
+  so a focused row past the real track count - or the blank row itself -
+  would otherwise hand DysFilePane an out-of-range Project.Tracks index. }
 function SelectedTrackIndex: Integer;
 
 implementation
@@ -52,7 +54,8 @@ var
   I: Integer;
 begin
   inherited Init(Bounds, 1, nil);
-  Entries := New(PUnSortedStrCollection, Init(PlaceholderTrackCount, 4));
+  Entries := New(PUnSortedStrCollection, Init(PlaceholderTrackCount + 1, 4));
+  Entries^.Insert(NewStr(''));
   for I := 1 to PlaceholderTrackCount do
     Entries^.Insert(NewStr(IntToStr(I)));
   NewList(Entries);
@@ -65,9 +68,10 @@ begin
      ((Event.What = evMouseDown) and (Event.Buttons and mbRightButton <> 0))
   then
   begin
-    MessageBox('Track ' + PString(List^.At(Focused))^ +
-      ': mute / solo / volume popup is stage 8 - not wired yet.',
-      nil, mfInformation or mfOKButton);
+    if Focused > 0 then
+      MessageBox('Track ' + PString(List^.At(Focused))^ +
+        ': mute / solo / volume popup is stage 8 - not wired yet.',
+        nil, mfInformation or mfOKButton);
     ClearEvent(Event);
   end;
 end;
@@ -77,7 +81,10 @@ begin
   Result := 0;
   if ActiveTrackPane = nil then
     Exit;
-  Result := ActiveTrackPane^.Listing^.Focused;
+  { -1: row 0 is the blank alignment row, not track 1 - see the comment
+    above. Focused = 0 clamps to track index 0 same as any other
+    out-of-range row, it just isn't allowed to read as "track 1 selected". }
+  Result := ActiveTrackPane^.Listing^.Focused - 1;
   if Result > Project.TrackCount - 1 then
     Result := Project.TrackCount - 1;
   if Result < 0 then
