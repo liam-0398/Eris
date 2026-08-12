@@ -185,6 +185,14 @@ begin
     ConfigSave;
   end;
   Dispose(Dlg, Done);
+  { TGroup.Remove (inside ExecView, above) is supposed to re-expose and
+    redraw whatever the dialog was covering on its own - in practice the
+    screen was still showing dialog leftovers after Dispose, both here and
+    in RunFileDialog (DysFileDialog.pas), reported as "closing a dialog
+    glitches everything out". Forcing the whole desktop to repaint once the
+    dialog is gone for good is the standard Turbo Vision/Free Vision fallback
+    for exactly this - see tui.md's Free Vision notes. }
+  Desktop^.DrawView;
 end;
 
 end.

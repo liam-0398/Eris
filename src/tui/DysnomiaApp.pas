@@ -59,7 +59,7 @@ type
   private
     procedure ShowAbout;
     procedure ShowTooSmall(Body: TRect; const Layout: TDysLayout);
-    procedure WaitForEngineIdle;
+    function WaitForEngineIdle: Boolean;
     procedure RefreshAfterProjectChange;
     procedure DoFileOpen;
     procedure DoFileSave;
@@ -312,14 +312,39 @@ end;
   hasn't necessarily drained the playback thread yet, and LoadProject/
   NewProject free every sample's memory - freeing it out from under a
   thread that's still reading TrackClips is a use-after-free, not just a
-  stopped-too-late cosmetic issue. No timeout/cancel here (Dysnomia has no
-  background-busy flag to bail out through like MainForm's FBackgroundBusy
-  does) - Load/Save block the whole TUI until this returns, acceptable for
-  a first cut per tui.md's stage list. }
-procedure TDysnomiaApp.WaitForEngineIdle;
+  stopped-too-late cosmetic issue.
+
+  USED TO have no timeout at all - unlike MainForm, which only bounds this
+  on Windows (5000ms) and is an unguarded `while AudioEngineIsBusy
+  do Sleep(1)` on every other platform, same as this used to be
+  unconditionally. That is a real "freeze until Alt+X doesn't even work"
+  failure mode: this loop runs on the main thread with no event pumping at
+  all, so if AudioEngineIsBusy ever stays True (a stuck live note that
+  Free Vision's raw-terminal keyboard driver can't send a genuine key-up
+  for, unlike an LCL KeyUp event - see tui.md's keyboard notes - or any
+  other reason the audio thread stops draining), Dysnomia had no way back:
+  no cursor blink, no screen redraw, no reachable Ctrl+C/Alt+X, nothing
+  short of killing the process from another terminal. Bounding it uniformly
+  (all platforms, not just Windows) and returning False on timeout instead
+  of hanging turns that into "File New/Open/Save waited 5s, then declined
+  with a message" - recoverable, and the caller's contract changes to match
+  MainForm's own Boolean return: on False, do NOT touch Project.NewProject/
+  LoadProject/SaveProject - the busy engine might still be reading exactly
+  the memory that would free. }
+function TDysnomiaApp.WaitForEngineIdle: Boolean;
+const
+  TimeoutMs = 5000;
+var
+  Deadline: QWord;
 begin
+  Deadline := GetTickCount64 + TimeoutMs;
   while AudioEngineIsBusy do
+  begin
+    if GetTickCount64 > Deadline then
+      Exit(False);
     Sleep(1);
+  end;
+  Result := True;
 end;
 
 { Common to Open and (implicitly, via Project.NewProject) New: the track
@@ -329,6 +354,8 @@ end;
   somewhere guaranteed valid rather than wherever it happened to be in the
   project that just closed. }
 procedure TDysnomiaApp.RefreshAfterProjectChange;
+var
+  i: Integer;
 begin
   { Project.TempoBPM can change out from under the transport bar's own
     field on a load/New (a loaded project's saved tempo, or NewProject's
@@ -337,8 +364,46 @@ begin
     showing whatever was last typed (or the stale 120.0 startup value)
     while the actual project tempo underneath had already moved on. See
     DysWidgets.TDysToolBar.SyncTempoDisplay. }
+  { Mirrors MainForm.RefreshAllTracksUI's AudioEngineSeek(0) - without it
+    the engine's Playhead keeps whatever value the PREVIOUS project's
+    playback left it at, not 0. A loaded project's own timeline cursor
+    still resets to frame 0 (below), so the visual "played to the end,
+    hit Stop" position and the transport's real Playhead silently
+    disagreed until this. }
+  AudioEngineSeek(0);
   if ActiveToolBar <> nil then
+  begin
     ActiveToolBar^.SyncTempoDisplay;
+    { MainForm.RefreshAllTracksUI resets its own Play/Pause caption the
+      same way - a project change already forced a Stop above this call
+      (see cmFileNew/DoFileOpen), so the button showing "Pause" from
+      whatever was playing a moment ago would otherwise be a stale label
+      pointing at a transport that's no longer running. }
+    ActiveToolBar^.Playing := False;
+    ActiveToolBar^.UpdateButtons;
+  end;
+  { Mirrors MainForm.RefreshAllTracksUI's stale-slot clear - ITS OWN COMMENT
+    there names this exactly: "the open-several-projects-and-the-playhead-
+    locks bug - it needs nothing more than one project having fewer tracks
+    than the one opened before it." AudioEngineSetTrackClips only gets
+    called (via PushTrackToEngine, below) for tracks 0..Project.TrackCount-1
+    of the NEW project - engine slots at or above that count keep
+    whatever TPlaybackClip array a PREVIOUS, larger-track-count project
+    (Dysnomia starts every File > New at 8 tracks - see EnsureDysTrackCount)
+    left there. Project.NewProject/LoadProject both FreeMem every sample in
+    SamplePool right before this runs, so those stale slots' Items[].Data
+    pointers are left referencing freed memory - AudioEngineHasClip still
+    sees them as "has a clip" (Count > 0), Play still flips Playing True,
+    but FillBlock's mix pass then reads through a dangling pointer for any
+    track in that range that happens to have had a clip in the PREVIOUS
+    project. That's a real memory-safety bug whose actual damage is
+    unpredictable (silence, noise, or corrupting unrelated state enough to
+    stall the playhead update entirely) rather than a clean crash - exactly
+    the "Play flips to Pause, playhead appears, but never moves" report,
+    and exactly why it only shows up after having had a bigger-track-count
+    project open first, never on the very first New/Open in a session. }
+  for i := Project.TrackCount to Project.MaxTracks - 1 do
+    AudioEngineSetTrackClips(i, nil, 0);
   if Timeline <> nil then
   begin
     Timeline^.Content^.CursorTrack := 0;
@@ -347,6 +412,12 @@ begin
     Timeline^.Content^.CancelOverlay;
     Timeline^.Content^.LoopStart := -1;
     Timeline^.Content^.LoopEnd := -1;
+    { The scroll position is otherwise left wherever a previous project's
+      playback/manual scrolling last put it (see DysTimeline's
+      ViewStartFrame) - resetting it here matches the cursor/loop resets
+      just above: a freshly opened project should start looking at its own
+      frame 0, not wherever the last one happened to autoscroll to. }
+    Timeline^.Content^.ViewStartFrame := 0;
     { The actual fix for "clips are on the timeline but Play does nothing"
       after a project open/New - see PushAllTracksToEngine's own comment
       in DysTimeline.pas. Project.Tracks is what the timeline draws from,
@@ -374,7 +445,12 @@ begin
     Exit;
 
   AudioEngineStop;
-  WaitForEngineIdle;
+  if not WaitForEngineIdle then
+  begin
+    MessageBox('The audio engine stopped responding, so nothing was ' +
+      'opened.', nil, mfError or mfOKButton);
+    Exit;
+  end;
   if not ProjectFile.LoadProject(Path) then
   begin
     MessageBox('Could not open "' + Path + '" as an Eris project.', nil,
@@ -456,11 +532,16 @@ begin
             NewProject frees every sample's memory out from under it (see
             WaitForEngineIdle), same protocol Open now follows too. }
           AudioEngineStop;
-          WaitForEngineIdle;
-          Project.NewProject;
-          EnsureDysTrackCount(DysStartTrackCount);
-          CurrentProjectPath := '';
-          RefreshAfterProjectChange;
+          if WaitForEngineIdle then
+          begin
+            Project.NewProject;
+            EnsureDysTrackCount(DysStartTrackCount);
+            CurrentProjectPath := '';
+            RefreshAfterProjectChange;
+          end
+          else
+            MessageBox('The audio engine stopped responding, so nothing ' +
+              'was reset.', nil, mfError or mfOKButton);
         end;
       cmFileOpen:
         DoFileOpen;

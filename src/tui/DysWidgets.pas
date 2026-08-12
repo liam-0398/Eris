@@ -60,9 +60,12 @@ type
     procedure TogglePlayPause;
     procedure CommitTempo;
     procedure SyncTempoDisplay;
+    { Public so DysnomiaApp.RefreshAfterProjectChange can reset the Play/
+      Pause label after forcing Playing := False on a project change - was
+      private, no external caller needed it before that. }
+    procedure UpdateButtons;
   private
     procedure SetTitle(B: PButton; const S: string);
-    procedure UpdateButtons;
   end;
 
   { Wraps TDysToolBar in a docked, titled, Tab-reachable pane - same

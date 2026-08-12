@@ -273,6 +273,10 @@ begin
   ActivePathLabel := nil;
   ActiveDialog := nil;
   Dispose(Dlg, Done);
+  { See DysPreferences.ShowPreferencesDialog's identical call for why: the
+    screen was left showing dialog leftovers after Dispose rather than
+    whatever the desktop should look like now. }
+  Desktop^.DrawView;
 end;
 
 end.
