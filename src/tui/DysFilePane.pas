@@ -5,9 +5,12 @@ unit DysFilePane;
   tui.md). Stage 7: Enter on a real file decodes it, adds it to the sample
   pool, and hands it to the timeline as a pending overlay on whatever
   track DysTrackPane.SelectedTrackIndex reports - see DysTimeline for what
-  happens next (Left/Right/Up/Down/Enter/Esc). Ctrl+I (drop straight in as
-  an instrument track) is still a stub - that needs a MIDI-live track
-  concept the timeline doesn't have yet, stage 8. }
+  happens next (Left/Right/Up/Down/Enter/Esc). Ctrl+I decodes the file the
+  same way and assigns it straight to Project.TrackInstrument on that same
+  track, skipping the overlay - which is also what flips that track's A/I/S
+  letter on the timeline to 'I' (see DysTimeline.TrackTypeChar, which reads
+  Project state fresh on every Draw). Actually driving the track live from
+  a MIDI/computer keyboard once assigned is still stage 8. }
 
 {$mode objfpc}{$H+}
 
@@ -159,14 +162,30 @@ end;
 
 procedure TDysFileListBox.SelectAsInstrument(Item: Sw_Integer);
 var
-  Name: string;
+  Name, FullPath: string;
+  Sample: TSample;
+  SampleID, TrackIdx: Integer;
 begin
   Name := PString(List^.At(Item))^;
-  if (Length(Name) > 0) and (Name[Length(Name)] <> '/') and (Name <> '..')
-  then
-    MessageBox('Would drop "' + Name +
-      '" straight in as a new instrument track with the MIDI keyboard' +
-      ' live - stage 7.', nil, mfInformation or mfOKButton);
+  if (Length(Name) = 0) or (Name[Length(Name)] = '/') or (Name = '..') then
+    Exit;
+  FullPath := CurDir + Name;
+  if not DecodeSampleFile(FullPath, Sample) then
+  begin
+    MessageBox('Could not decode "' + Name + '" as audio.', nil,
+      mfError or mfOKButton);
+    Exit;
+  end;
+  SampleID := Project.AddSampleToPool(Sample, Name, FullPath);
+  TrackIdx := SelectedTrackIndex;
+  { Mirrors MainForm.AssignSampleAsKeyboardInstrumentFor (src/ui): the start/
+    end trim markers default to the whole sample since there's no clip to
+    inherit a trim window from here. }
+  Project.TrackInstrument[TrackIdx] := SampleID;
+  Project.TrackInstrumentStart[TrackIdx] := 0;
+  Project.TrackInstrumentEnd[TrackIdx] := Sample.FrameCount;
+  if ActiveTimelineContent <> nil then
+    ActiveTimelineContent^.DrawView;
 end;
 
 procedure TDysFileListBox.HandleEvent(var Event: TEvent);

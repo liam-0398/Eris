@@ -10,7 +10,16 @@ unit DysTimeline;
 
   The grid step (PixelsPerSecond, below) is a fixed constant for now, not
   wired to the toolbar's interval selector - that's stage 8 too, once the
-  cycle button actually needs to change something. }
+  cycle button actually needs to change something.
+
+  The per-row label (LabelWidth columns wide) is a single track-type
+  letter - A/I/S, see TrackTypeChar - derived fresh from Project state on
+  every Draw rather than cached, so it tracks Ctrl+I in the file pane (or
+  anything else that flips TrackIsSampler/TrackInstrument) with no extra
+  wiring. The track cursor (CursorTrack + CursorInLabel) is two-
+  dimensional: Up/Down always moves CursorTrack, Left/Right move between
+  the label column and the grid, and Ctrl+Enter/right-click open the track
+  dropdown for CursorTrack from either position - see tui.md's Bindings. }
 
 {$mode objfpc}{$H+}
 
@@ -32,6 +41,11 @@ type
   TDysTimelineContent = object(TView)
     CursorTrack: Integer;
     CursorFrame: Int64;
+    { True: the track cursor sits on the A/I/S label column (Up/Down only).
+      False: it sits in the grid at CursorFrame (Left/Right nudge it, and it
+      can walk back onto the label column at CursorFrame = 0). See the unit
+      header comment. }
+    CursorInLabel: Boolean;
     Pending: Boolean;
     PendingSampleID: Integer;
     PendingLength: Int64;
@@ -77,6 +91,25 @@ const
   PlayheadAttr = $4F; { red bg, bright white fg - distinct from both clip colours }
   BlockChar = #219; { CP437 solid block - see tui.md "Half-block glyphs" }
   PlayheadChar = '|';
+
+{ A/I/S per tui.md: Sampler Track wins over instrument (a track can carry
+  both TrackIsSampler and a live TrackInstrument at once - see Project.pas's
+  comment on TrackIsSampler - so the more specific classification takes
+  priority), then a live keyboard-play instrument, else the plain default. }
+function TrackTypeChar(ATrack: Integer): Char;
+begin
+  if (ATrack < 0) or (ATrack > High(Project.TrackIsSampler)) then
+  begin
+    Result := 'A';
+    Exit;
+  end;
+  if Project.TrackIsSampler[ATrack] then
+    Result := 'S'
+  else if Project.TrackInstrument[ATrack] >= 0 then
+    Result := 'I'
+  else
+    Result := 'A';
+end;
 
 { Ported from ArrangementView.PushTrackToEngine (src/ui) - same translation
   from Project's TClip array to the engine's TPlaybackClip array, just not a
@@ -155,6 +188,7 @@ begin
   Options := Options or (ofSelectable + ofFirstClick);
   CursorTrack := 0;
   CursorFrame := 0;
+  CursorInLabel := True;
   Pending := False;
   PendingSampleID := -1;
   PendingLength := 0;
@@ -188,7 +222,7 @@ end;
 procedure TDysTimelineContent.Draw;
 var
   B: TDrawBuffer;
-  Col, Track, Row, i, Sec, PlayCol: Integer;
+  Col, Track, Row, i, Sec, PlayCol, CursorCol: Integer;
   Lbl, SecStr: string;
 begin
   PlayCol := -1;
@@ -235,10 +269,10 @@ begin
       Break;
 
     MoveChar(B, ' ', NormalAttr, Size.X);
-    Lbl := 'T' + IntToStr(Track + 1);
+    Lbl := TrackTypeChar(Track);
     while Length(Lbl) < LabelWidth do
       Lbl := Lbl + ' ';
-    if Track = CursorTrack then
+    if (Track = CursorTrack) and CursorInLabel then
       MoveStr(B, Lbl, CursorAttr)
     else
       MoveStr(B, Lbl, NormalAttr);
@@ -262,6 +296,16 @@ begin
 
     if PlayCol >= 0 then
       MoveChar(B[PlayCol], PlayheadChar, PlayheadAttr, 1);
+
+    { The grid-side half of the track cursor - only drawn once it has moved
+      off the label column (see CursorInLabel), so the label highlight and
+      this marker are never both showing for the same track at once. }
+    if (Track = CursorTrack) and (not CursorInLabel) then
+    begin
+      CursorCol := LabelWidth + (CursorFrame div FramesPerCol);
+      if (CursorCol >= LabelWidth) and (CursorCol <= Size.X - 1) then
+        MoveChar(B[CursorCol], BlockChar, CursorAttr, 1);
+    end;
 
     WriteLine(0, Row, Size.X, 1, B);
   end;
@@ -290,16 +334,27 @@ begin
         end;
       kbLeft:
         begin
-          Dec(CursorFrame, FramesPerCol);
-          if CursorFrame < 0 then
-            CursorFrame := 0;
+          if not CursorInLabel then
+          begin
+            if CursorFrame <= 0 then
+              CursorInLabel := True
+            else
+            begin
+              Dec(CursorFrame, FramesPerCol);
+              if CursorFrame < 0 then
+                CursorFrame := 0;
+            end;
+          end;
           DrawView;
           ClearEvent(Event);
           Exit;
         end;
       kbRight:
         begin
-          Inc(CursorFrame, FramesPerCol);
+          if CursorInLabel then
+            CursorInLabel := False
+          else
+            Inc(CursorFrame, FramesPerCol);
           DrawView;
           ClearEvent(Event);
           Exit;
@@ -325,6 +380,20 @@ begin
         end;
     end;
   end;
+  { App-wide dropdown convention (tui.md's Bindings): whether the cursor is
+    on the label column or out in the grid, CursorTrack is still "the track
+    under the cursor" - same target DysTrackPane's own Ctrl+Enter handler
+    uses for its row. }
+  if ((Event.What = evKeyDown) and (Event.KeyCode = kbCtrlEnter)) or
+     ((Event.What = evMouseDown) and (Event.Buttons and mbRightButton <> 0))
+  then
+  begin
+    MessageBox('Track ' + IntToStr(CursorTrack + 1) +
+      ': mute / solo / volume popup is stage 8 - not wired yet.',
+      nil, mfInformation or mfOKButton);
+    ClearEvent(Event);
+    Exit;
+  end;
   inherited HandleEvent(Event);
 end;
 
@@ -333,6 +402,10 @@ begin
   PendingSampleID := ASampleID;
   PendingLength := ALength;
   Pending := True;
+  { Left/Right nudges the pending clip along the grid (tui.md's Bindings) -
+    force the cursor off the label column so the very first arrow press
+    after a drop moves the clip instead of just leaving the label column. }
+  CursorInLabel := False;
   DrawView;
 end;
 
