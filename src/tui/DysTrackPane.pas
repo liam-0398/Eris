@@ -64,8 +64,9 @@ end;
 procedure TDysTrackListBox.HandleEvent(var Event: TEvent);
 begin
   inherited HandleEvent(Event);
-  if ((Event.What = evKeyDown) and (Event.KeyCode = kbCtrlEnter)) or
-     ((Event.What = evMouseDown) and (Event.Buttons and mbRightButton <> 0))
+  if ((Event.What = evKeyDown) and
+      ((Event.KeyCode = kbCtrlEnter) or (Event.KeyCode = kbDropdownKey))) or
+     ((Event.What = evMouseDown) and (Event.Buttons and mbActualRightButton <> 0))
   then
   begin
     if Focused > 0 then

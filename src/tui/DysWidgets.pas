@@ -23,6 +23,29 @@ const
   cmCycleInterval   = 2005;
   cmDropdownStub    = 2006;
 
+  { Ctrl+Enter can never actually reach this app from a real terminal -
+    Enter's byte is already CR ($0D), below $20, so Ctrl-masking (what
+    makes every other Ctrl+<letter> chord here a genuinely distinct byte)
+    changes nothing about it, and packages/rtl-console/src/unix/keyboard.pp's
+    escape-sequence tree (what a Ctrl+<non-letter> chord would need to be
+    reachable at all - same bug class as Ctrl+I/Shift+Enter/Ctrl+Shift+S,
+    see tui.md's Bindings section) has no entry for it either. kbCtrlEnter
+    is a real, distinct Drivers.pas KeyCode constant, but nothing in the
+    Unix keyboard driver can ever produce it from a keypress. kbF2 is the
+    concrete, reachable replacement - unclaimed elsewhere in this app. }
+  kbDropdownKey = kbF2;
+
+  { The bit an actual xterm/SGR1006 right-click sends, on this FPC RTL's
+    Unix mouse driver (rtl-console/src/unix/keyboard.pp: GenMouseEvent /
+    GenMouseEvent_ExtendedSGR1006, "buttonval and 67" case 2, "right button
+    pressed") - it's bit value 4, which is Drivers.pas's own mbMiddleButton
+    bit, not mbRightButton ($02 - actually the value a real middle-click
+    sends there). Checking Drivers.mbRightButton for "was this a right-
+    click" is why right-click never opened any dropdown in this app: a real
+    right-click's byte never has that bit set. Same driver is used on
+    Darwin (see fvdoc's "Source layout" note), so this isn't Linux-only. }
+  mbActualRightButton = mbMiddleButton;
+
 type
   { A docked, fixed pane: border and title only, no move/grow/close.
 

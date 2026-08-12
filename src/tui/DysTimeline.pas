@@ -995,8 +995,9 @@ begin
     on the label column or out in the grid, CursorTrack is still "the track
     under the cursor" - same target DysTrackPane's own Ctrl+Enter handler
     uses for its row. }
-  if ((Event.What = evKeyDown) and (Event.KeyCode = kbCtrlEnter)) or
-     ((Event.What = evMouseDown) and (Event.Buttons and mbRightButton <> 0))
+  if ((Event.What = evKeyDown) and
+      ((Event.KeyCode = kbCtrlEnter) or (Event.KeyCode = kbDropdownKey))) or
+     ((Event.What = evMouseDown) and (Event.Buttons and mbActualRightButton <> 0))
   then
   begin
     MessageBox('Track ' + IntToStr(CursorTrack + 1) +

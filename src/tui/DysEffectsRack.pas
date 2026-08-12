@@ -949,6 +949,24 @@ begin
     end;
     WriteLine(0, Row, Size.X, 1, B);
   end;
+  { This override replaces TGroup.Draw's own body wholesale (background +
+    header text instead of TGroup's default blank fill) - but TGroup.Draw
+    is also what calls DrawSubViews to actually paint this group's
+    children (DrawSubViews itself is `private` to views.pas, not callable
+    from here - `inherited Draw` is the public entry point that reaches it).
+    Skipping that meant every full redraw of Content itself (any time
+    something else forces it to re-expose - a dismissed MessageBox/menu, a
+    Tab focus change elsewhere redrawing the desktop, etc.) blanked this
+    whole rect and never repainted the effect boxes sitting in it, since a
+    child box's OWN Draw only runs when something targets that specific
+    child (e.g. a click on it) - not as a side effect of its parent's Draw.
+    Symptom: boxes only "appeared" piecemeal, as whichever child got
+    directly interacted with repainted itself, and a plain click elsewhere
+    (forcing Content to redraw as a whole again with no interaction on any
+    one child) blanked them all straight back out. Background must be
+    painted first, then `inherited Draw` layers the children on top - the
+    other order would let the background wipe them right back out again. }
+  inherited Draw;
 end;
 
 { Checks run BEFORE inherited, not after - TGroup.HandleEvent's own mouse
@@ -978,8 +996,9 @@ begin
     PendingRemoveIndex := -1;
     RebuildBoxes;
   end;
-  if ((Event.What = evKeyDown) and (Event.KeyCode = kbCtrlEnter)) or
-     ((Event.What = evMouseDown) and (Event.Buttons and mbRightButton <> 0)) then
+  if ((Event.What = evKeyDown) and
+      ((Event.KeyCode = kbCtrlEnter) or (Event.KeyCode = kbDropdownKey))) or
+     ((Event.What = evMouseDown) and (Event.Buttons and mbActualRightButton <> 0)) then
   begin
     if Event.What = evMouseDown then
       Pt := Event.Where

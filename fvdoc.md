@@ -204,6 +204,57 @@ its command in a `HandleEvent` override wants `bfNormal` instead, so
 future toolbar/dialog button in Dysnomia should default to `bfNormal`
 unless something else genuinely needs to observe the click via broadcast.
 
+**A `TGroup` descendant's own `Draw` override must call `inherited Draw` (or
+its children never repaint on a full redraw).** `TGroup.Draw`'s entire body
+is `If Buffer=Nil then DrawSubViews(First, nil) else WriteBuf(...)` -
+`Buffer` is never allocated anywhere in this FV build (grepped `views.pas`
+for every assignment to it; none exist outside the field declaration), so
+in practice that's always `DrawSubViews(First, nil)`, i.e. "paint my
+children." `DrawSubViews` itself is `private` to `views.pas`, so a
+subclass can't call it directly from another unit - `inherited Draw` is
+the only reachable way to invoke it. A hand-written `Draw` override that
+paints its own background/content and returns without calling `inherited`
+skips that entirely: the override still runs correctly whenever the parent
+itself needs a full repaint, but every child view sitting inside it goes
+un-repainted, since a child's own `Draw` is only invoked when something
+targets that specific child (a click on it, its own state change) - never
+as a side effect of the parent's Draw. Symptom: children only appear
+piecemeal, as each one gets individually interacted with, and can vanish
+again the next time anything forces the parent to redraw as a whole (a
+dismissed dialog re-exposing the area, a focus change elsewhere causing a
+wider redraw, etc.) - see tui.md's session note on `TDysEffectsContent`.
+Order matters when fixing this: paint the background *first*, then call
+`inherited Draw` - the reverse order lets the background wipe the children
+right back out.
+
+**`Drivers.mbRightButton`/`mbMiddleButton` are swapped versus what a real
+xterm right-click actually sends, on this FPC RTL's Unix driver.**
+`packages/rtl-console/src/unix/keyboard.pp`'s own xterm decoders
+(`GenMouseEvent`, legacy X10 protocol, and `GenMouseEvent_ExtendedSGR1006`,
+the modern SGR1006 protocol - checked both, they agree) map "right button
+pressed" (`buttonval and 67 = 2`) to bit value 4, which is `Drivers.
+mbMiddleButton`'s bit - `Drivers.mbRightButton` ($02) is actually the bit a
+real *middle*-click sends there. `Drivers.pas`'s naming follows the classic
+DOS/Borland convention (button 2 = right); the Unix driver's mapping follows
+X11's own button numbering (0=left, 1=middle, 2=right) applied as a raw bit
+shift instead. Net effect: `Event.Buttons and mbRightButton <> 0` can never
+match an actual right-click on this driver - checked and fixed in Dysnomia
+(see tui.md's session note on the bottom-pane/track-pane/timeline dropdown).
+Same driver serves Darwin, so this isn't Linux-specific and any future
+right-click check anywhere in this codebase should test `mbMiddleButton`
+(or a locally-named alias of it), not `mbRightButton`.
+
+**`kbCtrlEnter` is a real `Drivers.pas` constant that no Unix terminal can
+ever actually produce.** Same root cause as the Ctrl+I/Shift+Enter/
+Ctrl+Shift+S cases in tui.md's Bindings section: Enter's byte is CR
+(`$0D`), already below `$20`, so Ctrl-masking changes nothing about it, and
+`keyboard.pp`'s escape-sequence tree (`roottree`/`AddSpecialSequence` - what
+a Ctrl+<non-letter> chord needs to be reachable at all) has no entry for it
+- confirmed by grepping the file for the string with zero hits. A constant
+existing in `Drivers.pas` is not evidence a real terminal can generate it;
+check the driver's own sequence table (or the raw-byte case for a
+Ctrl+<letter>) before relying on any KeyCode this framework predefines.
+
 **LazUtils is not LCL - `build-dysnomia.sh` now adds its source dir to the
 unit path.** `src/project/ProjectFile.pas` (Eris source, untouched) uses
 `FileUtil.DeleteDirectory`; `FileUtil` lives in the `lazutils` Lazarus
@@ -737,6 +788,311 @@ View method to remap colors, used by derived classes for customization.
 
 ---
 
+### Additional Core Classes
+
+#### TInterior (views.pas)
+Inherits from TView. Provides basic grouped content without window chrome.
+- `CONSTRUCTOR Init(Var Bounds: TRect)`
+- `FUNCTION GetPalette: PPalette; Virtual`
+- Core view without frame or window title
+
+#### TSizeableWindow (views.pas)
+Window with size limit constraints enforced via virtual SizeLimits method.
+- `PROCEDURE SizeLimits(Var Min, Max: TPoint); Virtual` - override to enforce bounds
+- Automatically constrains window resize operations to limits defined
+
+#### TEditor (editors.pas)
+Advanced multi-line text editor with line/block operations.
+- `FileName: String` - associated file path
+- `Modified: Boolean` - unsaved changes flag
+- `CurPtr: Word` - cursor position in buffer
+- `CurLine: Longint` - current line number
+- `TopLine: Longint` - first visible line
+- Methods for line insertion, deletion, search/replace operations
+- Full clipboard integration (cut/copy/paste blocks)
+
+---
+
+### Advanced Stream I/O and Persistence
+
+#### TStream (memory.pas)
+Base stream class for serializing Free Vision objects.
+
+Key methods:
+- `CONSTRUCTOR Init(InitSize: Sw_Word; Duplicated: Boolean)`
+- `FUNCTION GetPos: Longint` - current stream position
+- `FUNCTION GetSize: Longint` - stream byte count
+- `PROCEDURE Read(Var Buf; Count: Word)` - read bytes
+- `PROCEDURE Write(Var Buf; Count: Word)` - write bytes
+- `PROCEDURE Seek(Pos: Longint)` - jump to position
+- `PROCEDURE Reset` - clear stream, rewind to 0
+- `PROCEDURE Truncate` - resize to current position
+- `FUNCTION ReadStr: PString` - read heap-allocated string
+- `PROCEDURE WriteStr(P: PString)` - write heap string with length prefix
+- `FUNCTION ReadWord: Word; FUNCTION WriteWord(W: Word)`
+- `FUNCTION ReadLong: Longint; PROCEDURE WriteLong(L: Longint)`
+
+#### RegisterView() / Stream Registration
+Dynamically register custom view classes for streaming:
+```
+TYPE TStreamRec = RECORD
+  ObjType: Word;     // Unique ID (idXXX constant)
+  VmtLink: Pointer;  // TypeOf(TMyView)
+  Load: Pointer;     // @TMyView.Load
+  Store: Pointer;    // @TMyView.Store
+END;
+```
+
+#### Load/Store Virtual Methods
+```
+CONSTRUCTOR MyView.Load(Var S: TStream); Virtual;
+PROCEDURE MyView.Store(Var S: TStream); Virtual;
+```
+- Always call parent's Load/Store first to preserve base state
+- Use S.ReadStr/WriteStr for heap strings
+- Use GetSubViewPtr/PutSubViewPtr for child view pointers
+- Manual Read/Write for custom fields
+
+---
+
+### Text Output and Drawing Primitives
+
+#### TDrawBuffer and Screen Writing
+Free Vision's text output uses character/attribute pairs:
+
+Methods:
+- `PROCEDURE WriteStr(X, Y: Sw_Integer; Str: String; Color: Byte)` - write colored string
+- `PROCEDURE WriteChar(X, Y: Sw_Integer; C: Char; Color: Byte; Count: Word)` - repeat char
+- `PROCEDURE WriteLine(X, Y, W, H: Sw_Integer; Var Buf)` - write raw buffer region
+- `PROCEDURE WriteBuf(X, Y, W, H: Sw_Integer; Var Buf)` - write with optional clip
+
+Helper functions:
+- `FUNCTION TextWidth(Const Txt: String): Sw_Integer` - unformatted string width
+- `FUNCTION CTextWidth(Const Txt: String): Sw_Integer` - width accounting for ~ shortcut skip
+- Used to measure button/label text before layout
+
+#### MoveStr / MoveChar (fvcommon.pas)
+Buffer manipulation helpers (write to memory buffer, not screen directly):
+- `PROCEDURE MoveStr(Var Buf, S: String; Attr: Byte; var Indent: Integer)` - fill buffer with string
+- `PROCEDURE MoveChar(Var Buf: TDrawBuffer; C: Char; Attr: Byte; Len: Sw_Integer)` - fill N cells
+- `FUNCTION StrLen(Const S: String): Sw_Integer` - account for ~ shortcut character
+
+#### Cursor Control
+- `PROCEDURE ShowCursor; PROCEDURE HideCursor` - manage cursor visibility
+- `PROCEDURE BlockCursor; PROCEDURE NormalCursor` - cursor shape (block vs underline)
+- `PROCEDURE DrawCursor; Virtual` - redraw cursor in view
+- `PROCEDURE ResetCursor; Virtual` - reset to default state after event
+
+---
+
+### Input Validation
+
+#### Validator Classes (validate.pas)
+Base class: `TValidator` - override Valid() to implement custom validation.
+
+Standard validators:
+- `TRangeValidator` - numeric range (0-99)
+  - `CONSTRUCTOR Init(AMin, AMax: Longint)`
+  - Valid if value within [AMin, AMax]
+
+- `TFilterValidator` - character filtering
+  - `CONSTRUCTOR Init(AValidChars: String)`
+  - Valid if all characters in AValidChars
+
+- `TPictureValidator` - format pattern matching
+  - `CONSTRUCTOR Init(APicture: String)`
+  - Picture syntax: # = digit, ? = letter, ~ = alphanumeric
+
+Custom validators override:
+```
+FUNCTION Valid(S: String): Boolean; Virtual;
+FUNCTION Error: String; Virtual;  // Error message
+```
+
+#### Validator Usage
+- Assign to TInputLine via `SetValidator(V: PValidator)`
+- With `Options := Options or ofValidate` flag set, called before accepting input
+- Return false to reject, optionally display error via Message()
+
+---
+
+### Message Routing and Commands
+
+#### Message() Function
+Route commands and events between views:
+
+```
+FUNCTION Message(Receiver: PView; What, Command: Word; 
+                 InfoPtr: Pointer): Word;
+```
+
+- `What`: event type (evCommand, evBroadcast, evMouseDown, etc.)
+- `Command`: command code (cmOK, cmYes, cmClose, etc.)
+- `InfoPtr`: optional data payload (button pointer, etc.)
+- Returns: result from receiver's HandleEvent
+- Delivers synchronously (blocks until handled)
+
+#### Event Masking
+Views filter events via `EventMask: Word` field:
+- `evNothing = $0000` - ignore all
+- `evMouse = $000F` - any mouse event
+- `evKeyboard = $0010` - keyboard only
+- `evCommand = $0100` - command messages
+- `evAll = $FFFF` - accept everything
+
+#### Command Enable/Disable
+- `FUNCTION CommandEnabled(Command: Word): Boolean`
+- `PROCEDURE EnableCommands(Commands: TCommandSet)` - bitset of cmXXX codes
+- `PROCEDURE DisableCommands(Commands: TCommandSet)`
+- `PROCEDURE SetCmdState(Commands: TCommandSet; Enable: Boolean)`
+
+---
+
+### Utility Functions (fvcommon.pas)
+
+#### String Utilities
+- `FUNCTION NewStr(Const S: String): PString` - allocate heap string
+- `PROCEDURE DisposeStr(P: PString)` - free heap string
+- `FUNCTION UpStr(Const S: String): String` - uppercase
+- `FUNCTION StUpStr(S: String): String` - uppercase in-place (modifies parameter)
+- `FUNCTION CtrlToArrow(Ch: Char): Char` - map Ctrl+X to arrow equivalent
+
+#### Key Utilities
+- `FUNCTION GetAltChar(Ch: Char): Char` - extract ~ underlined letter for Alt+X
+- `FUNCTION GetCtrlChar(Ch: Char): Char` - extract ^ underlined letter for Ctrl+X
+- `FUNCTION IsPrintable(Ch: Char): Boolean` - non-control character
+
+#### Rect and Point Utilities
+- `PROCEDURE Normalize(Var R: TRect)` - ensure A <= B
+- `FUNCTION Union(R1, R2: TRect): TRect` - bounding box
+- `FUNCTION Intersect(R1, R2: TRect): TRect` - overlap region
+- `FUNCTION IntersectRect(Var R: TRect; R1, R2: TRect): Boolean` - overlap with result
+- `PROCEDURE OffsetRect(Var R: TRect; Dx, Dy: Integer)` - translate
+- `FUNCTION PtInRect(P: TPoint; Const R: TRect): Boolean` - point containment
+
+---
+
+### Standard Dialogs (stddlg.pas)
+
+#### TFileDialog
+Full file/directory browser with path navigation:
+- `CONSTRUCTOR Init(WildCard, Title, InputName, FkeyWord, HelpCtx: String; Mask: Word)`
+- `FileName: String` - selected file on OK
+- `Directory: String` - current directory path
+- `Mask: Word` - file attributes (faArchive, faReadOnly, faHidden, etc.)
+- Supports multi-level directory navigation, pattern filtering
+- Returns cmOK/cmCancel on completion
+
+Flags (Mask parameter):
+- `faArchive` - show archive files
+- `faReadOnly` - show read-only files
+- `faHidden` - show hidden files
+- `faSysFile` - show system files
+
+#### MessageBox Dialog
+```
+FUNCTION MessageBox(const Msg: String; const Title: String; 
+                    Buttons: Word): Word;
+```
+Returns one of: `cmYes, cmNo, cmOK, cmCancel`
+Button flags: `mfYesNoCancel, mfYesNo, mfOkCancel, mfOkButton`
+
+#### InputBox Dialog
+```
+FUNCTION InputBox(const Title: String; const APrompt: String; 
+                  var Result: String): Word;
+```
+Single-line prompt dialog, returns cmOK/cmCancel
+
+---
+
+### Desktop and Window Management
+
+#### TProgram (app.pas)
+Base class for TApplication. Handles screen initialization and main event loop.
+- `PROCEDURE InitScreen` - set up video mode, palette
+- `PROCEDURE InitStatusLine` - create status bar
+- `PROCEDURE InitMenuBar` - create menu bar (virtual)
+- `PROCEDURE InitDesktop` - create desktop and background (virtual)
+- `PROCEDURE Run; Virtual` - main event loop, never returns normally
+- `PROCEDURE Idle; Virtual` - called when event queue empty
+- `PROCEDURE HandleEvent(Var Event: TEvent); Virtual` - process global commands
+- `PROCEDURE Shutdown` - cleanup (called on exit)
+
+#### ScreenMode Control (drivers.pas)
+Global screen functions:
+- `FUNCTION VideoMode: Word` - query current mode
+- `PROCEDURE SetMode(Mode: Word)` - set resolution/colors
+- `PROCEDURE SetCursorType(CT: Word)` - cursor style (crHiddenCursor, crUnderline, crBlock, crFullBlock)
+- `FUNCTION CursorType: Word` - current style
+- `PROCEDURE SetCursorPos(X, Y: Word)` - move cursor
+- `PROCEDURE GetCursorPos(Var X, Y: Word)` - read cursor position
+- `PROCEDURE ClearScreen(Color: Byte)` - fill screen
+- `FUNCTION SaveScreen: Pointer` - save screen buffer (malloc)
+- `PROCEDURE RestoreScreen(SavePtr: Pointer)` - restore from buffer
+
+---
+
+### Resource Management
+
+#### Memory Utilities
+`MemAvail, MaxAvail: Longint` - global memory functions (RTL)
+- `THeapView` gadget displays this in status line
+
+#### String Pool (NewStr / DisposeStr)
+Free Vision uses pool-allocated strings for efficiency:
+```
+VAR MyStr: PString;
+BEGIN
+  MyStr := NewStr('Hello');  // allocate from pool
+  // ... use MyStr^
+  DisposeStr(MyStr);         // return to pool
+END;
+```
+
+---
+
+### Collections and Data Structures
+
+#### TCollection (rtl-extra/src/inc/objects.pp)
+Generic dynamic array for heap objects:
+- `CONSTRUCTOR Init(ALimit, ADelta: Sw_Integer)` - initial size, growth increment
+- `PROCEDURE Insert(Item: Pointer)` - append
+- `PROCEDURE AtInsert(Index: Sw_Integer; Item: Pointer)` - insert at position
+- `PROCEDURE AtDelete(Index: Sw_Integer)` - remove by index
+- `PROCEDURE DeleteAll` - clear all items
+- `FUNCTION At(Index: Sw_Integer): Pointer` - indexed access
+- `FUNCTION Count: Sw_Integer` - item count
+- `FUNCTION FirstThat(P: CodePointer): Pointer` - search by predicate
+- `PROCEDURE ForEach(P: CodePointer)` - apply to all
+
+Used by TListBox, TDialog for managing list items and controls.
+
+#### TStringCollection
+Variant of TCollection specialized for PString pointers.
+
+#### Items and PSItem (menus.pas)
+Linked-list menu item structure:
+```
+TYPE PMenuItem = ^TMenuItem;
+     TMenuItem = RECORD
+       Next: PMenuItem;
+       Name: PString;
+       Command: Word;
+       KeyCode: Word;
+       HelpCtx: Word;
+       SubMenu: PMenu;
+     END;
+```
+
+Menu construction helpers:
+- `FUNCTION NewItem(Name: String; Command: Word; KeyCode: Word; HelpCtx: Word; Next: PMenuItem): PMenuItem`
+- `FUNCTION NewSubMenu(Name: String; HelpCtx: Word; SubMenu: PMenu; Next: PMenuItem): PMenuItem`
+- `FUNCTION NewMenu(Items: PMenuItem): PMenu`
+- `PROCEDURE DisposeMenu(M: PMenu)` - free heap-allocated menu structure
+
+---
+
 ### Common Patterns
 
 #### Initializing a View Hierarchy
@@ -843,6 +1199,236 @@ begin
   Input^.SetValidator(V);
   Input^.Options := Input^.Options or ofValidate;
 end;
+```
+
+#### Creating Modal Dialogs with Controls
+```
+TYPE TMyData = RECORD
+  Name: String[80];
+  Count: Integer;
+END;
+
+VAR
+  D: TDialog;
+  R: TRect;
+  NameField: PInputLine;
+  CountField: PInputLine;
+  OkBtn: PButton;
+  Data: TMyData;
+
+BEGIN
+  R.Assign(10, 5, 70, 15);
+  D := New(PDialog, Init(R, 'Data Entry'));
+  
+  // Add controls to dialog
+  NameField := D^.NewInputLine(R, 'Name: ', 80);
+  D^.Insert(NameField);
+  
+  CountField := D^.NewInputLine(R, 'Count: ', 5);
+  D^.Insert(CountField);
+  
+  OkBtn := D^.NewButton(R, '~OK', cmOK, bfDefault);
+  D^.Insert(OkBtn);
+  
+  // Exchange data
+  Data.Name := 'Default';
+  Data.Count := 0;
+  D^.SetData(Data);
+  
+  // Execute modal
+  if Application^.ExecuteDialog(D, nil) = cmOK then
+  BEGIN
+    D^.GetData(Data);
+    // Use Data.Name, Data.Count
+  END;
+END;
+```
+
+#### Working with List Views and Scrollbars
+```
+TYPE MyListData = RECORD
+  Items: PCollection;
+  Selected: Integer;
+END;
+
+VAR
+  List: PListBox;
+  HScroll: PScrollBar;
+  VScroll: PScrollBar;
+  Window: PWindow;
+  R: TRect;
+  Data: MyListData;
+
+BEGIN
+  // Create window
+  R.Assign(5, 3, 75, 20);
+  Window := New(PWindow, Init(R, 'List Example', 1));
+  
+  // Create scrollbars
+  HScroll := Window^.StandardScrollBar(sbHorizontal);
+  VScroll := Window^.StandardScrollBar(sbVertical);
+  
+  // Shrink bounds for list (leave room for scrollbars)
+  R.Assign(1, 1, Size.X - 2, Size.Y - 2);
+  List := New(PListBox, Init(R, 1, HScroll, VScroll));
+  
+  // Create and populate collection
+  New(MyListData.Items, Init(100, 10));  // 100 initial, grow by 10
+  MyListData.Items^.Insert(NewStr('Item 1'));
+  MyListData.Items^.Insert(NewStr('Item 2'));
+  // ...
+  
+  List^.NewList(MyListData.Items);
+  Window^.Insert(List);
+  Window^.Insert(HScroll);
+  Window^.Insert(VScroll);
+  
+  // Execute
+  if Application^.ExecView(Window) = cmOK then
+  BEGIN
+    List^.GetData(Data);
+    // Data.Selected contains selected item index
+  END;
+END;
+```
+
+#### Key Intercept Pattern for Tab Navigation
+```
+PROCEDURE TMyPane.HandleEvent(Var Event: TEvent);
+BEGIN
+  // Intercept Tab before inherited to override default focus cycling
+  IF (Event.What = evKeyDown) THEN
+  BEGIN
+    CASE Event.KeyCode OF
+      kbTab:
+        BEGIN
+          Owner^.SelectNext(True);  // Move to next sibling pane
+          IF Owner^.Current <> nil THEN
+            Owner^.Current^.Focus;  // Focus the new pane
+          ClearEvent(Event);        // Consume the event
+        END;
+      kbShiftTab:
+        BEGIN
+          Owner^.SelectNext(False);
+          IF Owner^.Current <> nil THEN
+            Owner^.Current^.Focus;
+          ClearEvent(Event);
+        END;
+    END;
+  END;
+  inherited HandleEvent(Event);  // Let normal handling proceed
+END;
+```
+
+#### Drawing Custom Grid/Table Content
+```
+TYPE TMyGrid = OBJECT(TView)
+  Rows, Cols: Integer;
+  Data: ^ARRAY[0..999] OF String;
+  PROCEDURE Draw; Virtual;
+  PROCEDURE HandleEvent(Var Event: TEvent); Virtual;
+END;
+
+PROCEDURE TMyGrid.Draw;
+VAR
+  X, Y, CellWidth: Integer;
+  B: TDrawBuffer;
+  Attr: Byte;
+BEGIN
+  CellWidth := 10;
+  
+  FOR Y := 0 TO Rows - 1 DO
+  BEGIN
+    MoveStr(B, '', GetColor(2), 0);  // Initialize buffer
+    
+    FOR X := 0 TO Cols - 1 DO
+    BEGIN
+      IF (X = CurX) AND (Y = CurY) THEN
+        Attr := GetColor(3)  // Focused cell
+      ELSE
+        Attr := GetColor(2); // Normal cell
+      
+      WriteChar(X * CellWidth, Y, ' ', Attr, CellWidth);
+      WriteStr(X * CellWidth + 1, Y, 
+               Copy(Data^[Y * Cols + X], 1, CellWidth - 2), Attr);
+    END;
+  END;
+END;
+```
+
+#### Building a Popup Context Menu at Mouse Position
+```
+PROCEDURE TMyView.RightClickMenu(Event: TEvent);
+VAR
+  Menu: PMenu;
+  MenuBox: PMenuBox;
+  Item: PMenuItem;
+  Local: TPoint;
+  R: TRect;
+  Command: Word;
+BEGIN
+  // Build menu structure (items in reverse order)
+  Item := nil;
+  Item := NewItem('~Close', cmClose, kbEscape, 0, Item);
+  Item := NewItem('~Edit', cmEdit, 0, 0, Item);
+  Item := NewItem('~Delete', cmDelete, kbDel, 0, Item);
+  Menu := NewMenu(Item);
+  
+  // Convert global mouse coords to local/global as needed
+  Desktop^.MakeLocal(Event.Where, Local);
+  
+  // Create menu box, allowing it to auto-fit
+  R.Assign(Local.X, Local.Y, Local.X + 20, Local.Y + 10);
+  MenuBox := New(PMenuBox, Init(R, Menu, nil));
+  
+  // Execute menu
+  Command := Desktop^.ExecView(MenuBox);
+  
+  // Clean up
+  Dispose(MenuBox, Done);
+  DisposeMenu(Menu);
+  
+  // Handle selection
+  IF Command <> 0 THEN
+    Message(Owner, evCommand, Command, @Self);
+END;
+```
+
+#### Single-Row Horizontal Scrollbar as Slider
+```
+PROCEDURE InitTempoControl;
+VAR
+  R: TRect;
+  TempoSlider: PScrollBar;
+  CurrentTempo: Integer;
+BEGIN
+  R.Assign(10, 5, 50, 6);  // 1 row tall = horizontal scrollbar
+  TempoSlider := New(PScrollBar, Init(R));
+  
+  // Configure as slider
+  TempoSlider^.SetRange(60, 200);       // BPM range
+  TempoSlider^.SetStep(4, 20);          // Arrow=4, Page=20
+  TempoSlider^.SetValue(120);           // Default
+  TempoSlider^.Id := idTempoSlider;
+  
+  Window^.Insert(TempoSlider);
+  TempoSlider^.Focus;
+END;
+
+// In HandleEvent:
+IF Event.What = evCommand THEN
+BEGIN
+  CASE Event.Command OF
+    cmScrollBarChanged:
+      IF Event.Id = idTempoSlider THEN
+      BEGIN
+        CurrentTempo := TempoSlider^.Value;
+        AudioEngine.SetTempo(CurrentTempo);
+        DrawTempo;
+        ClearEvent(Event);
+      END;
+  END;
+END;
 ```
 
 ---
@@ -1102,3 +1688,657 @@ one side of the existing two-unit dependency, so the graph among unit
 `interface` sections stays acyclic. (Implementation-section-only `uses`
 additions don't help either, once the cycle runs through an interface-
 section dependency.)
+
+---
+
+## Advanced FV Implementation Details
+
+### Constructor Semantics and Object Initialization
+
+#### Object Creation Pattern
+Free Vision strictly requires manual allocation via `New()` with virtual constructor:
+```
+VAR MyView: PView;
+BEGIN
+  MyView := New(PView, Init(Bounds));  // Allocate + call Init
+  // ...
+  Dispose(MyView, Done);               // Call Done + deallocate
+END;
+```
+
+**Critical**: Never call `inherited Init` in intermediate constructors if they return early or fail - the base TView.Init must run to establish the object's fields properly. If a custom constructor needs to validate arguments before calling inherited, do that validation *before* `inherited Init`, not after.
+
+#### Init vs Constructor
+FPC objects use virtual methods `Init` (constructors) and `Done` (destructors), not the `constructor`/`destructor` keywords. Never override `Create` or `Destroy` in Free Vision classes - use `Init` and `Done` instead. Virtual destructors don't exist in classic Pascal - `Done` is a plain virtual method that TView defines, inherited by all descendants, called manually before `Dispose`.
+
+#### Initialization Order
+Objects registered with `TView` must call `inherited Init` first in their constructor, before setting their own fields. Some properties (like `Options`, `State`, `EventMask`) are set by `TView.Init` to sensible defaults - overwriting them before calling inherited can lose those defaults.
+
+---
+
+### Input and Focus Management Details
+
+#### Focus Delivery Chain
+Keyboard input flows top-down through the owner chain:
+1. Application.HandleEvent() - app-level commands
+2. Owner (TGroup/TWindow) - intermediate containers
+3. Current child's HandleEvent - leaf view that has focus
+4. Event.What = evKeyDown, routing via Key/KeyCode fields
+
+Each level sees the event in its HandleEvent, and can:
+- Clear the event (mark as consumed)
+- Forward via `inherited HandleEvent(Event)` (not consumed)
+- Send a different command upstream via `Message(Owner, ...)`
+
+**Critical mistake**: If a parent's HandleEvent consumes an event (clears it) before calling inherited, the child never sees it. Conversely, if a parent doesn't clear it and calls inherited, the child gets it. The parent-child relationship is reversed from typical UI frameworks - the parent routes to Current first, then processes the leftovers.
+
+#### Selectable vs Focusable
+- `ofSelectable` flag (Option) - view can receive focus
+- `sfFocused` state flag (State) - view currently has focus
+- `.Focus()` method - ask to receive keyboard input (climbs owner chain, fails silently if owner is nil)
+- `.Select()` method - become owner's Current child (doesn't climb, doesn't affect siblings)
+
+A view with `ofSelectable` set but never explicitly `.Focus()`'d will receive mouse events (hit-tested in `FirstThat`) but not keyboard events. Tab cycling via `SelectNext` only moves the owner's `Current`, it doesn't automatically climb or deliver keys.
+
+#### Mouse Events and Hit Testing
+Mouse events (evMouseDown, evMouseUp, evMouseMove) are routed by spatial hit-testing, not by focus:
+1. Event.Where is in global screen coordinates
+2. Owner traverses children in reverse insertion order (drawn-last-is-topmost)
+3. Calls `ContainsMouse(Where)` on each until one returns true
+4. Sends event to that child; child's HandleEvent fires immediately
+5. Owner calls inherited HandleEvent for non-mouse events only
+
+A mouse-aware view doesn't need keyboard focus to receive mouse events.
+
+---
+
+### Redrawing and Buffering
+
+#### Draw() Call Frequency
+`Draw()` is called:
+- On initialization via `DrawView()` (called by TApplication after inserting a top-level window)
+- After events that change appearance (select, state, data)
+- After `ReDraw()` call on parent (full redraw cascade)
+- On window focus change or mode switch
+- NOT automatically on every event
+
+**Do not rely on Draw() being called after HandleEvent()** - if you change internal state, call `DrawView()` yourself or let the parent's `ReDraw()` pick it up on the next event loop iteration.
+
+#### Buffered Output Pattern
+```
+PROCEDURE TMyView.Draw;
+VAR
+  B: TDrawBuffer;  // Line buffer (up to 256 chars)
+  Color: Byte;
+BEGIN
+  Color := GetColor(1);
+  MoveStr(B, 'My Text', Color, 0);  // Write to buffer
+  WriteLine(0, 0, Size.X, 1, B);    // Copy buffer to screen
+END;
+```
+
+TDrawBuffer is character/attribute pairs (2 bytes per cell). `WriteLine` is the low-level screen output. Never call WriteChar/WriteStr directly on screen - build in a buffer first via MoveStr/MoveChar, then output once.
+
+#### Palette and Color Resolution
+GetColor(Index) is expensive - it walks the entire owner chain. Call it once per Draw(), cache the result in a local, then use that byte for all MoveStr/MoveChar calls in that draw pass.
+
+---
+
+### State Flags and Property Interactions
+
+#### State Flags That Matter
+- `sfVisible` - drawn on screen (set by Show/Hide)
+- `sfCursorVis` - cursor visible within view
+- `sfActive` - in active window (set by app on focus change)
+- `sfSelected` - currently selected (TCluster items, list items)
+- `sfFocused` - has keyboard input (set by .Focus())
+- `sfDragging` - being mouse-dragged (set by DragView)
+- `sfDisabled` - not responsive to input (can be read/set manually)
+
+#### View Options
+- `ofSelectable` - participates in Tab cycling
+- `ofFramed` - TWindow draws frame around it
+- `ofPreProcess` - view's HandleEvent runs before children's
+- `ofPostProcess` - view's HandleEvent runs after children's
+- `ofBuffered` - TGroup double-buffers this view's draw
+- `ofTileable` - included in Desktop.Tile() arrangement
+- `ofCentered` / `ofCenterX` / `ofCenterY` - auto-center in owner
+
+Setting `ofBuffered` on a TGroup makes the entire group redraw to memory first, then output in one block - useful for flicker-free updates of complex child hierarchies.
+
+#### Options and Init
+Options are NOT reset by Init() - if you set them before calling inherited, they persist. Set them *after* inherited Init returns if you want to override the defaults.
+
+---
+
+### Common Runtime Errors and Their Causes
+
+#### "View doesn't appear" (silent)
+- Bounds are relative to owner, not global. Check `GetExtent()` returns `(0,0)-(Size)` not actual screen coords.
+- View is behind other views. Call `MakeFirst()` to bring to front.
+- View's Owner is nil (not inserted yet). Confirm `Insert()` was called.
+- View is outside owner's bounds. Even if it's inserted, if Origin + Bounds extends past owner's Size, it clips.
+- Parent's `ClipChilds()` returns true but child is outside parent's visible area.
+
+#### "Keyboard input not working"
+- View doesn't have focus. Call `.Focus()` *after* insertion is complete (not inside InitDeskTop).
+- Owner's `Current` is nil. Call `SelectNext(True)` to pick a child, then `.Focus()` on it.
+- View is disabled (sfDisabled flag). Check with GetState(sfDisabled).
+- View doesn't have ofSelectable option set.
+- Parent's HandleEvent consumed the event before calling inherited.
+
+#### "Palette is messed up / red/blinking artifacts"
+- Palette index out of range. Window's GetPalette() palette is too short for its child control (e.g. plain TWindow with TListBox). Use CGrayDialog palette instead.
+- Blink bit accidentally set. Check for $F0, $Cx, $Ex - these all have bit 7 set. Use $70 for reverse-video instead.
+- GetColor(n) returns wrong index because palette cascade re-mapped it. Build a custom palette that accounts for all child palettes, or skip GetColor entirely and use raw attribute bytes.
+
+#### "Button/command doesn't fire"
+- Button has bfBroadcast flag instead of bfNormal. Broadcast sends evBroadcast, not evCommand. Change to bfNormal.
+- Owner's HandleEvent doesn't have a `case Event.Command of` block. Commands only fire if owner is listening.
+- Event consumed somewhere up the chain. Check that inherited HandleEvent is being called.
+
+#### "Tab cycling strange / focus jumps unexpectedly"
+- Intermediate TGroup between focused view and TWindow. If two levels of TGroup exist, SelectNext on the outer one doesn't account for the inner one. Flatten the hierarchy if possible.
+- Tab handled by TWindow before outer container. TWindow has its own tab handler that calls FocusNext. Intercept kbTab in the parent before calling inherited.
+
+#### "Scrollbar doesn't move / list doesn't scroll"
+- Scrollbar's Id doesn't match the list's id. TListViewer auto-queries scrollbars by id - if they don't match, events don't connect.
+- List hasn't called SetTopItem() or FocusItem() after setting range. Initial layout is manual.
+- Scrollbar's Range (Min/Max/Page) not set. Call SetRange and SetStep after creating it.
+
+#### "Window is draggable but moves off-screen"
+- DragView limits are TRect - if not set, there's no constraint. Provide a valid Limits rect in DragView call, anchored to parent's visible area.
+
+---
+
+### Performance and Memory Optimization
+
+#### String Management
+Always use NewStr/DisposeStr for heap strings in Free Vision:
+```
+S := NewStr('text');  // Allocate from pool
+// ...
+DisposeStr(S);        // Return to pool (not Dispose)
+```
+
+Free Vision maintains a pool to reduce allocation churn. Direct Pascal strings use stack/local memory, which is fine for temporaries, but pooled strings survive across event processing.
+
+#### Collection Sizing
+When creating a TCollection, choose initial size and growth delta wisely:
+```
+NEW(MyCollection, Init(100, 10));  // Start at 100, grow by 10
+```
+Growth is geometric (multiplied, not added), so setting delta=1 for a large collection means many tiny reallocs. A rule of thumb: delta ~= sqrt(initial size).
+
+#### View Redraw Batching
+If many properties change, batch the redraws:
+```
+TWindow.Lock;    // Stop redrawing
+View1.SetState(sfActive, True);
+View2.SetState(sfActive, False);
+View3.SetData(...);
+TWindow.Unlock;  // Redraw everything at once
+TWindow.ReDraw;  // Force full cascade
+```
+
+Lock/Unlock disables incremental draws; ReDraw forces a complete repaint. Without batching, each SetState can trigger a Draw().
+
+#### Large Grids / Tables
+For views with 100+ rows/columns:
+- Don't create actual views for each cell - that's 10,000 objects. Use a single TView and hand-draw via Draw().
+- Cache measurements (cell width, row height) in instance variables, don't recalculate on every Draw() call.
+- Implement scroll-aware rendering: only Draw() the visible cells, use TopItem/TopColumn to track scroll state.
+- If selection is visible, draw it differently in Draw(), don't track 1000 selected-state flags.
+
+---
+
+### Event Processing Phases and Message Flow
+
+#### Event Loop Phases
+TApplication.Run() repeats:
+1. GetEvent() - get next input (blocking if queue empty, calls Idle())
+2. Call HandleEvent(Event) on TApplication, propagates to views
+3. Event.What still set? (not consumed) - route to mouse/keyboard specific handlers
+4. Return to step 1
+
+Message() calls HandleEvent synchronously and return immediately - it doesn't enter a nested loop.
+
+#### Broadcast Messages
+`evBroadcast` is sent to every view in a group (not just Current):
+1. TGroup iterates children
+2. Calls HandleEvent on each with the broadcast event
+3. Children can consume it (clear Event.What) to stop propagation to siblings
+
+Used when a button click should update multiple unrelated views. Rare in most apps.
+
+---
+
+### Memory Leaks and Resource Management
+
+#### Disposing Views Properly
+Always match New/Dispose:
+```
+P := New(PMyView, Init(...));
+Window^.Insert(P);
+// ...
+Window^.Delete(P);  // Remove from owner first
+// Now P is deleted and disposed - DO NOT access it
+// DO NOT call Dispose(P) again
+```
+
+TGroup.Delete() both removes from the linked list AND calls Dispose() on the view. Calling Dispose() after Delete() causes double-free.
+
+If you create a view but decide not to insert it:
+```
+P := New(PMyView, Init(...));
+IF some_condition THEN
+  Window^.Insert(P)
+ELSE
+  Dispose(P, Done);  // Clean up unused view
+```
+
+#### Stream Memory
+TStream allocates a buffer internally. When done:
+```
+MyStream := New(PStream, Init(1024, False));
+// ... read/write
+Dispose(MyStream, Done);  // Free the buffer
+```
+
+#### Palette Memory
+Palette strings returned by GetPalette() are static (in code segment), never heap-allocated. Do not DisposeStr them.
+
+---
+
+### TApplication Subclassing
+
+#### Minimal TApplication Subclass
+```
+TYPE TMyApp = OBJECT(TApplication)
+  PROCEDURE InitDesktop; Virtual;
+  PROCEDURE InitStatusLine; Virtual;
+  PROCEDURE HandleEvent(Var Event: TEvent); Virtual;
+END;
+
+PROCEDURE TMyApp.InitDesktop;
+BEGIN
+  inherited InitDesktop;  // Sets up basic desktop/background
+  // Add your custom windows here
+  DeskTop^.Insert(...);
+END;
+
+PROCEDURE TMyApp.InitStatusLine;
+VAR
+  R: TRect;
+BEGIN
+  GetExtent(R);
+  R.A.Y := R.B.Y - 1;        // Bottom line
+  NEW(StatusLine, Init(R, NewStatusDef(...)));
+  Insert(StatusLine);
+END;
+
+PROCEDURE TMyApp.HandleEvent(Var Event: TEvent);
+BEGIN
+  CASE Event.What OF
+    evCommand: CASE Event.Command OF
+      cmQuit: BEGIN EndModal(cmQuit); ClearEvent(Event); END;
+    END;
+  END;
+  inherited HandleEvent(Event);
+END;
+```
+
+#### Initialization Order
+TApplication.Init calls in sequence:
+1. InitScreen - set video mode, clear screen
+2. InitStatusLine - create status bar
+3. InitMenuBar - create menu bar (virtual, app-defined)
+4. InitDesktop - create desktop (virtual, app-defined)
+5. Insert(DeskTop) - only *after* all InitXXX calls
+
+So `DeskTop^.Owner` is nil inside InitDesktop, but becomes valid after Init returns. This is why `.Focus()` calls made inside InitDesktop don't propagate to the app level.
+
+---
+
+### Deep Dive: View Rendering Pipeline
+
+#### Screen Coordinates vs Local Coordinates
+- Global/Screen coords: (0,0) is top-left of terminal, max is screen width/height
+- Local coords: (0,0) is top-left of a view's own area, max is view's Size
+- Owner coords: (0,0) is top-left of view's Owner (the immediate parent)
+
+TRect bounds in Init() is always in owner-local coords, never screen coords.
+Event.Where from mouse events is always in screen coords.
+TPoint returned by GetExtent() is always local-relative (0,0)-(Size).
+
+To convert mouse event coords to local:
+```
+LocalPt := Event.Where;
+View^.MakeLocal(LocalPt, LocalPt);  // Subtracts all ancestor Origins
+```
+
+#### Drawing Order and Z-Order
+Children are stored in insertion order (linked list). First inserted is drawn first (appears behind). Last inserted is drawn last (appears in front). `MakeFirst()` moves a view to the end of the list (brings to front). This only affects drawing, not input routing (mouse hit-test is also reverse order).
+
+#### Clipping
+By default, views are not clipped to their owner's bounds. A TView at (0,0,100,100) inside a TWindow at (0,0,50,50) will draw in cells 0-99 even though the owner is only 50 wide - part of its output will overwrite the owner's siblings.
+
+To enable clipping, set `ClipChilds := true` in the parent (custom override of ClipChilds virtual method, or manually set a clip area).
+
+---
+
+### Keyboard Input Deep Dive
+
+#### Key Codes and Scancodes
+- KeyCode: Extended key code (kbEnter, kbTab, kbF1, etc.)
+- CharCode: ASCII character (only set for printable keys)
+- ScanCode: Raw hardware scan code (rarely used)
+- KeyShift: Modifier state (kbCtrlShift, kbAltShift, kbLeftShift, etc.)
+
+Examples:
+- Pressing 'a' generates KeyCode=kbEnter (no), CharCode='a', KeyShift=0
+- Pressing Enter generates KeyCode=kbEnter, CharCode=^M ($0D), KeyShift=0
+- Pressing Ctrl+C generates KeyCode=<some code>, CharCode=^C, KeyShift=kbCtrlShift
+
+#### Special Key Handling
+```
+IF (Event.KeyShift AND kbCtrlShift) <> 0 THEN
+  // Ctrl is held
+
+IF (Event.KeyShift AND (kbLeftShift OR kbRightShift)) <> 0 THEN
+  // Shift is held
+
+IF (Event.KeyShift AND kbAltShift) <> 0 THEN
+  // Alt is held
+```
+
+#### Custom Key Binding
+To handle a key globally, intercept it in TApplication.HandleEvent before calling inherited:
+```
+PROCEDURE TMyApp.HandleEvent(Var Event: TEvent);
+BEGIN
+  IF Event.What = evKeyDown THEN
+  BEGIN
+    CASE Event.KeyCode OF
+      kbCtrlS: BEGIN SaveProject; ClearEvent(Event); END;
+      kbCtrlL: BEGIN ShowLog; ClearEvent(Event); END;
+    END;
+  END;
+  inherited HandleEvent(Event);
+END;
+```
+
+---
+
+### Testing and Debugging
+
+#### No Built-in Logging
+Free Vision has no debug output or logging framework. Add your own:
+```
+TYPE TDebugLog = OBJECT
+  F: Text;
+  PROCEDURE Log(Const Msg: String);
+END;
+
+PROCEDURE TDebugLog.Log(Const Msg: String);
+BEGIN
+  WriteLn(F, TimeStr + ': ' + Msg);
+  Flush(F);
+END;
+```
+
+Assign(F, 'debug.log'); Rewrite(F);
+Call Log() from strategic points in your view's HandleEvent.
+
+#### Breakpoints and GDB
+FPC generates DWARF debug info by default (with -g flag). Use GDB on the binary:
+```
+gdb ./myprogram
+(gdb) break TMyView.HandleEvent
+(gdb) run
+(gdb) c              (continue)
+(gdb) p Event.What   (print variable)
+(gdb) step           (step into)
+(gdb) next           (step over)
+```
+
+Terminal redirection: GDB takes over stdin/stdout. Run under `screen` or `tmux`, or use GDB's batch mode to write a script.
+
+---
+
+## Building Sophisticated Applications: Stress-Tested Patterns
+
+The patterns below are drawn from real applications that push Free Vision's limits (Dysnomia's 2000+ line UI, multi-pane real-time content, custom rendering, live input).
+
+### Multi-Level Nested Containers
+
+Real applications often need multiple levels of TWindow → TPane → Content structure:
+```
+TApplication
+  ├─ TDeskTop
+  │  ├─ TMainWindow
+  │  │  ├─ TToolBar (TGroup)
+  │  │  ├─ TPaneContainer (TGroup, horizontal splitter)
+  │  │  │  ├─ TFilePane (TWindow/TGroup)
+  │  │  │  │  └─ TFileListBox
+  │  │  │  ├─ TTrackPane (TWindow/TGroup)
+  │  │  │  │  └─ TTrackListBox
+  │  │  │  └─ TPreviewPane (TWindow/TGroup)
+  │  │  │     └─ TGridView (custom TView)
+```
+
+**Key principle**: Tab-cycling between panes happens at the container level, not window level. Each TPane implements Tab/Shift+Tab to move between siblings:
+```
+PROCEDURE TPane.HandleEvent(Var Event: TEvent);
+BEGIN
+  IF (Event.What = evKeyDown) AND (Event.KeyCode = kbTab) THEN
+  BEGIN
+    Owner^.SelectNext(True);  // Move to next TPane sibling
+    IF Owner^.Current <> nil THEN
+      Owner^.Current^.Focus;  // Focus the new pane
+    ClearEvent(Event);
+  END;
+  inherited HandleEvent(Event);
+END;
+```
+
+Without this pattern, Tab is consumed by TWindow.HandleEvent at the top level and never reaches the pane container.
+
+### Custom Content Views with Real-Time Updates
+
+Instead of TListBox (which expects a TCollection), build a hand-drawn TView for:
+- Grids with 100+ rows (TListBox creates one object per row)
+- Waveform displays, timelines, sequencers
+- Live-updating data (e.g., audio meters, status values)
+
+Pattern:
+```
+TYPE TTimelineView = OBJECT(TView)
+  TopTime: Longint;        // First visible second
+  FocusedClip: PClip;      // Currently focused clip
+  SelectionStart, End: Longint;
+  
+  PROCEDURE Draw; Virtual;
+  PROCEDURE HandleEvent(Var Event: TEvent); Virtual;
+  PROCEDURE ScrollTo(Time: Longint);
+  PROCEDURE SelectClip(C: PClip);
+END;
+
+PROCEDURE TTimelineView.Draw;
+VAR
+  X, Y: Integer;
+  B: TDrawBuffer;
+  Attr: Byte;
+  TimeStr: String;
+BEGIN
+  // Draw header (time ruler)
+  Attr := GetColor(1);
+  MoveStr(B, '', Attr, 0);
+  FOR X := 0 TO Size.X - 1 DO
+  BEGIN
+    IF (TopTime + X) MOD 10 = 0 THEN
+    BEGIN
+      TimeStr := IntToStr((TopTime + X) DIV 10);
+      MoveStr(B, TimeStr, Attr, X);
+      X := X + Length(TimeStr) - 1;  // Skip over written chars
+    END
+    ELSE IF (TopTime + X) MOD 5 = 0 THEN
+      MoveChar(B, '·', Attr, 1);
+  END;
+  WriteLine(0, 0, Size.X, 1, B);
+  
+  // Draw clips
+  FOR Y := 1 TO Size.Y - 1 DO
+  BEGIN
+    IF Y - 1 < Clips^.Count THEN
+    BEGIN
+      Clip := PClip(Clips^.At(Y - 1));
+      DrawClipRow(Y, Clip);
+    END;
+  END;
+END;
+
+PROCEDURE TTimelineView.HandleEvent(Var Event: TEvent);
+VAR Local: TPoint;
+BEGIN
+  CASE Event.What OF
+    evMouseDown:
+    BEGIN
+      Owner^.MakeLocal(Event.Where, Local);
+      IF Local.Y > 0 THEN  // Clicked on clip area
+      BEGIN
+        SelectClip(GetClipAtTime(Local.X + TopTime, Local.Y - 1));
+        DrawView;
+      END;
+      ClearEvent(Event);
+    END;
+    evKeyDown:
+    BEGIN
+      CASE Event.KeyCode OF
+        kbRight: BEGIN ScrollTo(TopTime + 1); DrawView; ClearEvent(Event); END;
+        kbLeft: BEGIN ScrollTo(TopTime - 1); DrawView; ClearEvent(Event); END;
+        kbUp: BEGIN SelectClip(PreviousClip(FocusedClip)); DrawView; ClearEvent(Event); END;
+        kbDown: BEGIN SelectClip(NextClip(FocusedClip)); DrawView; ClearEvent(Event); END;
+      END;
+    END;
+  END;
+  inherited HandleEvent(Event);
+END;
+```
+
+**Performance**: Only render visible rows/columns in the Draw() call. Use instance variables to track which rows are allocated/cached (e.g., RowCache: ARRAY[0..MaxVisibleRows] OF TRowData).
+
+### Polling External State Without Blocking
+
+For audio/DSP applications, monitor external state in Idle():
+```
+PROCEDURE TMyApp.Idle;
+BEGIN
+  // Check if audio engine has new data
+  IF AudioEngine.HasNewSamples THEN
+  BEGIN
+    UpdateMeterView(AudioEngine.GetMeter(0), AudioEngine.GetMeter(1));
+    MeterView^.DrawView;  // Redraw just the meter
+  END;
+  
+  // Check if file loading finished
+  IF FileLoader.IsComplete THEN
+  BEGIN
+    LoadFileIntoEditor(FileLoader.Result);
+    EditorView^.DrawView;
+  END;
+  
+  inherited Idle;
+END;
+```
+
+Idle() is called whenever the input event queue is empty. It's the safe place to poll background work (threads, audio callbacks, file I/O completion) without blocking the UI event loop.
+
+### Building Modular Panes That Share State
+
+Pass references to shared state objects (not copies) through pane constructors:
+```
+TYPE TProjectPane = OBJECT(TWindow)
+  Project: PProject;  // Shared reference
+  CONSTRUCTOR Init(P: PProject; ...);
+END;
+
+CONSTRUCTOR TProjectPane.Init(P: PProject; ...);
+BEGIN
+  inherited Init(...);
+  Project := P;
+  // Now all child controls can access Project
+END;
+
+// Elsewhere:
+PROCEDURE UpdateTrackCount;
+VAR P: PProjectPane;
+BEGIN
+  P := PProjectPane(Owner^.Current);
+  IF P <> nil THEN
+    P^.Project^.Tracks := P^.Project^.Tracks + 1;
+  P^.DrawView;  // Redraw the pane
+END;
+```
+
+This avoids deep copying state and keeps all panes in sync with the same underlying data.
+
+### Dispatching Custom Commands Between Panes
+
+For application-level commands that affect multiple panes, use the Message() function:
+```
+// From a button/menu:
+Message(Application, evCommand, cmAddTrack, nil);
+
+// Handled at app level:
+PROCEDURE TMyApp.HandleEvent(Var Event: TEvent);
+BEGIN
+  CASE Event.What OF
+    evCommand: CASE Event.Command OF
+      cmAddTrack:
+      BEGIN
+        ProjectPane^.Project^.AddTrack;
+        ProjectPane^.DrawView;
+        TimelinePane^.DrawView;
+        ClearEvent(Event);
+      END;
+    END;
+  END;
+  inherited HandleEvent(Event);
+END;
+```
+
+This decouples panes - they don't directly call each other's methods, they post commands to the application.
+
+### Animations and Timed Updates
+
+For blinking cursors, animated indicators, or real-time meters:
+```
+PROCEDURE TMyApp.Idle;
+VAR Ticks: Longint;
+BEGIN
+  GetTime(Ticks);
+  
+  // Blink cursor every 500ms
+  IF (Ticks DIV 500) MOD 2 = 0 THEN
+    CursorView^.Show
+  ELSE
+    CursorView^.Hide;
+  
+  // Animate a spinner
+  CASE (Ticks DIV 100) MOD 4 OF
+    0: SpinnerChar := '/';
+    1: SpinnerChar := '-';
+    2: SpinnerChar := '\';
+    3: SpinnerChar := '|';
+  END;
+  SpinnerView^.DrawView;
+  
+  inherited Idle;
+END;
+```
+
+GetTime() returns milliseconds since system start (resolution varies by platform, but ~10ms granularity is typical).
+
+---
+
