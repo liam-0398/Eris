@@ -36,10 +36,34 @@ type
 
 implementation
 
+const
+  DefaultBrowseDir = '/NFS/Music/Production';
+
+{ Plain insertion sort, case-insensitive - the lists this sorts (one
+  directory's worth of entries) are never long enough for anything fancier
+  to matter. }
+procedure SortStrings(var A: array of string; Count: Integer);
+var
+  i, j: Integer;
+  Tmp: string;
+begin
+  for i := 1 to Count - 1 do
+  begin
+    Tmp := A[i];
+    j := i - 1;
+    while (j >= 0) and (CompareText(A[j], Tmp) > 0) do
+    begin
+      A[j + 1] := A[j];
+      Dec(j);
+    end;
+    A[j + 1] := Tmp;
+  end;
+end;
+
 constructor TDysFileListBox.Init(Bounds: TRect);
 begin
   inherited Init(Bounds, 1, nil);
-  CurDir := IncludeTrailingPathDelimiter(GetCurrentDir);
+  CurDir := IncludeTrailingPathDelimiter(DefaultBrowseDir);
   Reload;
 end;
 
@@ -47,26 +71,55 @@ procedure TDysFileListBox.Reload;
 var
   Entries: PUnSortedStrCollection;
   SR: TSearchRec;
+  Dirs, Files: array of string;
+  DirCount, FileCount, i: Integer;
+  Ext: string;
 begin
-  Entries := New(PUnSortedStrCollection, Init(64, 16));
-  Entries^.Insert(NewStr('..'));
+  DirCount := 0;
+  FileCount := 0;
+  Dirs := nil;
+  Files := nil;
+
   if FindFirst(CurDir + '*', faDirectory, SR) = 0 then
   begin
     repeat
       if (SR.Name <> '.') and (SR.Name <> '..') and
          ((SR.Attr and faDirectory) <> 0) then
-        Entries^.Insert(NewStr(SR.Name + '/'));
+      begin
+        SetLength(Dirs, DirCount + 1);
+        Dirs[DirCount] := SR.Name + '/';
+        Inc(DirCount);
+      end;
     until FindNext(SR) <> 0;
     FindClose(SR);
   end;
+
   if FindFirst(CurDir + '*', faAnyFile, SR) = 0 then
   begin
     repeat
       if (SR.Attr and faDirectory) = 0 then
-        Entries^.Insert(NewStr(SR.Name));
+      begin
+        Ext := LowerCase(ExtractFileExt(SR.Name));
+        if (Ext = '.wav') or (Ext = '.aiff') then
+        begin
+          SetLength(Files, FileCount + 1);
+          Files[FileCount] := SR.Name;
+          Inc(FileCount);
+        end;
+      end;
     until FindNext(SR) <> 0;
     FindClose(SR);
   end;
+
+  SortStrings(Dirs, DirCount);
+  SortStrings(Files, FileCount);
+
+  Entries := New(PUnSortedStrCollection, Init(64, 16));
+  Entries^.Insert(NewStr('..'));
+  for i := 0 to DirCount - 1 do
+    Entries^.Insert(NewStr(Dirs[i]));
+  for i := 0 to FileCount - 1 do
+    Entries^.Insert(NewStr(Files[i]));
   NewList(Entries);
 end;
 
