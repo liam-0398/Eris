@@ -3175,7 +3175,7 @@ begin
   NewClip.TrackID := t;
   NewClip.PitchSemitones := 0;
   NewClip.Gain := 1.0;
-  NewClip.WarpMode := SampleTypes.WarpModeBeats;
+  NewClip.WarpMode := SampleTypes.WarpModeAudio;
 
   Project.PushUndoSnapshot(t);
   { CommitClipToTrack already punches every existing clip inside

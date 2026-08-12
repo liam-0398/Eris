@@ -42,7 +42,7 @@ const
     interface section has no uses clause). }
   CanonicalSampleRate = 44100;
 
-  { Beats (default): each segment plays at 1:1 and loops/truncates its tail
+  { Beats: each segment plays at 1:1 and loops/truncates its tail
     to hit the next marker, preserving pitch - see AudioEngine.ClipSourcePosition.
     RePitch: the classic continuous vari-speed warp - each segment resamples
     linearly across its whole span using the same resample engine as
@@ -53,9 +53,16 @@ const
     slicing has nothing useful to slice at and its splices land mid-cycle of
     a waveform whose period is longer than the crossfade. See
     AudioEngine.TonesClipSample. }
+  { Audio ("AU", default): period-synchronous overlap-add for sustained
+    HARMONIC material - pads, played instruments, the recorded output of a
+    sampler. Beats' territory is drums, LF's is monophonic sub bass; AU covers
+    the polyphonic sustained middle they both handle badly, and is the default
+    because it is also the one that degrades most gracefully on anything else.
+    See AudioEngine.AudioClipSample. }
   WarpModeBeats = 0;
   WarpModeRePitch = 1;
   WarpModeTones = 2;
+  WarpModeAudio = 3;
 
 type
   TClip = record

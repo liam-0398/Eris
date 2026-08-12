@@ -1703,18 +1703,326 @@ begin
   Result := Acc;
 end;
 
+const
+  { AU aims for this synthesis hop and then rounds it to the nearest whole
+    number of fundamental periods. That rounding is the entire mechanism: it
+    puts the timeline grid the grains sit on and the source grid their reads
+    snap to on the SAME lattice - see the header below. }
+  AudioTargetHopMs = 28;
+  { declick across an anchor handover, where one grain lattice ends and the
+    next one begins. It lands in the pre-attack gap by construction, since
+    DetectTransients already backs every boundary off into the quietest block
+    before the attack, so it never softens the attack itself. }
+  AudioAnchorFadeFrames = 64;
+
+{ ---------------------------------------------------------------------------
+  Audio warp ("AU"): period-synchronous overlap-add, for sustained HARMONIC
+  material - pads, played instruments, the recorded output of a sampler.
+
+  Beats cannot serve this material and no setting makes it. A stretched Beats
+  slice fills its surplus timeline by ping-ponging over its own back half, so
+  a pad gets played backwards for a fifth of every slice at the ratios a
+  quantise produces, on a fixed cycle - that periodicity is the warble. Beats
+  is right for drums, where the slices are whole hits and the fill lands in a
+  decay nobody is tracking pitch through. LF is right for monophonic sub. AU
+  is for the polyphonic sustained middle, and fills time by inserting or
+  deleting whole waveform PERIODS instead of reversing anything.
+
+  Why this is not the thing TonesClipSample's header rejects. That header is
+  right: snapping grain starts to a whole multiple of the detected period,
+  on its own, sawtooths - every N grains it duplicates or skips a cycle, and
+  where two grains land anti-phase they cancel and where they land in phase
+  they sum to +6dB. Both of those come from the SYNTHESIS hop being unrelated
+  to the period, which leaves the snap correcting an error it also keeps
+  re-creating. Here the hop is itself a whole number of periods, so:
+
+    grain n reads   Src(n) = Anchor + round(n * Hop / (ratio * P)) * P
+    grain n plays at    TL(n) = AnchorTL + n * Hop,   Hop = m * P
+
+  and the source offset between the two grains overlapping any output frame
+  is Hop - (Src(n+1) - Src(n)) = (m - j) * P for integer j. An exact whole
+  number of periods, always. Every harmonic of the fundamental is therefore
+  phase-aligned across the overlap - there is no anti-phase case to cancel,
+  and no phase jump when a cycle is duplicated or dropped, because a repeated
+  period IS the waveform continuing. What is left is a timing error bounded by
+  P/2 (about 4.5ms on a 110Hz root, 1ms at 440Hz), which is invisible against
+  the sixteenth-note corrections this exists to make.
+
+  The +6dB is separately excluded: the two grain windows are amplitude-
+  complementary (w and 1-w), not power-complementary. Power-complementary is
+  correct for summing UNCORRELATED signals and would indeed give +6dB here,
+  because these two are deliberately correlated. Amplitude-complementary sums
+  correlated content to exactly unity, which is what this needs.
+
+  That leaves the third objection in TonesClipSample's header, which is not
+  answerable and is instead the reason both modes exist: the snap assumes ONE
+  period for the whole sample. A gliding 808 does not have one - so it keeps
+  LF. A pad, a held chord, a sampled instrument does, which is exactly the
+  material AU is for.
+
+  Two properties worth keeping true when editing this:
+
+  * Ratio 1 is bit-transparent. Hop = m * P makes n * Hop / P the integer
+    n * m, so the snap is exact, both grains resolve to the SAME read
+    position, and w * x + (1 - w) * x = x for any w - the window never has to
+    be exact for the passthrough to be.
+
+  * Transients are never granulated across. The lattice restarts at every
+    detected onset, and at a restart grain 0 sits at w = 1 reading the anchor
+    itself, so an attack is reproduced exactly rather than repeated or
+    truncated. This is always on; there is nothing to configure.
+  --------------------------------------------------------------------------- }
+function AudioClipSample(Clip: PPlaybackClip; AClipRelativeFrame: Int64;
+  AChannel: Integer; AHintK: PInteger): Single;
+var
+  k: Integer;
+  SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen, SegEnd: Int64;
+  FirstTrans, TransInSeg: Integer;
+  P, Hop, NominalSrc: Int64;
+  CurIdx, CurSrc, CurTL, PrevSrc, t: Int64;
+  CurVal, PrevVal, w: Double;
+  HavePrev: Boolean;
+
+  function SafeInterp(APos: Double): Single;
+  var
+    AbsPos: Double;
+  begin
+    AbsPos := Clip^.Offset + APos;
+    if (AbsPos < 0) or (AbsPos >= Clip^.FrameCount) then
+      Result := 0
+    else
+      Result := LinearInterpolate(Clip^.Data, Clip^.FrameCount, Clip^.Channels,
+        AChannel, AbsPos);
+  end;
+
+  function TransAt(AIndex: Integer): Int64;
+  begin
+    Result := (Clip^.Transients + AIndex)^ - Clip^.Offset;
+  end;
+
+  { same segment/transient-range setup as BeatsClipSample - see there, and
+    see there too for why every comparison carries -Clip^.Offset }
+  procedure LoadSegment(AK: Integer);
+  var
+    lo, hi, mid: Integer;
+  begin
+    SegStartTimeline := Clip^.MarkerTimeline[AK];
+    SegStartSource := Clip^.MarkerSource[AK];
+    SegTimelineLen := Clip^.MarkerTimeline[AK + 1] - SegStartTimeline;
+    SegSourceLen := Clip^.MarkerSource[AK + 1] - SegStartSource;
+    SegEnd := SegStartSource + SegSourceLen;
+
+    FirstTrans := 0;
+    TransInSeg := 0;
+    if (SegTimelineLen <= 0) or (SegSourceLen <= 0) then
+      Exit;
+    if (Clip^.Transients = nil) or (Clip^.TransientCount <= 0) then
+      Exit;
+
+    lo := 0;
+    hi := Clip^.TransientCount;
+    while lo < hi do
+    begin
+      mid := lo + (hi - lo) div 2;
+      if TransAt(mid) <= SegStartSource then
+        lo := mid + 1
+      else
+        hi := mid;
+    end;
+    FirstTrans := lo;
+
+    hi := Clip^.TransientCount;
+    while lo < hi do
+    begin
+      mid := lo + (hi - lo) div 2;
+      if TransAt(mid) < SegEnd then
+        lo := mid + 1
+      else
+        hi := mid;
+    end;
+    TransInSeg := lo - FirstTrans;
+  end;
+
+  function TimelineOf(ASource: Int64): Int64;
+  begin
+    Result := SegStartTimeline +
+      ((ASource - SegStartSource) * SegTimelineLen) div SegSourceLen;
+  end;
+
+  { Anchor AIndex of the loaded segment: 0 is the segment's own start, and
+    1..TransInSeg are its transients. Each anchor starts a fresh grain
+    lattice, which is what keeps attacks intact. }
+  function AnchorLo(AIndex: Int64): Int64;
+  begin
+    if (AIndex <= 0) or (TransInSeg <= 0) then
+      Exit(SegStartSource);
+    if AIndex > TransInSeg then
+      AIndex := TransInSeg;
+    Result := TransAt(FirstTrans + AIndex - 1);
+  end;
+
+  { the anchor owning AClipRelativeFrame: seeded from the nominal source
+    position, then corrected against the real timeline bounds so the seed's
+    integer rounding can never disagree with the bounds used below. Both
+    correction loops run at most once in practice - same shape as
+    BeatsClipSample.FindSlice. }
+  function FindAnchor: Int64;
+  var
+    lo, hi, mid: Int64;
+  begin
+    if TransInSeg <= 0 then
+      Exit(0);
+
+    lo := 0;
+    hi := TransInSeg;
+    while lo < hi do
+    begin
+      mid := lo + (hi - lo + 1) div 2;
+      if AnchorLo(mid) <= NominalSrc then
+        lo := mid
+      else
+        hi := mid - 1;
+    end;
+    Result := lo;
+
+    while (Result > 0) and (AClipRelativeFrame < TimelineOf(AnchorLo(Result))) do
+      Dec(Result);
+    while (Result < TransInSeg) and
+      (AClipRelativeFrame >= TimelineOf(AnchorLo(Result + 1))) do
+      Inc(Result);
+  end;
+
+  { One anchor region's output: the two grains of its lattice that overlap
+    this frame. Exactly two, always, and both derivable from the frame number
+    alone - no running state, so this stays a pure function of the timeline
+    frame like every other renderer here.
+
+    Reading past the region's own end (which the anchor crossfade below asks
+    for) is deliberate and safe: that is contiguous real source audio, the
+    literal continuation of what the region was already playing. }
+  function RegionSample(AAnchorSrc, AAnchorTL: Int64): Single;
+  var
+    u, n, a: Int64;
+    q, w0: Double;
+
+    { grain AN's source start, snapped onto the period lattice. The nominal
+      analysis position is AN * Hop scaled by this segment's own ratio; the
+      snap is what buys phase coherence, and it costs at most P/2 of timing. }
+    function GrainSrc(AN: Int64): Double;
+    begin
+      Result := AAnchorSrc +
+        Round((AN * Hop) * (SegSourceLen / SegTimelineLen) / P) * P;
+    end;
+
+  begin
+    u := AClipRelativeFrame - AAnchorTL;
+    if u < 0 then
+      u := 0;
+    n := u div Hop;
+    a := u - n * Hop;
+
+    { amplitude-complementary by construction - see the header on why this
+      must not be power-complementary. Smoothstep rather than a raised
+      cosine: same endpoints, same zero slope at both ends, no cos() on the
+      realtime thread, and the partner term is 1 - w0 so the pair sums to
+      exactly unity whatever the curve is. }
+    q := a / Hop;
+    w0 := 1 - q * q * (3 - 2 * q);
+
+    Result := SafeInterp(GrainSrc(n) + a) * w0 +
+      SafeInterp(GrainSrc(n + 1) + a - Hop) * (1 - w0);
+  end;
+
+begin
+  if Clip^.MarkerCount < 2 then
+    Exit(SafeInterp(AClipRelativeFrame));
+
+  P := Clip^.PeriodFrames;
+  if P < 1 then
+    { no usable fundamental was found, so there is no lattice to synchronise
+      to and granulating on an arbitrary period would comb. Hand off to the
+      general-purpose pitch-preserving warp rather than guess. }
+    Exit(BeatsClipSample(Clip, AClipRelativeFrame, AChannel, AHintK));
+
+  k := FindWarpSegment(Clip, AClipRelativeFrame, AHintK);
+
+  LoadSegment(k);
+  if (SegTimelineLen <= 0) or (SegSourceLen <= 0) then
+    Exit(SafeInterp(SegStartSource));
+
+  { round the target hop to whole periods, never below one - this single line
+    is what makes the overlap phase-coherent, see the header }
+  Hop := (AudioTargetHopMs * ProjectSampleRate) div 1000;
+  Hop := ((Hop + P div 2) div P) * P;
+  if Hop < P then
+    Hop := P;
+
+  NominalSrc := SegStartSource +
+    ((AClipRelativeFrame - SegStartTimeline) * SegSourceLen) div SegTimelineLen;
+
+  CurIdx := FindAnchor;
+  CurSrc := AnchorLo(CurIdx);
+  CurTL := TimelineOf(CurSrc);
+  t := AClipRelativeFrame - CurTL;
+
+  HavePrev := False;
+  PrevVal := 0;
+  if (t >= 0) and (t < AudioAnchorFadeFrames) then
+  begin
+    { just after a handover, so the outgoing lattice is still needed to fade
+      across. Without this the splice jumps read position by up to the snap's
+      own P/2, which on held harmonic material is a phase jump. }
+    if CurIdx > 0 then
+    begin
+      PrevSrc := AnchorLo(CurIdx - 1);
+      PrevVal := RegionSample(PrevSrc, TimelineOf(PrevSrc));
+      HavePrev := True;
+    end
+    else if k > 0 then
+    begin
+      { the handover is at a marker, so the outgoing lattice belongs to the
+        previous segment and has to be evaluated under THAT segment's ratio -
+        load it, sample it, then restore the one this frame belongs to }
+      LoadSegment(k - 1);
+      if (SegTimelineLen > 0) and (SegSourceLen > 0) then
+      begin
+        PrevSrc := AnchorLo(TransInSeg);
+        PrevVal := RegionSample(PrevSrc, TimelineOf(PrevSrc));
+        HavePrev := True;
+      end;
+      LoadSegment(k);
+    end;
+  end;
+
+  CurVal := RegionSample(CurSrc, CurTL);
+
+  if HavePrev then
+  begin
+    w := t / AudioAnchorFadeFrames;
+    Result := PrevVal * (1 - w) + CurVal * w;
+  end
+  else
+    Result := CurVal;
+end;
+
 { The audio-producing entry point for a warped clip: Beats goes through the
-  slice renderer above, Tones through the pitch-synchronous one, RePitch stays
-  a plain continuous resample read straight through its position map. Plain
-  ClipSourcePosition remains available for callers that want a single nominal
-  position (detune anchors, split points, marker placement) rather than audio. }
+  slice renderer above, Tones through the pitch-synchronous one, Audio through
+  the period-synchronous one, RePitch stays a plain continuous resample read
+  straight through its position map. Plain ClipSourcePosition remains
+  available for callers that want a single nominal position (detune anchors,
+  split points, marker placement) rather than audio. }
 function ClipSourceSample(Clip: PPlaybackClip; AClipRelativeFrame: Int64;
   AChannel: Integer; AHintK: PInteger): Single;
 var
   AbsPos: Double;
 begin
+  if (Clip^.MarkerCount >= 2) and (Clip^.WarpMode = 3) then
+    Exit(AudioClipSample(Clip, AClipRelativeFrame, AChannel, AHintK));
   if (Clip^.MarkerCount >= 2) and (Clip^.WarpMode = 2) then
     Exit(TonesClipSample(Clip, AClipRelativeFrame, AChannel, AHintK));
+  { anything else that isn't RePitch is Beats - keep this last, it is the
+    catch-all that any future mode number falls into until it gets a branch
+    of its own above }
   if (Clip^.MarkerCount >= 2) and (Clip^.WarpMode <> 1) then
     Exit(BeatsClipSample(Clip, AClipRelativeFrame, AChannel, AHintK));
 

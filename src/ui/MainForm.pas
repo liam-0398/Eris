@@ -67,6 +67,7 @@ type
     FWarpEditor: TWarpEditor;
     FWarpRepitchButton: TSpeedButton;
     FWarpBeatsButton: TSpeedButton;
+    FWarpAudioButton: TSpeedButton;
     FWarpTonesButton: TSpeedButton;
     FInstrumentGainSlider: TTrackBar;
     FInstrumentGainValueLabel: TLabel;
@@ -158,6 +159,7 @@ type
     procedure ClipGainSliderChange(Sender: TObject);
     procedure InstrumentGainSliderChange(Sender: TObject);
     procedure WarpTonesButtonClick(Sender: TObject);
+    procedure WarpAudioButtonClick(Sender: TObject);
     procedure UpdateWindowTitle;
     function WaitForEngineIdle: Boolean;
     procedure ClipDetuneSliderChange(Sender: TObject);
@@ -801,7 +803,24 @@ begin
   FWarpBeatsButton.ShowHint := True;
   FWarpBeatsButton.OnClick := @WarpBeatsButtonClick;
 
-  { LF (Tones) - sits between BT and RP in the same exclusive group. For
+  { AU (Audio) - the default mode. Same exclusive group and the same size,
+    shape and behavior as the other three; created straight after BT so the
+    alBottom stacking puts it directly above it. For sustained harmonic
+    material - pads, played instruments, sampler output - which Beats can
+    only granulate and LF only handles when it's monophonic; see
+    AudioEngine.AudioClipSample. }
+  FWarpAudioButton := TSpeedButton.Create(Self);
+  FWarpAudioButton.Parent := WarpButtonsPanel;
+  FWarpAudioButton.Caption := 'AU';
+  FWarpAudioButton.Align := alBottom;
+  FWarpAudioButton.Height := Px(28);
+  FWarpAudioButton.Font.Style := [fsBold];
+  FWarpAudioButton.GroupIndex := 1;
+  FWarpAudioButton.AllowAllUp := False;
+  FWarpAudioButton.ShowHint := True;
+  FWarpAudioButton.OnClick := @WarpAudioButtonClick;
+
+  { LF (Tones) - sits between AU and RP in the same exclusive group. For
     sustained low-frequency material where Beats' transient slicing has
     nothing to slice at; see AudioEngine.TonesClipSample. }
   FWarpTonesButton := TSpeedButton.Create(Self);
@@ -1718,7 +1737,7 @@ begin
   Clip.TrackID := FRecordTrackIndex;
   Clip.PitchSemitones := 0;
   Clip.Gain := 1.0;
-  Clip.WarpMode := SampleTypes.WarpModeBeats;
+  Clip.WarpMode := SampleTypes.WarpModeAudio;
 
   Project.PushUndoSnapshot(FRecordTrackIndex);
   Project.CommitClipToTrack(FRecordTrackIndex, Clip);
@@ -1830,7 +1849,7 @@ begin
   Clip.TrackID := FPendingImportTrack;
   Clip.PitchSemitones := 0;
   Clip.Gain := 1.0;
-  Clip.WarpMode := SampleTypes.WarpModeBeats;
+  Clip.WarpMode := SampleTypes.WarpModeAudio;
 
   Project.PushUndoSnapshot(FPendingImportTrack);
   Project.CommitClipToTrack(FPendingImportTrack, Clip);
@@ -1862,7 +1881,10 @@ begin
     case Project.Tracks[FArrangementView.SelectedTrack].Clips[FArrangementView.SelectedClipIndex].WarpMode of
       SampleTypes.WarpModeRePitch: FWarpRepitchButton.Down := True;
       SampleTypes.WarpModeTones: FWarpTonesButton.Down := True;
+      SampleTypes.WarpModeAudio: FWarpAudioButton.Down := True;
     else
+      { mode 0 and anything unrecognised, matching ClipSourceSample's own
+        catch-all so the lit button always names what is actually playing }
       FWarpBeatsButton.Down := True;
     end;
     UpdateWarpModeButtons;
@@ -1901,6 +1923,11 @@ begin
   SetSelectedClipWarpMode(SampleTypes.WarpModeTones);
 end;
 
+procedure TForm1.WarpAudioButtonClick(Sender: TObject);
+begin
+  SetSelectedClipWarpMode(SampleTypes.WarpModeAudio);
+end;
+
 procedure TForm1.SetSelectedClipWarpMode(AMode: Integer);
 var
   Track, ClipIdx: Integer;
@@ -1919,8 +1946,9 @@ begin
 
   PrevMode := Project.Tracks[Track].Clips[ClipIdx].WarpMode;
 
-  { Tones is pitch-preserving exactly like Beats, so entering RePitch from
-    either one has the same problem and needs the same reset below. }
+  { Tones and Audio are pitch-preserving exactly like Beats, so entering
+    RePitch from any of the three has the same problem and needs the same
+    reset below. }
   if (AMode = SampleTypes.WarpModeRePitch) and (PrevMode <> SampleTypes.WarpModeRePitch) then
   begin
     { Beats mode's Length is free to be any pitch-preserving stretch/squeeze
@@ -2103,6 +2131,19 @@ begin
   end;
   FWarpTonesButton.Hint :=
     'Warp mode: Tones/LF (pitch-synchronous - for 808s and sustained bass)';
+
+  if FWarpAudioButton.Down then
+  begin
+    FWarpAudioButton.Color := clYellow;
+    FWarpAudioButton.Font.Color := clBlack;
+  end
+  else
+  begin
+    FWarpAudioButton.Color := clBtnFace;
+    FWarpAudioButton.Font.Color := clWindowText;
+  end;
+  FWarpAudioButton.Hint :=
+    'Warp mode: Audio/AU (period-synchronous - for pads, instruments, sampler output)';
 end;
 
 procedure TForm1.ClipGainSliderChange(Sender: TObject);

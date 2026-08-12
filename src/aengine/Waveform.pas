@@ -778,6 +778,222 @@ begin
   Result := Acc;
 end;
 
+const
+  { see AudioEngine.AudioTargetHopMs / AudioAnchorFadeFrames }
+  AudioTargetHopMs = 28;
+  AudioAnchorFadeFrames = 64;
+
+{ Audio ("AU") renderer - the offline/shared copy of
+  AudioEngine.AudioClipSample. See that function's header for why the hop is
+  itself a whole number of periods, and why that is what separates this from
+  the period snapping TonesClipSample's header rejects. }
+function AudioSourceSample(const AMarkers: TWarpMarkerArray;
+  ATimelineFrame: Int64; AClipLength: Int64; AOffset: Int64; AData: PSingle;
+  AFrameCount: Integer; AChannels: Integer; ASampleRate: Integer;
+  AChannel: Integer; const ATransients: TFrameArray;
+  APeriodFrames: Integer): Single;
+var
+  k: Integer;
+  SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen, SegEnd: Int64;
+  FirstTrans, TransInSeg: Integer;
+  P, Hop, NominalSrc: Int64;
+  CurIdx, CurSrc, CurTL, PrevSrc, t: Int64;
+  CurVal, PrevVal, w: Double;
+  HavePrev: Boolean;
+
+  function SafeInterp(APos: Double): Single;
+  var
+    AbsPos: Double;
+  begin
+    AbsPos := AOffset + APos;
+    if (AbsPos < 0) or (AbsPos >= AFrameCount) then
+      Result := 0
+    else
+      Result := LinearInterpolate(AData, AFrameCount, AChannels, AChannel, AbsPos);
+  end;
+
+  function TransAt(AIndex: Integer): Int64;
+  begin
+    Result := ATransients[AIndex] - AOffset;
+  end;
+
+  { same segment/transient-range setup as TonesSourceSample - see there }
+  procedure LoadSegment(AK: Integer);
+  var
+    lo, hi, mid: Integer;
+  begin
+    SegStartTimeline := AMarkers[AK].TimelineFrame;
+    SegStartSource := AMarkers[AK].SourceFrame;
+    SegTimelineLen := AMarkers[AK + 1].TimelineFrame - SegStartTimeline;
+    SegSourceLen := AMarkers[AK + 1].SourceFrame - SegStartSource;
+    SegEnd := SegStartSource + SegSourceLen;
+
+    FirstTrans := 0;
+    TransInSeg := 0;
+    if (SegTimelineLen <= 0) or (SegSourceLen <= 0) then
+      Exit;
+    if Length(ATransients) = 0 then
+      Exit;
+
+    lo := 0;
+    hi := Length(ATransients);
+    while lo < hi do
+    begin
+      mid := lo + (hi - lo) div 2;
+      if TransAt(mid) <= SegStartSource then
+        lo := mid + 1
+      else
+        hi := mid;
+    end;
+    FirstTrans := lo;
+
+    hi := Length(ATransients);
+    while lo < hi do
+    begin
+      mid := lo + (hi - lo) div 2;
+      if TransAt(mid) < SegEnd then
+        lo := mid + 1
+      else
+        hi := mid;
+    end;
+    TransInSeg := lo - FirstTrans;
+  end;
+
+  function TimelineOf(ASource: Int64): Int64;
+  begin
+    Result := SegStartTimeline +
+      ((ASource - SegStartSource) * SegTimelineLen) div SegSourceLen;
+  end;
+
+  function AnchorLo(AIndex: Int64): Int64;
+  begin
+    if (AIndex <= 0) or (TransInSeg <= 0) then
+      Exit(SegStartSource);
+    if AIndex > TransInSeg then
+      AIndex := TransInSeg;
+    Result := TransAt(FirstTrans + AIndex - 1);
+  end;
+
+  function FindAnchor: Int64;
+  var
+    lo, hi, mid: Int64;
+  begin
+    if TransInSeg <= 0 then
+      Exit(0);
+
+    lo := 0;
+    hi := TransInSeg;
+    while lo < hi do
+    begin
+      mid := lo + (hi - lo + 1) div 2;
+      if AnchorLo(mid) <= NominalSrc then
+        lo := mid
+      else
+        hi := mid - 1;
+    end;
+    Result := lo;
+
+    while (Result > 0) and (ATimelineFrame < TimelineOf(AnchorLo(Result))) do
+      Dec(Result);
+    while (Result < TransInSeg) and
+      (ATimelineFrame >= TimelineOf(AnchorLo(Result + 1))) do
+      Inc(Result);
+  end;
+
+  function RegionSample(AAnchorSrc, AAnchorTL: Int64): Single;
+  var
+    u, n, a: Int64;
+    q, w0: Double;
+
+    function GrainSrc(AN: Int64): Double;
+    begin
+      Result := AAnchorSrc +
+        Round((AN * Hop) * (SegSourceLen / SegTimelineLen) / P) * P;
+    end;
+
+  begin
+    u := ATimelineFrame - AAnchorTL;
+    if u < 0 then
+      u := 0;
+    n := u div Hop;
+    a := u - n * Hop;
+
+    q := a / Hop;
+    w0 := 1 - q * q * (3 - 2 * q);
+
+    Result := SafeInterp(GrainSrc(n) + a) * w0 +
+      SafeInterp(GrainSrc(n + 1) + a - Hop) * (1 - w0);
+  end;
+
+begin
+  if Length(AMarkers) < 2 then
+    Exit(SafeInterp(ATimelineFrame));
+
+  P := APeriodFrames;
+  if P < 1 then
+    { no usable fundamental - hand off to Beats rather than granulate on a
+      guessed period. Passing WarpModeBeats explicitly, not AWarpMode, or
+      this recurses. }
+    Exit(WarpedSourceSample(AMarkers, ATimelineFrame, AClipLength, AOffset,
+      AData, AFrameCount, AChannels, ASampleRate, WarpModeBeats, AChannel,
+      ATransients, APeriodFrames));
+
+  k := 0;
+  while (k < Length(AMarkers) - 2) and
+    (ATimelineFrame >= AMarkers[k + 1].TimelineFrame) do
+    Inc(k);
+
+  LoadSegment(k);
+  if (SegTimelineLen <= 0) or (SegSourceLen <= 0) then
+    Exit(SafeInterp(SegStartSource));
+
+  Hop := (AudioTargetHopMs * ASampleRate) div 1000;
+  Hop := ((Hop + P div 2) div P) * P;
+  if Hop < P then
+    Hop := P;
+
+  NominalSrc := SegStartSource +
+    ((ATimelineFrame - SegStartTimeline) * SegSourceLen) div SegTimelineLen;
+
+  CurIdx := FindAnchor;
+  CurSrc := AnchorLo(CurIdx);
+  CurTL := TimelineOf(CurSrc);
+  t := ATimelineFrame - CurTL;
+
+  HavePrev := False;
+  PrevVal := 0;
+  if (t >= 0) and (t < AudioAnchorFadeFrames) then
+  begin
+    if CurIdx > 0 then
+    begin
+      PrevSrc := AnchorLo(CurIdx - 1);
+      PrevVal := RegionSample(PrevSrc, TimelineOf(PrevSrc));
+      HavePrev := True;
+    end
+    else if k > 0 then
+    begin
+      LoadSegment(k - 1);
+      if (SegTimelineLen > 0) and (SegSourceLen > 0) then
+      begin
+        PrevSrc := AnchorLo(TransInSeg);
+        PrevVal := RegionSample(PrevSrc, TimelineOf(PrevSrc));
+        HavePrev := True;
+      end;
+      LoadSegment(k);
+    end;
+  end;
+
+  CurVal := RegionSample(CurSrc, CurTL);
+
+  if HavePrev then
+  begin
+    w := t / AudioAnchorFadeFrames;
+    Result := PrevVal * (1 - w) + CurVal * w;
+  end
+  else
+    Result := CurVal;
+end;
+
 function WarpedSourceSample(const AMarkers: TWarpMarkerArray;
   ATimelineFrame: Int64; AClipLength: Int64; AOffset: Int64; AData: PSingle;
   AFrameCount: Integer; AChannels: Integer; ASampleRate: Integer;
@@ -1017,6 +1233,10 @@ var
 begin
   if Length(AMarkers) < 2 then
     Exit(SafeInterp(ATimelineFrame));
+
+  if AWarpMode = WarpModeAudio then
+    Exit(AudioSourceSample(AMarkers, ATimelineFrame, AClipLength, AOffset, AData,
+      AFrameCount, AChannels, ASampleRate, AChannel, ATransients, APeriodFrames));
 
   if AWarpMode = WarpModeTones then
     Exit(TonesSourceSample(AMarkers, ATimelineFrame, AOffset, AData, AFrameCount,

@@ -1346,6 +1346,10 @@ begin
           Clip.TrackID := t;
           Clip.PitchSemitones := Ini.ReadFloat(Section, Prefix + 'Pitch', 0);
           Clip.Gain := Ini.ReadFloat(Section, Prefix + 'Gain', 1.0);
+          { deliberately still Beats, not the new-clip default: a project
+            saved without this key predates the other modes, so its clips
+            were authored and listened to as Beats and must keep sounding
+            that way. Only clips created from now on start out as Audio. }
           Clip.WarpMode := Ini.ReadInteger(Section, Prefix + 'WarpMode', SampleTypes.WarpModeBeats);
 
           MarkerCount := Ini.ReadInteger(Section, Prefix + 'MarkerCount', 0);
