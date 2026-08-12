@@ -371,6 +371,10 @@ begin
     hit Stop" position and the transport's real Playhead silently
     disagreed until this. }
   AudioEngineSeek(0);
+  { The timeline's LoopStart/LoopEnd fields are wiped to -1 below, but the
+    engine keeps the previous project's loop - Play then rewinds to the old
+    LoopStart every block with no markers visible, a playhead pinned at 0. }
+  AudioEngineClearLoop;
   if ActiveToolBar <> nil then
   begin
     ActiveToolBar^.SyncTempoDisplay;
