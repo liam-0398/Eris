@@ -342,10 +342,28 @@ begin
   for i := 0 to Count - 1 do
   begin
     Clip := Project.Tracks[ATrackIndex].Clips[i];
-    Sample := Project.SamplePool[Clip.SampleID];
-    Items[i].Data := Sample.Data;
-    Items[i].FrameCount := Sample.FrameCount;
-    Items[i].Channels := Sample.Channels;
+    { SampleID can be out of range of the pool for a project file that
+      references a sample which failed to load - indexing unguarded here
+      hands the engine a garbage Data/Transients pointer, which crashes the
+      playback thread on the first block it renders (silently, since FPC
+      kills a thread on an unhandled exception rather than propagating it) -
+      Playing stays latched True with nothing left to advance the playhead.
+      Treat an out-of-range SampleID the same as a resolved-but-empty
+      sample: FrameCount 0, so the engine's own bounds checks play it as
+      silence instead. }
+    if Clip.SampleID <= High(Project.SamplePool) then
+    begin
+      Sample := Project.SamplePool[Clip.SampleID];
+      Items[i].Data := Sample.Data;
+      Items[i].FrameCount := Sample.FrameCount;
+      Items[i].Channels := Sample.Channels;
+    end
+    else
+    begin
+      Items[i].Data := nil;
+      Items[i].FrameCount := 0;
+      Items[i].Channels := 0;
+    end;
     Items[i].Offset := Clip.Offset;
     Items[i].Length := Clip.Length;
     Items[i].Position := Clip.Position;
@@ -358,7 +376,10 @@ begin
     else
       Items[i].PeriodFrames := 0;
 
-    Items[i].TransientCount := Length(Project.SampleTransients[Clip.SampleID]);
+    if Clip.SampleID <= High(Project.SampleTransients) then
+      Items[i].TransientCount := Length(Project.SampleTransients[Clip.SampleID])
+    else
+      Items[i].TransientCount := 0;
     if Items[i].TransientCount > 0 then
       Items[i].Transients := PInt64(Project.SampleTransients[Clip.SampleID])
     else

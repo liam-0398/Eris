@@ -47,9 +47,12 @@ const
     take part in Tab/Shift+Tab pane cycling like every other dock - 3, not
     1: one row of content plus a top and bottom border row. }
   ToolBarHeight = 3;
-  { The effects/widgets pane at the bottom is square with the file pane
-    rotated on its side - as tall as the file pane is wide - per tui.md. }
-  BottomBarHeight = FilePaneWidth;
+  { The effects/widgets pane at the bottom used to be square with the file
+    pane rotated on its side (as tall as the file pane is wide); shrunk by
+    1/3 to give more of the fixed 40-row minimum back to File/Track/
+    Timeline once the effects rack widgets (DysEffectsRack.pas) made good
+    use of a shorter pane - two rows of a 3-row-tall param box still fit. }
+  BottomBarHeight = (FilePaneWidth * 2) div 3;
 
 type
   TDysLayout = record

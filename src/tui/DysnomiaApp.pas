@@ -13,7 +13,7 @@ interface
 
 uses
   SysUtils, Objects, Drivers, Views, Menus, Dialogs, App,
-  DysGeometry, DysWidgets, DysFilePane, DysTrackPane, DysTimeline,
+  DysGeometry, DysWidgets, DysEffectsRack, DysFilePane, DysTrackPane, DysTimeline,
   DysPreferences, DysFileDialog, Project, Config, ProjectFile;
 
 const
@@ -386,27 +386,23 @@ begin
     ActiveToolBar^.Playing := False;
     ActiveToolBar^.UpdateButtons;
   end;
-  { Mirrors MainForm.RefreshAllTracksUI's stale-slot clear - ITS OWN COMMENT
-    there names this exactly: "the open-several-projects-and-the-playhead-
-    locks bug - it needs nothing more than one project having fewer tracks
-    than the one opened before it." AudioEngineSetTrackClips only gets
-    called (via PushTrackToEngine, below) for tracks 0..Project.TrackCount-1
-    of the NEW project - engine slots at or above that count keep
-    whatever TPlaybackClip array a PREVIOUS, larger-track-count project
-    (Dysnomia starts every File > New at 8 tracks - see EnsureDysTrackCount)
-    left there. Project.NewProject/LoadProject both FreeMem every sample in
-    SamplePool right before this runs, so those stale slots' Items[].Data
-    pointers are left referencing freed memory - AudioEngineHasClip still
-    sees them as "has a clip" (Count > 0), Play still flips Playing True,
-    but FillBlock's mix pass then reads through a dangling pointer for any
-    track in that range that happens to have had a clip in the PREVIOUS
-    project. That's a real memory-safety bug whose actual damage is
-    unpredictable (silence, noise, or corrupting unrelated state enough to
-    stall the playhead update entirely) rather than a clean crash - exactly
-    the "Play flips to Pause, playhead appears, but never moves" report,
-    and exactly why it only shows up after having had a bigger-track-count
-    project open first, never on the very first New/Open in a session. }
-  for i := Project.TrackCount to Project.MaxTracks - 1 do
+  { UNCONDITIONAL full clear, every slot 0..MaxTracks-1 - not just the
+    "stale tail" (Project.TrackCount to MaxTracks-1) this used to clear.
+    That range-based version relied on Project.TrackCount already being the
+    NEW project's count at the point this runs, which put a silent ordering
+    dependency on every caller (cmFileNew happened to call
+    EnsureDysTrackCount before this; a future caller that doesn't get that
+    order right reintroduces the exact "open-several-projects-and-the-
+    playhead-locks" bug MainForm.RefreshAllTracksUI's own comment names -
+    stale slots left holding a dangling pointer into memory Project.
+    NewProject/LoadProject already FreeMem'd, since AudioEngineHasClip
+    still reports "has a clip" for them and FillBlock's mix pass reads
+    through them regardless).  Clearing the whole range first removes that
+    dependency entirely: every slot starts empty, then PushAllTracksToEngine
+    (below) rebuilds exactly 0..Project.TrackCount-1 fresh from Project.Tracks
+    - no reasoning anywhere about which range is "old" vs "new" is possible
+    to get wrong, because there's no partial/delta step left to get wrong. }
+  for i := 0 to Project.MaxTracks - 1 do
     AudioEngineSetTrackClips(i, nil, 0);
   if Timeline <> nil then
   begin

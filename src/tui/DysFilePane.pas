@@ -16,7 +16,7 @@ unit DysFilePane;
   so kbCtrlI can never arrive here; Tab is already claimed app-wide for
   pane-cycling (DysWidgets.TDysPane.HandleEvent) and eats the byte first.
   Driving the track live from the bottom effects pane's keyboard once
-  assigned - see DysWidgets.TDysEffectsContent. }
+  assigned - see DysEffectsRack.TDysEffectsContent. }
 
 {$mode objfpc}{$H+}
 

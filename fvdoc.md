@@ -1029,3 +1029,76 @@ END;
 ```
 
 Child views stored via `PutSubViewPtr()/GetSubViewPtr()` which handles dynamic allocation.
+
+---
+
+### Found while building the effects rack (DysEffectsRack.pas)
+
+**`TScrollBar` is a perfectly usable slider on its own, with real keyboard
+support built in - not just mouse.** `TScrollBar.HandleEvent` (`views.pas`)
+handles `evKeyDown` directly: for a horizontal bar (`Size.Y = 1`), Left/
+Right step by `ArStep`, Ctrl+Left/Ctrl+Right page by `PgStep`, Home/End jump
+to Min/Max - and critically this branch is gated only on `State and
+sfVisible <> 0`, not on focus, so it fires whenever the scrollbar is the
+view actually receiving the event (i.e. whenever it's `Current`), no extra
+autoscroll-owner wiring needed the way a `TScroller`'s attached scrollbars
+usually get driven. `TScrollBar.Init` picks horizontal vs vertical purely
+from `Size.X = 1` (vertical) vs otherwise (horizontal) - a `Bounds` with
+width > 1 and height = 1 is a horizontal bar automatically. This makes it a
+one-object "slider" with mouse drag/click AND keyboard for free; the only
+work needed on top is resyncing whatever external value it represents
+after `inherited HandleEvent` runs.
+
+**Building a standalone popup menu (not a menu-bar submenu): `NewMenu`/
+`NewSubMenu`/`NewItem` (`Menus.pas`) plus `Desktop^.ExecView`.** These are
+plain functions, not methods - `NewItem(Name, Param, KeyCode, Command,
+AHelpCtx, Next)` and `NewSubMenu(Name, AHelpCtx, SubMenu, Next)` both
+prepend onto a `PMenuItem` linked list via their own `Next` parameter (so
+building one bottom-up, each call's `Next` fed the previous result, ends up
+in the REVERSE of on-screen order - insert the last-wanted item first).
+`TMenuBox.Init(Bounds, AMenu, AParentMenu)` auto-sizes itself down to fit
+its actual item text within whatever `Bounds` is passed (computes real
+width/height from the menu's own strings, then clips/shifts to fit inside
+`Bounds` - passing the full Desktop extent as `Bounds`, anchored at the
+desired top-left, is the normal way to say "as big as it needs, no bigger,
+starting here"). Running it as a context-menu popup (not a menu-bar
+dropdown) is the same `TGroup.ExecView` idiom this codebase already uses
+for `TDialog` (`DysFileDialog`/`DysPreferences`): `Desktop^.ExecView
+(MenuBoxPtr)` inserts it, runs `TMenuView.Execute`'s own tracking loop
+(mouse/keyboard menu navigation, fully self-contained), removes it, and
+returns the selected `Command` (0 if cancelled/Esc) - then `Dispose(MenuBox
+Ptr, Done)` plus `DisposeMenu(TheMenu)` clean up both the view and the
+heap-allocated `PMenuItem`/`PMenu` chain `NewMenu`/`NewSubMenu`/`NewItem`
+built.
+
+**`TView.MakeLocal`/`MakeGlobal` convert between global (screen) and a
+view's own local coordinates - needed any time a global point (like
+`Event.Where`) has to become a `Bounds` for something inserted elsewhere.**
+`Event.Where` on a mouse event is in global/screen coordinates; a view's
+own `Bounds`/`Origin` are always relative to its immediate `Owner` (see the
+"Coordinates are owner-local" note above). `SomeView^.MakeLocal(GlobalPt,
+var LocalPt)` walks `Self` up through every `Owner`, subtracting each
+level's `Origin`, stopping early (without subtracting that level) if the
+running total ever goes negative - so calling it on the view you're about
+to `Insert`/position something INTO (e.g. `Desktop^.MakeLocal(Event.Where,
+Local)` before building a `TMenuBox` bound for `Desktop^.ExecView`) gives
+exactly the coordinate space that view's own children need. `MakeGlobal`
+is the exact inverse (adds `Origin` walking up), useful for the opposite
+case - turning a view's own local point (e.g. `(0,0)`, its own top-left)
+into a global one when no mouse position is available (a keyboard-
+triggered popup has to synthesize somewhere to open).
+
+**FPC's unit system refuses a 3-unit circular `uses` cycle outright, with a
+specific fatal error naming the two units it noticed the loop between.**
+`A uses B; B uses C; C uses A` fails to compile the moment the third leg is
+added, as `<file of C>(<line>,<col>) Fatal: Circular unit reference between
+C and A` - naming only the two units whose mutual reference finally closed
+the loop, not the third one actually responsible, which can be misleading
+if the error looks like it's blaming the wrong pair. There is no "forward
+unit declaration" escape hatch for this the way there is for forward type
+pointers within one unit's own `type` block - the only fix is moving
+whichever type is creating the extra edge into a unit that already sits on
+one side of the existing two-unit dependency, so the graph among unit
+`interface` sections stays acyclic. (Implementation-section-only `uses`
+additions don't help either, once the cycle runs through an interface-
+section dependency.)

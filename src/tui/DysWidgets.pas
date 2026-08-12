@@ -79,21 +79,6 @@ type
     procedure FocusPane; virtual;
   end;
 
-  { The bottom dock: blank for now (stage 7 stub, see tui.md) - just the
-    pane and its Ctrl+Enter/right-click dropdown stub, no widgets yet. }
-  PDysEffectsContent = ^TDysEffectsContent;
-  TDysEffectsContent = object(TView)
-    constructor Init(Bounds: TRect);
-    procedure Draw; virtual;
-    procedure HandleEvent(var Event: TEvent); virtual;
-  end;
-
-  PDysBottomPane = ^TDysBottomPane;
-  TDysBottomPane = object(TDysPane)
-    Content: PDysEffectsContent;
-    constructor InitPane(Bounds: TRect);
-  end;
-
 const
   IntervalNames: array[0..3] of string = ('1/4', '1/8', '1/16', '1bar');
 
@@ -107,116 +92,12 @@ var
 implementation
 
 uses
-  Math, AudioEngine, Project, SampleTypes, DysTrackPane;
+  AudioEngine, Project;
 { Deliberately not SysUtils: it redeclares NewStr(Const S: String): PString
   with a PAnsiString-based PString, and since implementation uses always
   resolve after the interface's own Objects import, SysUtils being present
   anywhere in this unit's uses chain shadows Objects.NewStr - the very
-  thing TDysToolBar.SetTitle, below, needs. IntToStr's only use here
-  (DysBottomTrackLabel) goes through Str() instead, avoiding the need for
-  it. }
-
-{ Rudimentary dual-octave QWERTY tracker keyboard - same key table as
-  MainForm.KeyToSemitoneOffset (src/ui), ported by hand since this object
-  has no access to Eris's LCL form. Only lives in the bottom (effects)
-  pane, per tui.md's Bindings: the keyboard must not fire from any other
-  pane, and Esc here leaves it (see TDysEffectsContent.HandleEvent). }
-function DysKeyToSemitoneOffset(AChar: Char; out AOffset: Integer): Boolean;
-begin
-  Result := True;
-  case UpCase(AChar) of
-    { bottom row - lower octave }
-    'Z': AOffset := 0;
-    'S': AOffset := 1;
-    'X': AOffset := 2;
-    'D': AOffset := 3;
-    'C': AOffset := 4;
-    'V': AOffset := 5;
-    'G': AOffset := 6;
-    'B': AOffset := 7;
-    'H': AOffset := 8;
-    'N': AOffset := 9;
-    'J': AOffset := 10;
-    'M': AOffset := 11;
-    { top row - upper octave, OctaMED/Renoise/Impulse Tracker style }
-    'Q': AOffset := 12;
-    '2': AOffset := 13;
-    'W': AOffset := 14;
-    '3': AOffset := 15;
-    'E': AOffset := 16;
-    'R': AOffset := 17;
-    '5': AOffset := 18;
-    'T': AOffset := 19;
-    '6': AOffset := 20;
-    'Y': AOffset := 21;
-    '7': AOffset := 22;
-    'U': AOffset := 23;
-    'I': AOffset := 24;
-    '9': AOffset := 25;
-    'O': AOffset := 26;
-    '0': AOffset := 27;
-    'P': AOffset := 28;
-  else
-    Result := False;
-  end;
-end;
-
-{ Mirrors MainForm.TriggerKeyboardNote (src/ui), targeting DysTrackPane's
-  SelectedTrackIndex ("the track under the cursor") rather than
-  ArrangementView.KeyboardTrack - Dysnomia has no separate keyboard-track
-  concept, the track pane's own selection stands in for it. Rudimentary on
-  purpose: no Sampler Track key-bank branch (TriggerSamplerKeyNote's side
-  of FormKeyDown's case) - a plain instrument track only, same as what
-  DysFilePane's Ctrl+I currently assigns. }
-procedure TriggerDysKeyboardNote(ASemitoneOffset: Integer);
-var
-  Track, SampleID, TotalOffset: Integer;
-  Sample: TSample;
-  StartFrame, EndFrame, TrimmedCount: Int64;
-begin
-  Track := SelectedTrackIndex;
-  SampleID := Project.TrackInstrument[Track];
-  if SampleID < 0 then
-    Exit;
-  Sample := Project.SamplePool[SampleID];
-  StartFrame := Project.TrackInstrumentStart[Track];
-  EndFrame := Project.TrackInstrumentEnd[Track];
-  if StartFrame < 0 then
-    StartFrame := 0;
-  if EndFrame > Sample.FrameCount then
-    EndFrame := Sample.FrameCount;
-  TrimmedCount := EndFrame - StartFrame;
-  if TrimmedCount <= 0 then
-    Exit;
-  TotalOffset := ASemitoneOffset + Project.TrackOctave[Track] * 12;
-  AudioEngineTriggerNote(Track, @Sample.Data[StartFrame * Sample.Channels],
-    TrimmedCount, Sample.Channels, TotalOffset,
-    Power(10, Project.TrackInstrumentGainDb[Track] / 20));
-end;
-
-{ The little A/I/S-plus-number badge drawn at the very left of the bottom
-  bar (see TDysEffectsContent.Draw) - same track-type priority as
-  DysTimeline.TrackTypeChar (Sampler beats Instrument beats plain Audio),
-  duplicated rather than exported since TrackTypeChar is private to
-  DysTimeline and this is rudimentary/display-only. }
-function DysBottomTrackLabel(ATrack: Integer): string;
-var
-  NumStr: string;
-begin
-  if (ATrack < 0) or (ATrack > High(Project.TrackIsSampler)) then
-  begin
-    Result := 'A';
-    Exit;
-  end;
-  if Project.TrackIsSampler[ATrack] then
-    Result := 'S'
-  else if Project.TrackInstrument[ATrack] >= 0 then
-    Result := 'I'
-  else
-    Result := 'A';
-  Str(ATrack + 1, NumStr);
-  Result := Result + NumStr;
-end;
+  thing TDysToolBar.SetTitle, below, needs. }
 
 { TDysPane }
 
@@ -536,96 +417,6 @@ begin
     Bar^.Current^.Focus
   else
     Bar^.Tempo^.Focus;
-end;
-
-{ TDysEffectsContent }
-
-constructor TDysEffectsContent.Init(Bounds: TRect);
-begin
-  inherited Init(Bounds);
-  GrowMode := 0;
-  EventMask := EventMask or evMouseDown or evKeyDown;
-  { Same reason DysTimelineContent needs this - see tui.md's Free Vision
-    notes ("Nothing is focused by default"): a hand-rolled TView has to
-    opt itself into Select/Focus, a stock control does this in its own
-    Init already. }
-  Options := Options or (ofSelectable + ofFirstClick);
-end;
-
-procedure TDysEffectsContent.Draw;
-var
-  B: TDrawBuffer;
-  C: Word;
-  S, Lbl: string;
-  Row: Integer;
-begin
-  C := GetColor(1);
-  { Track identifier badge, very left of the bar - "which track am I about
-    to hear if I play the keyboard right now" (see HandleEvent below). }
-  Lbl := DysBottomTrackLabel(SelectedTrackIndex);
-  S := ' effects: (none yet - Ctrl+Enter or right-click to add) ';
-  for Row := 0 to Size.Y - 1 do
-  begin
-    MoveChar(B, ' ', C, Size.X);
-    if Row = 0 then
-    begin
-      MoveStr(B, Lbl, C);
-      MoveStr(B[Length(Lbl) + 1], S, C);
-    end;
-    WriteLine(0, Row, Size.X, 1, B);
-  end;
-end;
-
-{ The dual-octave keyboard (see DysKeyToSemitoneOffset/TriggerDysKeyboardNote
-  above) only fires here - the bottom effects pane is the one place Focus
-  can land where a QWERTY letter has no other meaning already claimed (the
-  file/track panes use letters to filter/type, the timeline uses W/L as
-  commands) - so gating it to this view's own HandleEvent is the whole
-  gate, no extra focus-tracking needed. Esc "stops keyboard input at all"
-  per this session's ask: it hands focus back to the track pane, off the
-  view that was reading note keys. }
-procedure TDysEffectsContent.HandleEvent(var Event: TEvent);
-var
-  Offset: Integer;
-begin
-  inherited HandleEvent(Event);
-  if Event.What = evKeyDown then
-  begin
-    if Event.KeyCode = kbEsc then
-    begin
-      if ActiveTrackPane <> nil then
-        ActiveTrackPane^.FocusPane;
-      ClearEvent(Event);
-      Exit;
-    end;
-    if DysKeyToSemitoneOffset(Event.CharCode, Offset) then
-    begin
-      TriggerDysKeyboardNote(Offset);
-      ClearEvent(Event);
-      Exit;
-    end;
-  end;
-  if ((Event.What = evKeyDown) and (Event.KeyCode = kbCtrlEnter)) or
-     ((Event.What = evMouseDown) and (Event.Buttons and mbRightButton <> 0))
-  then
-  begin
-    MessageBox('Effects rack dropdown is stage 7 - not wired yet.', nil,
-      mfInformation or mfOKButton);
-    ClearEvent(Event);
-  end;
-end;
-
-{ TDysBottomPane }
-
-constructor TDysBottomPane.InitPane(Bounds: TRect);
-var
-  R: TRect;
-begin
-  inherited InitPane(Bounds, 'Effects');
-  R := ContentRect;
-  Content := New(PDysEffectsContent, Init(R));
-  Insert(Content);
-  Focusable := Content;
 end;
 
 end.
