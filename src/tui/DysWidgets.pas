@@ -42,7 +42,7 @@ type
     function ContentRect: TRect;
     function GetPalette: PPalette; virtual;
     procedure HandleEvent(var Event: TEvent); virtual;
-    procedure FocusPane;
+    procedure FocusPane; virtual;
   end;
 
   PDysToolBar = ^TDysToolBar;
@@ -58,6 +58,7 @@ type
       Bindings) - one implementation, same "Stop wins if already playing,
       else only start if there's a clip" rule either way gets there. }
     procedure TogglePlayPause;
+    procedure CommitTempo;
   private
     procedure SetTitle(B: PButton; const S: string);
     procedure UpdateButtons;
@@ -71,6 +72,7 @@ type
   TDysToolBarPane = object(TDysPane)
     Bar: PDysToolBar;
     constructor InitPane(Bounds: TRect);
+    procedure FocusPane; virtual;
   end;
 
   { The bottom dock: blank for now (stage 7 stub, see tui.md) - just the
@@ -369,6 +371,34 @@ begin
   UpdateButtons;
 end;
 
+{ Reads Tempo's text, clamps it the same way MainForm.TempoEditEditingDone
+  does (src/ui, 20-999 BPM, garbage falls back to DefaultTempoBPM), writes
+  it to Project.TempoBPM and reflects the clamped value back into the
+  field. No SysUtils in this unit (see the top-of-implementation note) so
+  parsing/formatting goes through Val/Str, not StrToInt/IntToStr. }
+procedure TDysToolBar.CommitTempo;
+var
+  S: string;
+  Parsed: Double;
+  Value: LongInt;
+  Code: Word;
+begin
+  S := Tempo^.Data^;
+  Val(S, Parsed, Code);
+  if Code <> 0 then
+    Value := Round(Project.DefaultTempoBPM)
+  else
+    Value := Round(Parsed);
+  if Value < 20 then
+    Value := 20
+  else if Value > 999 then
+    Value := 999;
+  Project.TempoBPM := Value;
+  Str(Value, S);
+  Tempo^.SetData(S);
+  Tempo^.DrawView;
+end;
+
 procedure TDysToolBar.HandleEvent(var Event: TEvent);
 begin
   inherited HandleEvent(Event);
@@ -383,6 +413,21 @@ begin
      ((Event.KeyCode = kbUp) or (Event.KeyCode = kbDown)) then
   begin
     SelectNext(Event.KeyCode = kbDown);
+    ClearEvent(Event);
+    Exit;
+  end;
+  { Enter has no meaning to a plain TInputLine outside a TDialog (it isn't
+    an editing key, and there's no default-button/EndModal machinery to
+    catch it here the way a dialog's OK button would) - TInputLine.
+    HandleEvent leaves it uncleared and it would otherwise bubble all the
+    way up and vanish with no effect, which is why the field could never
+    actually be "submitted". Only acts while Tempo itself is focused, so
+    Enter on one of the buttons still goes through TButton's own Press
+    handling untouched. }
+  if (Event.What = evKeyDown) and (Event.KeyCode = kbEnter) and
+     (Tempo^.State and sfFocused <> 0) then
+  begin
+    CommitTempo;
     ClearEvent(Event);
     Exit;
   end;
@@ -432,6 +477,24 @@ begin
   Bar := New(PDysToolBar, Init(R));
   Insert(Bar);
   Focusable := Bar^.Tempo;
+end;
+
+{ Overrides TDysPane.FocusPane's fixed "always Focusable" behaviour: the
+  base version would jump back to Tempo (Focusable, set once above) every
+  time Tab/Shift+Tab cycles back into this pane, regardless of which of
+  the bar's five widgets (Tempo or one of the four buttons) had focus last
+  - that's what made the transport bar feel like it "steals focus into the
+  tempo box" and made the buttons unreachable by keyboard, since leaving
+  and returning to the pane always undid an Up/Down move away from Tempo.
+  Bar^.Current (set by TDysToolBar's own Up/Down handling, see HandleEvent
+  below) tracks whichever widget was actually last selected; Tempo is only
+  the fallback for the very first focus, before anything has been current. }
+procedure TDysToolBarPane.FocusPane;
+begin
+  if Bar^.Current <> nil then
+    Bar^.Current^.Focus
+  else
+    Bar^.Tempo^.Focus;
 end;
 
 { TDysEffectsContent }
