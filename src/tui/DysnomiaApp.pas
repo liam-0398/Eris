@@ -338,6 +338,12 @@ begin
     Timeline^.Content^.CancelOverlay;
     Timeline^.Content^.LoopStart := -1;
     Timeline^.Content^.LoopEnd := -1;
+    { The actual fix for "clips are on the timeline but Play does nothing"
+      after a project open/New - see PushAllTracksToEngine's own comment
+      in DysTimeline.pas. Project.Tracks is what the timeline draws from,
+      but the audio engine has its own separate TrackClips arrays that
+      only PushTrackToEngine populates - nothing did that here before. }
+    Timeline^.Content^.PushAllTracksToEngine;
     Timeline^.Content^.DrawView;
   end;
   if TrackPane <> nil then

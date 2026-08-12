@@ -88,6 +88,16 @@ type
     procedure DuplicateClipUnderCursor;
     procedure SplitClipUnderCursor;
     procedure DeleteClipUnderCursor;
+    { Whole-project version of PushTrackToEngine (below, private to this
+      unit) - mirrors ArrangementView.RefreshAllTracks (src/ui), the "every
+      track changed" call Eris's own MainForm makes after project open/New/
+      tempo rescale. Dysnomia's RefreshAfterProjectChange (DysnomiaApp.pas)
+      used to skip this entirely: it reset the cursor and redrew the panes,
+      but never told the audio engine a single clip existed, so a freshly
+      loaded project's clips were visible on the timeline (drawn straight
+      from Project.Tracks) yet AudioEngineHasClip stayed False - Play
+      silently did nothing, looking exactly like a locked transport. }
+    procedure PushAllTracksToEngine;
     { Polled from TDysnomiaApp.Idle (see DysnomiaApp.pas) - Free Vision has
       no timer, but TProgram.Idle runs on every pass of the event loop that
       finds no key/mouse event waiting, which is close enough to "as fast
@@ -125,7 +135,15 @@ var
 const
   NormalAttr = $0F; { black bg, bright white fg - matches DysWidgets' PaneNorm }
   CursorAttr = $70; { light grey bg, black fg, no blink - matches PaneSel }
-  PendingAttr = $5F; { magenta bg, bright white fg - not placed yet }
+  { magenta bg, bright white fg, BLINKING (bit 7 set) - not placed yet.
+    Every other attribute byte in this unit deliberately keeps bit 7 clear
+    (see tui.md's "Palette cascade and the red-blink bug" - blink is
+    normally an accident to avoid, since no stock CAppColor byte sets it).
+    Here it's the opposite: a still-pending clip needs to read as visibly
+    different from a committed one at a glance, not just a different
+    hue - "blink until committed" (Enter/PlaceOverlay clears Pending and
+    the block redraws in its real per-sample shade, see PlaceOverlay). }
+  PendingAttr = $DF;
   PlayheadAttr = $4F; { red bg, bright white fg - distinct from both clip colours }
   LoopAttr = $2F; { green bg, bright white fg - transport loop markers }
   BlockChar = #219; { CP437 solid block - see tui.md "Half-block glyphs" }
@@ -894,6 +912,14 @@ begin
   Project.RemoveClipAt(CursorTrack, ClipIdx);
   PushTrackToEngine(CursorTrack);
   DrawView;
+end;
+
+procedure TDysTimelineContent.PushAllTracksToEngine;
+var
+  t: Integer;
+begin
+  for t := 0 to Project.TrackCount - 1 do
+    PushTrackToEngine(t);
 end;
 
 procedure TDysTimelineContent.UpdatePlayhead;
