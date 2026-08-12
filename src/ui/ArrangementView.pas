@@ -72,6 +72,16 @@ type
       VolumeSliderRadius = 5;
       VolumeSliderGrabPixels = 8;
       TrackVolumeMax = 2.0;
+      { The master fader's own top of scale, and deliberately not
+        TrackVolumeMax. A track fader is a balancing control - doubling one
+        track against the others is an ordinary thing to want, so unity sits
+        at the middle of its travel. The master fader is not: the mix is
+        already as loud as it is going to get without clipping, so what is
+        asked of it is nearly always attenuation. Unity at 80% of the travel
+        leaves a couple of dB to push into and the whole rest of the slider
+        to come down with, and it means the default position reads as "up"
+        rather than sitting mid-track looking half turned down. }
+      MasterVolumeMax = 1.25;
       MuteButtonSize = 16;
       MuteButtonMargin = 4;
       { solo sits immediately left of the mute and is deliberately the same
@@ -223,10 +233,10 @@ type
     function ClipPixelRect(ATrackIndex: Integer; const AClip: TClip): TRect;
     function HitTestClip(ATrackIndex: Integer; X: Integer; out AClipIndex: Integer;
       out AMode: TDragMode): Boolean;
-    function VolumeKnobXFor(AVolume: Single): Integer;
+    function VolumeKnobXFor(AVolume, AMaxVolume: Single): Integer;
     function VolumeKnobX(ATrackIndex: Integer): Integer;
     function MasterClipLightRect: TRect;
-    function XToVolume(X: Integer): Single;
+    function XToVolume(X: Integer; AMaxVolume: Single): Single;
     function HitTestVolumeSlider(ATrackIndex, Y: Integer): Boolean;
     function MuteButtonRect(ATrackIndex: Integer): TRect;
     function SoloButtonRect(ATrackIndex: Integer): TRect;
@@ -699,16 +709,17 @@ begin
       end;
 end;
 
-{ Knob X for any 0..TrackVolumeMax gain on the header column's full-width
-  fader track. Taken as a value rather than a track index so the Master row's
-  fader - which has no track index - is the same slider, not a copy of it. }
-function TArrangementView.VolumeKnobXFor(AVolume: Single): Integer;
+{ Knob X for a gain on the header column's full-width fader track. Taken as a
+  value plus its top of scale rather than as a track index, so the Master
+  row's fader - which has no track index, and does not share the track scale
+  either - is the same slider rather than a copy of it. }
+function TArrangementView.VolumeKnobXFor(AVolume, AMaxVolume: Single): Integer;
 var
   Range: Integer;
   Value: Single;
 begin
   Range := (Width - VolumeSliderMargin) - (HeaderLeft + VolumeSliderMargin);
-  Value := AVolume / TrackVolumeMax;
+  Value := AVolume / AMaxVolume;
   if Value < 0 then
     Value := 0;
   if Value > 1 then
@@ -718,7 +729,7 @@ end;
 
 function TArrangementView.VolumeKnobX(ATrackIndex: Integer): Integer;
 begin
-  Result := VolumeKnobXFor(Project.TrackVolume[ATrackIndex]);
+  Result := VolumeKnobXFor(Project.TrackVolume[ATrackIndex], TrackVolumeMax);
 end;
 
 { Where the clip lamp sits on the Master row. Project.TrackCount is the Master
@@ -731,7 +742,10 @@ begin
   Result := MuteButtonRect(Project.TrackCount);
 end;
 
-function TArrangementView.XToVolume(X: Integer): Single;
+{ The inverse of VolumeKnobXFor, and it takes the same top of scale for the
+  same reason - passing TrackVolumeMax here while the knob was drawn against
+  MasterVolumeMax would make the master fader jump on the first click. }
+function TArrangementView.XToVolume(X: Integer; AMaxVolume: Single): Single;
 var
   Range: Integer;
   Frac: Single;
@@ -744,7 +758,7 @@ begin
     Frac := 0;
   if Frac > 1 then
     Frac := 1;
-  Result := Frac * TrackVolumeMax;
+  Result := Frac * AMaxVolume;
 end;
 
 { The grab band is a tolerance around a line, not a rectangle inside the row,
@@ -1550,13 +1564,13 @@ begin
     Canvas.Rectangle(MuteRect);
 
     { master fader - the same slider a track has, in the same place on the
-      row, because it is the same control over the same 0..TrackVolumeMax
-      range and putting it anywhere else would only make it look like a
-      different kind of thing }
+      row - the same control in the same place, differing only in its top of
+      scale (see MasterVolumeMax), because putting it anywhere else would
+      only make it look like a different kind of thing }
     SliderY := y + VolumeSliderY;
     Canvas.Pen.Color := clBtnShadow;
     Canvas.Line(HeaderLeft + VolumeSliderMargin, SliderY, Width - VolumeSliderMargin, SliderY);
-    kx := VolumeKnobXFor(Project.MasterVolume);
+    kx := VolumeKnobXFor(Project.MasterVolume, MasterVolumeMax);
     Canvas.Brush.Color := clHighlight;
     Canvas.Pen.Color := clWindowFrame;
     Canvas.Ellipse(kx - VolumeSliderRadius, SliderY - VolumeSliderRadius,
@@ -2169,7 +2183,7 @@ begin
     if HitTestVolumeSlider(Project.TrackCount, Y) then
     begin
       FDraggingMasterVolume := True;
-      Project.MasterVolume := XToVolume(X);
+      Project.MasterVolume := XToVolume(X, MasterVolumeMax);
       Invalidate;
       Exit;
     end;
@@ -2234,7 +2248,7 @@ begin
     { no PushTrackToEngine: FillBlock reads Project.TrackVolume directly
       now, so dragging the fader no longer has to rebuild and re-push the
       whole clip array through the command ring on every mouse move }
-    Project.TrackVolume[TrackIndex] := XToVolume(X);
+    Project.TrackVolume[TrackIndex] := XToVolume(X, TrackVolumeMax);
     Invalidate;
     Exit;
   end;
@@ -2367,14 +2381,14 @@ begin
 
   if FDraggingMasterVolume then
   begin
-    Project.MasterVolume := XToVolume(X);
+    Project.MasterVolume := XToVolume(X, MasterVolumeMax);
     Invalidate;
     Exit;
   end;
 
   if FDraggingVolumeTrack >= 0 then
   begin
-    Project.TrackVolume[FDraggingVolumeTrack] := XToVolume(X);
+    Project.TrackVolume[FDraggingVolumeTrack] := XToVolume(X, TrackVolumeMax);
     Invalidate;
     Exit;
   end;
