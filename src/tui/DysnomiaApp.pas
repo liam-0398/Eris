@@ -62,10 +62,17 @@ var
 
 procedure InitDysAppPalette;
 const
+  { Background is a 3-bit field (bits 4-6, range 0-7) sharing the byte
+    with bit 7 (blink) - it is NOT a 4-bit nibble, so a background of 15
+    ($Fx) does not mean "bright white bg", it means bg=7 with blink SET.
+    $F0 was exactly that mistake and is why the focused list item used to
+    blink instead of highlighting: it decoded to blink + light-grey bg +
+    black fg, not solid white bg + black fg. $70 (bg=7, fg=0, no blink)
+    is the actual reverse-video byte. Foreground has no such limit - the
+    full 0-15 range, including "bright" values, is always blink-safe. }
   BgAttr   = $07; { black bg, light grey fg - desktop background pattern }
   PaneNorm = $0F; { black bg, bright white fg - pane text }
-  PaneSel  = $F0; { white bg, black fg - focused/selected list item }
-  PaneDim  = $08; { black bg, dark grey fg }
+  PaneSel  = $70; { light grey bg, black fg - focused/selected list item }
 var
   I: Integer;
 begin
@@ -73,9 +80,15 @@ begin
   DysAppPalette[1] := Chr(BgAttr);
   for I := 32 to 63 do            { the CGrayDialog block, local idx 1..32 }
     DysAppPalette[I] := Chr(PaneNorm);
-  DysAppPalette[32 + 26 - 1] := Chr(PaneSel); { CListViewer local idx 26 }
+  { TListViewer.Draw (views.pas) calls GetColor(2) for a normal item,
+    GetColor(3) for the focused (keyboard-cursor) item, GetColor(4) for
+    a selected-but-unfocused item - and CListViewer (#26#26#27#28#29,
+    views.pas) remaps those through ITS OWN small palette first: local
+    idx 2->26, 3->27, 4->28. idx 26 is also what "normal" resolves to,
+    so it's left on the PaneNorm default above; only 27 and 28 need to
+    stand out, or keyboard focus is invisible even though it's moving. }
   DysAppPalette[32 + 27 - 1] := Chr(PaneSel); { CListViewer local idx 27 }
-  DysAppPalette[32 + 28 - 1] := Chr(PaneDim); { CListViewer local idx 28 }
+  DysAppPalette[32 + 28 - 1] := Chr(PaneSel); { CListViewer local idx 28 }
   DysAppPaletteReady := True;
 end;
 
@@ -89,6 +102,18 @@ end;
 constructor TDysnomiaApp.Init;
 begin
   inherited Init;
+  { Nothing is Current anywhere by default - Insert() doesn't select what
+    it inserts, so without this no view anywhere would receive keyboard
+    input until the user's first mouse click (mouse events are routed by
+    hit-testing, not by Current, so a click "accidentally" fixes this up
+    on its own - but a keyboard-only launch would otherwise sit dead).
+    This has to run here, after "inherited Init" returns, not at the end
+    of InitDeskTop: TProgram.Init only calls Insert(DeskTop) *after*
+    InitDeskTop returns, so DeskTop.Owner is still nil while InitDeskTop
+    itself is running - Focus's climb up Owner would stop there instead
+    of reaching Self (the Application). }
+  if FilePane <> nil then
+    FilePane^.FocusPane;
 end;
 
 procedure TDysnomiaApp.InitMenuBar;
@@ -173,12 +198,6 @@ begin
   Local.Move(-BodyR.A.X, -BodyR.A.Y);
   Timeline := New(PDysTimeline, InitPane(Local));
   DeskTop^.Insert(Timeline);
-
-  { Nothing is Current anywhere by default - Insert() doesn't select what
-    it inserts, so without this no view anywhere ever receives keyboard
-    input. Focus climbs the whole Owner chain (App -> DeskTop -> pane),
-    so one call establishes it end to end. }
-  FilePane^.FocusPane;
 end;
 
 procedure TDysnomiaApp.ShowAbout;

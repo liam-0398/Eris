@@ -127,6 +127,12 @@ end;
 
 { TDysToolBar }
 
+{ Child Bounds here are local to the toolbar's own origin (row 0, since
+  the bar is 1 row tall), not Bounds (which is this view's position in
+  its OWNER's frame - see "Coordinates are owner-local" in tui.md). Using
+  Bounds.A.Y instead of 0 was the original bug: every child ended up
+  placed one row below the toolbar's own 1-row-tall visible area, so
+  nothing in it was ever actually on screen. }
 constructor TDysToolBar.Init(Bounds: TRect);
 var
   R: TRect;
@@ -137,39 +143,39 @@ begin
   GrowMode := 0;
   X := 1;
 
-  R.Assign(Bounds.A.X + X, Bounds.A.Y, Bounds.A.X + X + 6, Bounds.A.Y + 1);
+  R.Assign(X, 0, X + 6, 1);
   Insert(New(PStaticText, Init(R, 'Tempo:')));
   X := X + 7;
 
-  R.Assign(Bounds.A.X + X, Bounds.A.Y, Bounds.A.X + X + 6, Bounds.A.Y + 1);
+  R.Assign(X, 0, X + 6, 1);
   Tempo := New(PInputLine, Init(R, 6));
   TempoDefault := '120.0';
   Tempo^.SetData(TempoDefault);
   Insert(Tempo);
   X := X + 7;
 
-  R.Assign(Bounds.A.X + X, Bounds.A.Y, Bounds.A.X + X + 3, Bounds.A.Y + 1);
+  R.Assign(X, 0, X + 3, 1);
   MetronomeBtn := New(PButton, Init(R, 'M', cmToggleMetronome, bfBroadcast));
   Insert(MetronomeBtn);
   X := X + 4;
 
-  R.Assign(Bounds.A.X + X, Bounds.A.Y, Bounds.A.X + X + 6, Bounds.A.Y + 1);
+  R.Assign(X, 0, X + 6, 1);
   StopBtn := New(PButton, Init(R, 'Stop', cmTransportStop, bfBroadcast));
   Insert(StopBtn);
   X := X + 7;
 
-  R.Assign(Bounds.A.X + X, Bounds.A.Y, Bounds.A.X + X + 6, Bounds.A.Y + 1);
+  R.Assign(X, 0, X + 6, 1);
   PlayBtn := New(PButton, Init(R, 'Play', cmTransportPlay, bfBroadcast));
   Insert(PlayBtn);
   X := X + 7;
 
-  R.Assign(Bounds.A.X + X, Bounds.A.Y, Bounds.A.X + X + 5, Bounds.A.Y + 1);
+  R.Assign(X, 0, X + 5, 1);
   RecordBtn := New(PButton, Init(R, 'Rec', cmTransportRecord, bfBroadcast));
   Insert(RecordBtn);
   X := X + 6;
 
   IntervalIdx := 0;
-  R.Assign(Bounds.A.X + X, Bounds.A.Y, Bounds.A.X + X + 6, Bounds.A.Y + 1);
+  R.Assign(X, 0, X + 6, 1);
   IntervalBtn := New(PButton, Init(R, IntervalNames[0], cmCycleInterval,
     bfBroadcast));
   Insert(IntervalBtn);
