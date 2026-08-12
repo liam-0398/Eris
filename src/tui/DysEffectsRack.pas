@@ -951,12 +951,25 @@ begin
   end;
 end;
 
+{ Checks run BEFORE inherited, not after - TGroup.HandleEvent's own mouse
+  dispatch (DoHandleEvent(FirstThat(@ContainsMouse))) or a focused-event
+  pass to Current can otherwise consume/clear the event on its way through
+  before this override ever sees it back. Same "intercept first, inherited
+  last" shape TDysPane already uses for Tab and TDysEffectBox uses for its
+  own mouse/Ctrl+X close check - this view's own first pass at Ctrl+Enter/
+  right-click checked AFTER inherited instead, which is the bug report this
+  is fixing (see tui.md's session note). }
 procedure TDysEffectsContent.HandleEvent(var Event: TEvent);
 var
   Offset: Integer;
   Pt: TPoint;
 begin
-  inherited HandleEvent(Event);
+  { A mouse click doesn't grant keyboard focus by itself (see fvdoc's
+    "Nothing is focused by default") - without this, Ctrl+Enter typed right
+    after clicking into this pane would still route to whatever Current
+    actually is, e.g. the timeline the app started focused on. }
+  if (Event.What = evMouseDown) and (State and sfFocused = 0) then
+    Focus;
   if SelectedTrackIndex <> TrackIndex then
     RebuildBoxes;
   if PendingRemoveIndex >= 0 then
@@ -964,6 +977,23 @@ begin
     Project.RemoveTrackEffect(PendingRemoveTrack, PendingRemoveIndex);
     PendingRemoveIndex := -1;
     RebuildBoxes;
+  end;
+  if ((Event.What = evKeyDown) and (Event.KeyCode = kbCtrlEnter)) or
+     ((Event.What = evMouseDown) and (Event.Buttons and mbRightButton <> 0)) then
+  begin
+    if Event.What = evMouseDown then
+      Pt := Event.Where
+    else
+    begin
+      Pt.X := 0;
+      Pt.Y := 0;
+      MakeGlobal(Pt, Pt); { this view's own top-left, in global coords - a
+                            reasonable default position for a keyboard-
+                            triggered Ctrl+Enter (no mouse position to use) }
+    end;
+    OpenAddEffectMenu(Pt);
+    ClearEvent(Event);
+    Exit;
   end;
   if Event.What = evKeyDown then
   begin
@@ -981,22 +1011,7 @@ begin
       Exit;
     end;
   end;
-  if ((Event.What = evKeyDown) and (Event.KeyCode = kbCtrlEnter)) or
-     ((Event.What = evMouseDown) and (Event.Buttons and mbRightButton <> 0)) then
-  begin
-    if Event.What = evMouseDown then
-      Pt := Event.Where
-    else
-    begin
-      Pt.X := 0;
-      Pt.Y := 0;
-      MakeGlobal(Pt, Pt); { this view's own top-left, in global coords - a
-                            reasonable default position for a keyboard-
-                            triggered Ctrl+Enter (no mouse position to use) }
-    end;
-    OpenAddEffectMenu(Pt);
-    ClearEvent(Event);
-  end;
+  inherited HandleEvent(Event);
 end;
 
 { TDysBottomPane }
