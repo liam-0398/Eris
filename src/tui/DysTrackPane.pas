@@ -56,48 +56,34 @@ var
   Item: Integer;
   Y: Integer;
   Attr: Byte;
-  Text: String;
-  B: TDrawBuffer;
-  NormalAttr: Byte = $0F;     { black bg, bright white fg }
-  SelectedAttr: Byte = $70;   { light grey bg, black fg }
-  MutedAttr: Byte = $04;      { black bg, dark red fg }
-  SoloAttr: Byte = $06;       { black bg, brown/yellow fg }
 begin
-  { Custom rendering without calling inherited Draw, to avoid palette/blink issues }
-  for Item := 0 to Range - 1 do
+  { Call inherited to do normal list rendering }
+  inherited Draw;
+
+  { Then overpaint track numbers with correct colors for mute/solo }
+  for Item := TopItem to TopItem + Size.Y - 1 do
   begin
+    if Item >= Range then
+      Break;
     Y := Item - TopItem;
     if (Y < 0) or (Y >= Size.Y) then
       Continue;
 
-    { Clear line and set base attribute }
+    if Item = 0 then
+      Continue; { skip blank row }
+
+    { Determine color based on state }
     if Item = Focused then
-      MoveChar(B, ' ', SelectedAttr, Size.X)
+      Attr := $70  { light grey bg, black fg - selection }
+    else if TrackMute[Item] then
+      Attr := $04  { black bg, dark red fg }
+    else if TrackSolo[Item] then
+      Attr := $06  { black bg, brown/yellow fg }
     else
-      MoveChar(B, ' ', NormalAttr, Size.X);
+      Attr := $0F; { black bg, bright white fg }
 
-    Text := PString(List^.At(Item))^;
-    if Text <> '' then
-    begin
-      { Determine color for non-blank items }
-      if Item = Focused then
-        Attr := SelectedAttr { selection overrides mute/solo color }
-      else if Item > 0 then { skip blank row 0 }
-      begin
-        if TrackMute[Item] then
-          Attr := MutedAttr
-        else if TrackSolo[Item] then
-          Attr := SoloAttr
-        else
-          Attr := NormalAttr;
-      end
-      else
-        Attr := NormalAttr;
-
-      MoveStr(B, Text, Attr);
-    end;
-
-    WriteLine(0, Y, Size.X, 1, B);
+    { Write the track number at column 1 with the appropriate color }
+    WriteChar(1, Y, PString(List^.At(Item))^[1], Attr, 1);
   end;
 end;
 
