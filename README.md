@@ -10,7 +10,11 @@ emulation mode baked identically into live monitoring and offline
 export.
 
 # DISCLAIMER
-**HEAVY LLM usage** I know decent Pascal but do not know about audio engineering and decided to just go forth with having an LLM implement what I wanted instead of putting in the years to do it myself. I do plan to rewrite it bit by bit but the focus currently is having a usable DAW that does exactly what I want, written in the language I want and adhering to the constraints I want. Every idea and technical decision is my own but the implementation is brought to you by Claude.  
+
+**Collaboration**: This is a personal project that I released because I figure a few other nerds like me will get a lot of use out of it. This will never be a collaborative project. I welcome issue reports but if you request a feature expect it to be denied (not to say we might not be on the same page ocassionaly). This project is very opinionated because I have been dissatisfied with the other DAWs I have been using over the past 15 years and I will not add functionality to suport a use case that is not mine. There will never be a piano roll or VST support etc.
+
+**HEAVY LLM usage**: I know decent Pascal but do not know about audio engineering and decided to just go forth with having an LLM implement what I wanted instead of putting in the years to do it myself. I do plan to rewrite it bit by bit but the focus currently is having a usable DAW that does exactly what I want, written in the language I want and adhering to the constraints I want. Every idea and technical decision is my own but the implementation is brought to you by Claude.  
+
 
 ## Features
 
