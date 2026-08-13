@@ -31,6 +31,27 @@ evMouseMove + evMouseAuto)` loop after an `evMouseDown` is the idiomatic
 way to track a drag (see `editors.pas`'s own text-selection drag, and
 Dysnomia's waveform drag-to-chop selection in tui.md).
 
+**A menu-bound hotkey preempts every focused view, silently.**
+`TGroup.HandleEvent` (`views.pas`) runs `phPreProcess` across every subview
+with `ofPreProcess` set BEFORE it ever dispatches a focused event
+(`evKeyDown` included) to `Current`. `TMenuBar` has `ofPreProcess` set, and
+`TMenuView.HandleEvent` (`menus.pas`) checks every `evKeyDown` against
+`HotKey(Event.KeyCode)` in that same phase - if any menu item anywhere is
+bound to that raw key (shown as e.g. "Del" in the menu), it's converted to
+an `evCommand` and the original event is cleared right there, regardless
+of what's focused or whether the menu is even open. A focused view's own
+`HandleEvent` case for that key is simply unreachable code if the app's
+menu also claims it - checked concretely with `kbDel`: Dysnomia's Edit
+menu binds it to `cmEditDelete` (`DysnomiaApp.InitMenuBar`), which meant
+`TDysWaveformContent.HandleEvent`'s own `kbDel` case (tui.md's drag-to-chop
+feature) never fired no matter what. Fix isn't in the focused view at all -
+it's in the app-level command handler for whatever the menu item's own
+command is (here, `cmEditDelete` in `DysnomiaApp.HandleEvent`), which has to
+inspect app state itself to decide which "Delete" was actually meant. Any
+new per-view key binding should be checked against the app's own menu
+hotkey list first, not assumed to reach `HandleEvent` just because the key
+looks unclaimed.
+
 **Coordinates are owner-local, not global.** `Bounds` passed to
 `TView.Init` is relative to the immediate Owner's origin, not the
 screen - `GetExtent` always returns `(0,0)-(Size)`, even for the

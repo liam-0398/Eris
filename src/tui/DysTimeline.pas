@@ -1346,7 +1346,8 @@ begin
   DrawView;
   if Assigned(SetWaveformClipProc) then
     with Project.Tracks[CursorTrack].Clips[ClipIdx] do
-      SetWaveformClipProc(SampleID, Offset, Length, Gain, PitchSemitones, WarpMode);
+      SetWaveformClipProc(SampleID, Offset, Length, Gain, PitchSemitones, WarpMode,
+        CursorTrack, ClipIdx);
 end;
 
 { Wired to DysWidgets.ChopWaveformSelectionProc - see that var's own
@@ -1355,10 +1356,13 @@ end;
   exactly what the waveform widget's own drag-selection already works in
   (TDysWaveformContent.ColToSourceFrame). Excises that span from the
   MARKED clip (MarkedTrack/MarkedClipIndex, set by 'k' - not necessarily
-  whatever's under the timeline cursor right now), leaving a
-  timeline-domain gap the same size rather than rippling everything after
-  it leftward - same "delete leaves a gap" convention DeleteClipUnderCursor
-  above already establishes for a whole clip. Only supports an UNWARPED
+  whatever's under the timeline cursor right now), then RIPPLES every other
+  clip on the same track that started at or after the chopped span leftward
+  by the chopped length, closing the hole rather than leaving a gap (unlike
+  DeleteClipUnderCursor above, which still leaves one for a whole-clip
+  Delete - this callback's own Delete-key path is scoped to a drag
+  selection, not a whole clip, so there's no reason to match that
+  convention here). Only supports an UNWARPED
   clip (WarpMarkers empty/singleton, the default state for a clip fresh off
   the file pane or a plain Ctrl+V/Ctrl+D copy - see SplitWarpMarkers's own
   "Length(AMarkers) < 2 -> 1:1 playback" comment): the source-domain
@@ -1377,6 +1381,7 @@ var
   HaveLeft, HaveRight: Boolean;
   NewClips: TClipArray;
   i, k: Integer;
+  Delta, ShiftAfterPos: Int64;
 begin
   if ActiveTimelineContent = nil then
     Exit;
@@ -1407,6 +1412,15 @@ begin
   HaveLeft := AStartSource > ClipStart;
   HaveRight := AEndSource < ClipEnd;
 
+  { Ripple, not a gap (per the user's own ask): everything at or after the
+    chopped span's own END - in TIMELINE terms, ShiftAfterPos below - slides
+    left by Delta frames once the excised span is gone, same "close the
+    hole" behaviour a DAW's ripple-delete gives. Unwarped (guarded above),
+    so source and timeline frames advance 1:1 and Delta/ShiftAfterPos both
+    carry straight over from source domain without any remap. }
+  Delta := AEndSource - AStartSource;
+  ShiftAfterPos := Original.Position + (AEndSource - ClipStart);
+
   if HaveLeft then
   begin
     LeftPart := Original;
@@ -1417,10 +1431,12 @@ begin
     RightPart := Original;
     RightPart.Offset := AEndSource;
     RightPart.Length := ClipEnd - AEndSource;
-    { Unwarped (guarded above), so source and timeline frames advance 1:1 -
-      the right remainder's timeline start is exactly as far past the
-      original clip's own start as its source start is. }
-    RightPart.Position := Original.Position + (AEndSource - ClipStart);
+    { Placed directly after LeftPart's own end (ShiftAfterPos - Delta,
+      i.e. Original.Position + (AStartSource - ClipStart)) rather than at
+      the old gap-leaving ShiftAfterPos - this is already its FINAL,
+      post-ripple position, which is also why the ripple loop below (keyed
+      on Position >= ShiftAfterPos) never touches it again. }
+    RightPart.Position := ShiftAfterPos - Delta;
   end;
 
   if not HaveLeft and not HaveRight then
@@ -1454,6 +1470,17 @@ begin
     end;
     Project.ReplaceTrackClips(Track, NewClips);
   end;
+
+  { Second pass, after whichever of RemoveClipAt/ReplaceTrackClips above
+    actually ran: every OTHER clip on this same track whose own Position was
+    at or past the chopped span's end shifts left by Delta too, closing the
+    hole left behind. RightPart (if any) is already at its final position
+    (see its own comment above) and sits BELOW ShiftAfterPos, so this loop
+    skips it - nothing here double-shifts it. }
+  for i := 0 to High(Project.Tracks[Track].Clips) do
+    if Project.Tracks[Track].Clips[i].Position >= ShiftAfterPos then
+      Dec(Project.Tracks[Track].Clips[i].Position, Delta);
+
   PushTrackToEngine(Track);
 
   { The chopped span is gone from view either way - clear the waveform
@@ -1462,7 +1489,7 @@ begin
   ActiveTimelineContent^.MarkedTrack := -1;
   ActiveTimelineContent^.MarkedClipIndex := -1;
   if Assigned(SetWaveformClipProc) then
-    SetWaveformClipProc(-1, 0, 0, 0, 0, 0);
+    SetWaveformClipProc(-1, 0, 0, 0, 0, 0, -1, -1);
   ActiveTimelineContent^.DrawView;
 end;
 

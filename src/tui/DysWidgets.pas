@@ -170,10 +170,17 @@ var
   AGain/ADetune/AWarpMode are the clip's own TClip.Gain/PitchSemitones/
   WarpMode fields - the waveform widget displays them alongside the
   waveform itself (same info EditsRack/the WarpEditor show in src/ui,
-  display-only here, no editing yet). }
+  display-only here, no editing yet). ATrack/AClipIdx (added alongside the
+  playhead feature) are Project.Tracks[ATrack].Clips[AClipIdx]'s own
+  indices for this same clip - the waveform widget keeps these rather than
+  a copy of Position, so its playhead can re-resolve the clip's live
+  Position/Offset/Length from Project each poll instead of a snapshot a
+  later ripple chop elsewhere could move out from under it; -1/-1 (from
+  DysChopMarkedClipRegion's own clear-the-mark call) means "nothing marked",
+  same sentinel ASampleID<0 already uses. }
 var
   SetWaveformClipProc: procedure(ASampleID: Integer; AOffset, ALength: Int64;
-    AGain, ADetune: Single; AWarpMode: Integer) = nil;
+    AGain, ADetune: Single; AWarpMode, ATrack, AClipIdx: Integer) = nil;
 
 { Called from DysEffectsRack.TDysWaveformContent.HandleEvent's Delete key,
   once the user has drag-selected a span over the waveform (mouse handling

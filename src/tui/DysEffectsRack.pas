@@ -158,10 +158,21 @@ type
     marks plus mm:ss labels, see DrawRuler); the wave itself starts at
     WaveTopRow. A left-drag over the wave rows (SelStartFrame/SelEndFrame,
     absolute source-domain frame positions - same domain as ClipOffset,
-    ComputeWaveformPeaks' own input) marks a span to chop; Delete sends it
-    off to DysWidgets.ChopWaveformSelectionProc - see that var's comment
-    for why the actual clip surgery happens in DysTimeline.pas instead of
-    here. }
+    ComputeWaveformPeaks' own input) marks a span to chop; Delete is caught
+    by DysnomiaApp's cmEditDelete handler instead of a HandleEvent case
+    here (Free Vision's menu-bar hotkey interception means the raw kbDel
+    byte never reaches this or any focused subview - see that handler's own
+    comment), which reads SelStartFrame/SelEndFrame off this view and calls
+    DysWidgets.ChopWaveformSelectionProc - see that var's comment for why
+    the actual clip surgery happens in DysTimeline.pas instead of here.
+    During playback, PlayheadActive/PlayheadFrame (see UpdatePlayhead,
+    polled from TDysnomiaApp.Idle the same way DysTimeline's own transport
+    playhead is) track where AudioEngine's absolute playback position
+    lands inside the MARKED clip - MarkedTrackIdx/MarkedClipIdx (set by
+    SetClip's caller, DysTimeline.MarkClipUnderCursor) are what let this
+    view re-resolve the clip's live Position/Offset/Length straight from
+    Project.Tracks each poll, rather than caching a Position that a ripple
+    chop elsewhere could move out from under it. }
   PDysWaveformContent = ^TDysWaveformContent;
   TDysWaveformContent = object(TView)
     SampleID: Integer; { -1 = nothing marked yet }
@@ -171,12 +182,19 @@ type
     Peaks: TWaveformPeaks;
     SelActive: Boolean;
     SelStartFrame, SelEndFrame: Int64; { absolute source-domain frames }
+    { Which Project.Tracks[MarkedTrackIdx].Clips[MarkedClipIdx] this is -
+      see SetWaveformClipProc's own comment on why the playhead needs this
+      instead of a cached Position. -1/-1 = nothing marked. }
+    MarkedTrackIdx, MarkedClipIdx: Integer;
+    PlayheadActive: Boolean;
+    PlayheadFrame: Int64; { absolute source-domain frame, when PlayheadActive }
     constructor Init(Bounds: TRect);
     procedure SetClip(ASampleID: Integer; AOffset, ALength: Int64;
-      AGain, ADetune: Single; AWarpMode: Integer);
+      AGain, ADetune: Single; AWarpMode, ATrack, AClipIdx: Integer);
     function ColToSourceFrame(ACol: Integer): Int64;
     function FrameToCol(AFrame: Int64): Integer;
     procedure DrawRuler(var B: TDrawBuffer; AAttr: Word);
+    procedure UpdatePlayhead;
     procedure Draw; virtual;
     procedure HandleEvent(var Event: TEvent); virtual;
   end;
@@ -358,6 +376,11 @@ const
     $F0). Skips GetColor entirely, same "hand-rolled view, raw attribute
     bytes" convention as DysTimeline's grid (see fvdoc.md). }
   WaveSelectionAttr = $70;
+  { Red bg, bright white fg - same byte DysTimeline.PlayheadAttr already
+    uses for its own transport playhead, kept identical so both panes read
+    as "the same concept" rather than two different conventions. }
+  WavePlayheadAttr = $4F;
+  WavePlayheadChar = '|';
 
 constructor TDysWaveformContent.Init(Bounds: TRect);
 begin
@@ -374,6 +397,10 @@ begin
   SelActive := False;
   SelStartFrame := 0;
   SelEndFrame := 0;
+  MarkedTrackIdx := -1;
+  MarkedClipIdx := -1;
+  PlayheadActive := False;
+  PlayheadFrame := 0;
 end;
 
 { Col is a column within the wave rows (0-based, same X the row-drawing
@@ -413,7 +440,7 @@ end;
   function only reads Data/FrameCount/Channels, never writes, so aliasing
   the original buffer this way is safe. }
 procedure TDysWaveformContent.SetClip(ASampleID: Integer; AOffset, ALength: Int64;
-  AGain, ADetune: Single; AWarpMode: Integer);
+  AGain, ADetune: Single; AWarpMode, ATrack, AClipIdx: Integer);
 var
   Windowed: TSample;
   Avail: Int64;
@@ -424,6 +451,9 @@ begin
   ClipGain := AGain;
   ClipDetune := ADetune;
   ClipWarpMode := AWarpMode;
+  MarkedTrackIdx := ATrack;
+  MarkedClipIdx := AClipIdx;
+  PlayheadActive := False;
   { A previous selection's column mapping is only valid against the OLD
     ClipOffset/ClipLength/Size.X - clear it rather than let a stale
     SelStartFrame/SelEndFrame appear to point somewhere in a different
@@ -540,6 +570,49 @@ begin
   end;
 end;
 
+{ Polled from TDysnomiaApp.Idle (DysnomiaApp.pas), same "no timer, poll on
+  Idle instead" convention DysTimeline.TDysTimelineContent.UpdatePlayhead
+  already established for the main timeline's own playhead.
+  AudioEngineGetPosition is an ABSOLUTE timeline-domain frame (same domain
+  as TClip.Position); re-fetching Project.Tracks[MarkedTrackIdx].
+  Clips[MarkedClipIdx] fresh every poll (rather than trusting a cached
+  Position) is what keeps this correct across a ripple chop that moved the
+  clip since it was marked - see SetWaveformClipProc's own comment. Only
+  an UNWARPED clip maps 1:1 timeline<->source, same restriction
+  DysChopMarkedClipRegion's own guard already applies, so no attempt is
+  made to show a playhead inside a time-warped clip. }
+procedure TDysWaveformContent.UpdatePlayhead;
+var
+  NewActive: Boolean;
+  NewFrame, Pos: Int64;
+  Clip: TClip;
+begin
+  NewActive := False;
+  NewFrame := 0;
+  if (SampleID >= 0) and (MarkedTrackIdx >= 0) and
+    (MarkedTrackIdx <= High(Project.Tracks)) and
+    (MarkedClipIdx >= 0) and (MarkedClipIdx <= High(Project.Tracks[MarkedTrackIdx].Clips)) and
+    AudioEngineIsPlaying then
+  begin
+    Clip := Project.Tracks[MarkedTrackIdx].Clips[MarkedClipIdx];
+    if Length(Clip.WarpMarkers) < 2 then
+    begin
+      Pos := AudioEngineGetPosition;
+      if (Pos >= Clip.Position) and (Pos < Clip.Position + Clip.Length) then
+      begin
+        NewActive := True;
+        NewFrame := Clip.Offset + (Pos - Clip.Position);
+      end;
+    end;
+  end;
+  if (NewActive <> PlayheadActive) or (NewActive and (NewFrame <> PlayheadFrame)) then
+  begin
+    PlayheadActive := NewActive;
+    PlayheadFrame := NewFrame;
+    DrawView;
+  end;
+end;
+
 procedure TDysWaveformContent.Draw;
 var
   B: TDrawBuffer;
@@ -547,7 +620,7 @@ var
   MidRow, MinV, MaxV, Top, Bot: Double;
   Hdr, IdStr, GainStr, DetuneStr: string;
   C, SelC: Word;
-  SelColStart, SelColEnd: Integer;
+  SelColStart, SelColEnd, PlayheadCol: Integer;
 begin
   C := GetColor(1);
   SelC := WaveSelectionAttr;
@@ -570,6 +643,13 @@ begin
   WriteLine(0, 0, Size.X, 1, B);
 
   DrawRuler(B, C);
+  PlayheadCol := -1;
+  if PlayheadActive and (ClipLength > 0) then
+  begin
+    PlayheadCol := FrameToCol(PlayheadFrame);
+    if (PlayheadCol >= 0) and (PlayheadCol < Size.X) then
+      MoveChar(B[PlayheadCol], WavePlayheadChar, WavePlayheadAttr, 1);
+  end;
   WriteLine(0, 1, Size.X, 1, B);
 
   SelColStart := -1;
@@ -619,6 +699,8 @@ begin
         else
           MoveChar(B[Col], WaveRowGlyph(Top - Row, Bot - Row), C, 1);
       end;
+    if (PlayheadCol >= 0) and (PlayheadCol < Size.X) then
+      MoveChar(B[PlayheadCol], WavePlayheadChar, WavePlayheadAttr, 1);
     WriteLine(0, WaveTopRow + Row, Size.X, 1, B);
   end;
 end;
@@ -666,28 +748,24 @@ begin
     ClearEvent(Event);
     Exit;
   end;
-  if (Event.What = evKeyDown) and (Event.KeyCode = kbDel) then
-  begin
-    if SelActive and (SampleID >= 0) and Assigned(ChopWaveformSelectionProc) then
-    begin
-      ChopWaveformSelectionProc(SelStartFrame, SelEndFrame);
-      SelActive := False;
-    end;
-    ClearEvent(Event);
-    Exit;
-  end;
+  { Delete is NOT handled here - see DysnomiaApp.pas's cmEditDelete case for
+    why: the Edit menu's "Del" hotkey intercepts the raw kbDel byte in
+    TMenuBar's own phPreProcess pass before it can ever reach this (or any)
+    focused subview, so a local kbDel case here would be dead code. That
+    command handler reads/clears SelActive/SelStartFrame/SelEndFrame
+    straight off this view instead. }
   inherited HandleEvent(Event);
 end;
 
 { Wired to DysWidgets.SetWaveformClipProc from this unit's own
   `initialization` section - see that var's own comment. }
 procedure DysSetWaveformClip(ASampleID: Integer; AOffset, ALength: Int64;
-  AGain, ADetune: Single; AWarpMode: Integer);
+  AGain, ADetune: Single; AWarpMode, ATrack, AClipIdx: Integer);
 begin
   if ActiveBottomPane = nil then
     Exit;
   ActiveBottomPane^.WaveformView^.SetClip(ASampleID, AOffset, ALength,
-    AGain, ADetune, AWarpMode);
+    AGain, ADetune, AWarpMode, ATrack, AClipIdx);
   if not ActiveBottomPane^.ShowingWaveform then
     ActiveBottomPane^.ToggleContent;
 end;

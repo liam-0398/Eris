@@ -537,6 +537,8 @@ begin
   inherited Idle;
   if (Timeline <> nil) and (Timeline^.Content <> nil) then
     Timeline^.Content^.UpdatePlayhead;
+  if (ActiveBottomPane <> nil) and (ActiveBottomPane^.WaveformView <> nil) then
+    ActiveBottomPane^.WaveformView^.UpdatePlayhead;
   { Same "no timer, poll on Idle instead" reasoning as the playhead above -
     reflects AudioEngineRecordState onto the Record button and finalizes a
     take the engine auto-stopped on its own (see TDysToolBar.
@@ -609,7 +611,31 @@ begin
         if Timeline <> nil then
           Timeline^.Content^.SplitClipUnderCursor;
       cmEditDelete:
-        if Timeline <> nil then
+        { The Edit menu's "Del" hotkey (see InitMenuBar) is a Free Vision
+          menu-bar hotkey, which TMenuBar/TMenuView.HandleEvent (menus.pas)
+          intercepts in the phPreProcess phase of EVERY evKeyDown BEFORE
+          the focused subview - here, TDysWaveformContent - ever sees the
+          raw key, converting it straight to this cmEditDelete command
+          regardless of what's focused. That made the waveform pane's own
+          Delete-a-selection binding (TDysWaveformContent.HandleEvent's old
+          kbDel case, now removed - this is the one place Delete is handled)
+          dead code, since the raw kbDel byte could never reach it. Route
+          here instead: a waveform drag-selection wins over the timeline's
+          own clip-under-cursor delete whenever the bottom pane is actually
+          showing the waveform AND has a selection - that's a strictly more
+          specific, more recently-made choice than "whatever's under the
+          timeline cursor". }
+        if (ActiveBottomPane <> nil) and ActiveBottomPane^.ShowingWaveform and
+          (ActiveBottomPane^.WaveformView <> nil) and
+          ActiveBottomPane^.WaveformView^.SelActive then
+        begin
+          if Assigned(ChopWaveformSelectionProc) then
+            ChopWaveformSelectionProc(ActiveBottomPane^.WaveformView^.SelStartFrame,
+              ActiveBottomPane^.WaveformView^.SelEndFrame);
+          ActiveBottomPane^.WaveformView^.SelActive := False;
+          ActiveBottomPane^.WaveformView^.DrawView;
+        end
+        else if Timeline <> nil then
           Timeline^.Content^.DeleteClipUnderCursor;
       cmEditPreferences:
         ShowPreferencesDialog;
