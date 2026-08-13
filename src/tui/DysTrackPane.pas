@@ -23,8 +23,11 @@ const
 type
   PDysTrackListBox = ^TDysTrackListBox;
   TDysTrackListBox = object(TListBox)
+    TrackMute: array[0..PlaceholderTrackCount] of Boolean;
+    TrackSolo: array[0..PlaceholderTrackCount] of Boolean;
     constructor Init(Bounds: TRect);
     procedure HandleEvent(var Event: TEvent); virtual;
+    procedure Draw; virtual;
   end;
 
   PDysTrackPane = ^TDysTrackPane;
@@ -48,12 +51,51 @@ function SelectedTrackIndex: Integer;
 
 implementation
 
+procedure TDysTrackListBox.Draw;
+var
+  Item: Integer;
+  Y: Integer;
+  Attr: Byte;
+  Text: String;
+begin
+  inherited Draw;
+
+  { Overpaint track numbers with muted (red) or solo'd (yellow) colors }
+  for Item := 0 to Range - 1 do
+  begin
+    if Item - TopItem < Size.Y then
+    begin
+      Y := Item - TopItem;
+      if Item > 0 then { skip blank row 0 }
+      begin
+        if TrackMute[Item] then
+          Attr := $0C { black bg, bright red fg }
+        else if TrackSolo[Item] then
+          Attr := $0E { black bg, bright yellow fg }
+        else
+          Attr := $0F; { black bg, bright white fg }
+
+        if Item = Focused then
+          Attr := $70; { light grey bg, black fg - selection overrides }
+
+        Text := PString(List^.At(Item))^;
+        WriteStr(1, Y, Text, Attr);
+      end;
+    end;
+  end;
+end;
+
 constructor TDysTrackListBox.Init(Bounds: TRect);
 var
   Entries: PUnSortedStrCollection;
   I: Integer;
 begin
   inherited Init(Bounds, 1, nil);
+  for I := 0 to PlaceholderTrackCount do
+  begin
+    TrackMute[I] := False;
+    TrackSolo[I] := False;
+  end;
   Entries := New(PUnSortedStrCollection, Init(PlaceholderTrackCount + 1, 4));
   Entries^.Insert(NewStr(''));
   for I := 1 to PlaceholderTrackCount do
@@ -62,8 +104,37 @@ begin
 end;
 
 procedure TDysTrackListBox.HandleEvent(var Event: TEvent);
+var
+  TrackIdx: Integer;
 begin
   inherited HandleEvent(Event);
+
+  { Handle mute (m) and solo (s) key presses on tracks 1-8 }
+  if (Event.What = evKeyDown) and (Focused > 0) then
+  begin
+    TrackIdx := Focused;
+    case Char(Event.CharCode) of
+      'm', 'M':
+      begin
+        TrackMute[TrackIdx] := not TrackMute[TrackIdx];
+        if TrackIdx <= Project.TrackCount then
+          Project.TrackSolo[TrackIdx - 1] := False; { clear solo when muting }
+        DrawView;
+        ClearEvent(Event);
+      end;
+      's', 'S':
+      begin
+        TrackSolo[TrackIdx] := not TrackSolo[TrackIdx];
+        if TrackIdx <= Project.TrackCount then
+          Project.TrackSolo[TrackIdx - 1] := TrackSolo[TrackIdx];
+        if TrackSolo[TrackIdx] then
+          TrackMute[TrackIdx] := False; { clear mute when soloing }
+        DrawView;
+        ClearEvent(Event);
+      end;
+    end;
+  end;
+
   if ((Event.What = evKeyDown) and
       ((Event.KeyCode = kbCtrlEnter) or (Event.KeyCode = kbDropdownKey))) or
      ((Event.What = evMouseDown) and (Event.Buttons and mbActualRightButton <> 0))
@@ -101,6 +172,8 @@ begin
   Listing := New(PDysTrackListBox, Init(R));
   Insert(Listing);
   Focusable := Listing;
+  { Start cursor at track 1 instead of blank row 0 }
+  Listing^.FocusItem(1);
   ActiveTrackPane := @Self;
 end;
 

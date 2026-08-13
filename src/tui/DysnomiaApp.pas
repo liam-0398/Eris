@@ -64,6 +64,7 @@ type
     procedure DoFileOpen;
     procedure DoFileSave;
     procedure DoFileSaveAs;
+    procedure FullScreenRefresh;
   end;
 
 implementation
@@ -452,6 +453,13 @@ begin
     FilePane^.Listing^.DrawView;
 end;
 
+procedure TDysnomiaApp.FullScreenRefresh;
+begin
+  { Force redraw of all panes to clear any leftover dialog/popup borders }
+  if DeskTop <> nil then
+    DeskTop^.ReDraw;
+end;
+
 procedure TDysnomiaApp.DoFileOpen;
 var
   Path: string;
@@ -469,12 +477,14 @@ begin
   begin
     MessageBox('The audio engine stopped responding, so nothing was ' +
       'opened.', nil, mfError or mfOKButton);
+    FullScreenRefresh;
     Exit;
   end;
   if not ProjectFile.LoadProject(Path) then
   begin
     MessageBox('Could not open "' + Path + '" as an Eris project.', nil,
       mfError or mfOKButton);
+    FullScreenRefresh;
     Exit;
   end;
   CurrentProjectPath := Path;
@@ -489,8 +499,11 @@ begin
     Exit;
   end;
   if not ProjectFile.SaveProject(CurrentProjectPath) then
+  begin
     MessageBox('Could not save "' + CurrentProjectPath + '".', nil,
       mfError or mfOKButton);
+    FullScreenRefresh;
+  end;
 end;
 
 procedure TDysnomiaApp.DoFileSaveAs;
@@ -514,6 +527,7 @@ begin
   if not ProjectFile.SaveProject(Path) then
   begin
     MessageBox('Could not save "' + Path + '".', nil, mfError or mfOKButton);
+    FullScreenRefresh;
     Exit;
   end;
   CurrentProjectPath := Path;
@@ -568,8 +582,11 @@ begin
     silently as before, leaving no clue anything went wrong. }
   FatalErr := AudioEngineTakeFatalError;
   if FatalErr <> '' then
+  begin
     MessageBox('The audio engine hit an error and stopped playback:' +
       #13#13 + FatalErr, nil, mfError or mfOKButton);
+    FullScreenRefresh;
+  end;
   Sleep(10);
 end;
 
@@ -597,7 +614,11 @@ begin
   if Event.What = evCommand then
   begin
     case Event.Command of
-      cmAbout: ShowAbout;
+      cmAbout:
+        begin
+          ShowAbout;
+          FullScreenRefresh;
+        end;
       cmFileNew:
         begin
           { Mirrors MainForm.FileNewClick: stop and drain the engine before
@@ -612,8 +633,11 @@ begin
             RefreshAfterProjectChange;
           end
           else
+          begin
             MessageBox('The audio engine stopped responding, so nothing ' +
               'was reset.', nil, mfError or mfOKButton);
+            FullScreenRefresh;
+          end;
         end;
       cmFileOpen:
         DoFileOpen;
@@ -622,8 +646,11 @@ begin
       cmFileSaveAs:
         DoFileSaveAs;
       cmFileExport:
-        MessageBox('Export is not wired yet - project load/save is future work.',
-          nil, mfInformation or mfOKButton);
+        begin
+          MessageBox('Export is not wired yet - project load/save is future work.',
+            nil, mfInformation or mfOKButton);
+          FullScreenRefresh;
+        end;
       cmEditCopy:
         if Timeline <> nil then
           Timeline^.Content^.CopyClipUnderCursor;
@@ -664,7 +691,10 @@ begin
         else if Timeline <> nil then
           Timeline^.Content^.DeleteClipUnderCursor;
       cmEditPreferences:
-        ShowPreferencesDialog;
+        begin
+          ShowPreferencesDialog;
+          FullScreenRefresh;
+        end;
     else
       Exit;
     end;

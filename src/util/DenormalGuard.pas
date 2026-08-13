@@ -4,6 +4,9 @@ unit DenormalGuard;
 
 interface
 
+uses
+  Math;
+
 { Puts the CALLING thread's SSE unit into flush-to-zero / denormals-are-zero
   mode, and leaves it there for the life of that thread.
 
@@ -36,7 +39,24 @@ interface
   capture thread, and the offline render thread.
 
   No-op on non-x86 targets, which have their own (usually always-on)
-  denormal behavior and no MXCSR to set. }
+  denormal behavior and no MXCSR to set.
+
+  This also masks the Invalid/ZeroDivide/Overflow FPU exceptions on the
+  calling thread. FPC/Delphi's default FPU control word - unlike C's -
+  leaves those UNMASKED (a Borland-heritage default), so a transient 0/0 or
+  Sqrt() of a negative number deep in some effect's DSP math (decaying
+  feedback paths cross zero and hit exact edge cases sometimes) raises a
+  hard EInvalidOp exception instead of just producing a NaN. GTK - which
+  Eris's LCL frontend links in - happens to reset the FPU control word as a
+  side effect of its own startup, which masks these traps as a side effect;
+  a bare console app like Dysnomia never touches it, so the identical DSP
+  edge case that quietly outputs NaN under Eris raises a real exception
+  under Dysnomia instead (caught by TPlaybackThread.Execute's except block,
+  but still audible as playback stopping dead). Audio DSP should never
+  trap on this regardless of what some other library's init code happens
+  to do - a stray NaN should degrade to silence, not kill the thread - so
+  this masks it explicitly rather than relying on an accident of whichever
+  toolkit happens to be linked in. }
 procedure EnableFlushDenormals;
 
 implementation
@@ -60,6 +80,8 @@ begin
   {$ELSEIF DEFINED(CPUI386)}
   SetMXCSR(GetMXCSR or MXCSR_FTZ);
   {$ENDIF}
+  SetExceptionMask(GetExceptionMask + [exInvalidOp, exZeroDivide, exOverflow,
+    exUnderflow, exDenormalized, exPrecision]);
 end;
 
 end.
