@@ -9,6 +9,9 @@ per-track/master effects chain, SP-1200-style per-track swing, and an SP-1200
 emulation mode baked identically into live monitoring and offline
 export.
 
+- Usage Videos
+https://www.youtube.com/@slothbearslothbear
+
 # DISCLAIMER
 
 **Collaboration**: This is a personal project that I released because I figure a few other nerds like me will get a lot of use out of it. This will never be a collaborative project. I welcome issue reports but if you request a feature expect it to be denied (not to say we might not be on the same page ocassionaly). This project is very opinionated because I have been dissatisfied with the other DAWs I have been using over the past 15 years and I will not add functionality to suport a use case that is not mine. There will never be a piano roll or VST support etc.
