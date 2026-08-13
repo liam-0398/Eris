@@ -81,9 +81,11 @@ export.
 - **File browser**: quick-nav to home/root (a drive list on Windows) and a
   resizable width, drag-and-drop straight onto a track or the instrument
   slot.
-- **Unbeatable Performance**: Heavily optimized for the lowest latency 
+- **Lightweight**: Heavily optimized for the lowest latency 
   and CPU usage possible. Inline assembly for critical components and 
-  auto-detected AVX2 support in areas where it makes sense. 
+  auto-detected AVX2 support in areas where it makes sense. 8 track project
+  heavy on effects, realtime SP1200 emuation, 256 buffer, 44.1, 3% CPU and 
+  65MB RAM on an i7-9750H running on battery power.
 
 ## Dysnomia
 
@@ -154,4 +156,4 @@ shortcut and mouse-gesture reference, including non-obvious interactions
 ## Status
 
 Under active development. Not yet feature-complete or considered stable.
-Use at your own risk, save format not fully locked in yet.
+Use at your own risk.
