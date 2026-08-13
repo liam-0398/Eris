@@ -57,31 +57,47 @@ var
   Y: Integer;
   Attr: Byte;
   Text: String;
+  B: TDrawBuffer;
+  NormalAttr: Byte = $0F;     { black bg, bright white fg }
+  SelectedAttr: Byte = $70;   { light grey bg, black fg }
+  MutedAttr: Byte = $04;      { black bg, dark red fg }
+  SoloAttr: Byte = $06;       { black bg, brown/yellow fg }
 begin
-  inherited Draw;
-
-  { Overpaint track numbers with muted (red) or solo'd (yellow) colors }
+  { Custom rendering without calling inherited Draw, to avoid palette/blink issues }
   for Item := 0 to Range - 1 do
   begin
-    if Item - TopItem < Size.Y then
+    Y := Item - TopItem;
+    if (Y < 0) or (Y >= Size.Y) then
+      Continue;
+
+    { Clear line and set base attribute }
+    if Item = Focused then
+      MoveChar(B, ' ', SelectedAttr, Size.X)
+    else
+      MoveChar(B, ' ', NormalAttr, Size.X);
+
+    Text := PString(List^.At(Item))^;
+    if Text <> '' then
     begin
-      Y := Item - TopItem;
-      if Item > 0 then { skip blank row 0 }
+      { Determine color for non-blank items }
+      if Item = Focused then
+        Attr := SelectedAttr { selection overrides mute/solo color }
+      else if Item > 0 then { skip blank row 0 }
       begin
         if TrackMute[Item] then
-          Attr := $0C { black bg, bright red fg }
+          Attr := MutedAttr
         else if TrackSolo[Item] then
-          Attr := $0E { black bg, bright yellow fg }
+          Attr := SoloAttr
         else
-          Attr := $0F; { black bg, bright white fg }
+          Attr := NormalAttr;
+      end
+      else
+        Attr := NormalAttr;
 
-        if Item = Focused then
-          Attr := $70; { light grey bg, black fg - selection overrides }
-
-        Text := PString(List^.At(Item))^;
-        WriteStr(1, Y, Text, Attr);
-      end;
+      MoveStr(B, Text, Attr);
     end;
+
+    WriteLine(0, Y, Size.X, 1, B);
   end;
 end;
 

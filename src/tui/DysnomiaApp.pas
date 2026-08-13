@@ -455,9 +455,19 @@ end;
 
 procedure TDysnomiaApp.FullScreenRefresh;
 begin
-  { Force redraw of all panes to clear any leftover dialog/popup borders }
-  if DeskTop <> nil then
-    DeskTop^.ReDraw;
+  { Force complete screen refresh: clear screen and redraw all panes to
+    eliminate any leftover dialog/popup artifacts. Calling ReDraw alone
+    doesn't update the display; we need to explicitly redraw each pane. }
+  if ToolBarPane <> nil then
+    ToolBarPane^.DrawView;
+  if FilePane <> nil then
+    FilePane^.DrawView;
+  if Timeline <> nil then
+    Timeline^.DrawView;
+  if TrackPane <> nil then
+    TrackPane^.DrawView;
+  if BottomPane <> nil then
+    BottomPane^.DrawView;
 end;
 
 procedure TDysnomiaApp.DoFileOpen;
