@@ -75,8 +75,6 @@ When the toolbar is focused, use QWERTY to play the selected track's instrument.
 
 | Key | Action |
 |---|---|
-| `Q 2 W 3 E R 5 T 6 Y 7 U I 9 O 0 P` | Upper octave (chromatic) |
-| `Z S X D C V G B H N J M` | Lower octave (chromatic) |
 | `Ctrl+Z` | Octave down |
 | `Ctrl+X` | Octave up |
 | `Esc` | Leave keyboard mode |
