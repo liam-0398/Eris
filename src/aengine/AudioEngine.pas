@@ -90,6 +90,7 @@ function AudioEngineIsBusy: Boolean;
   AudioEngineResetEffectState, which releases the dynamic buffers inside
   every effect state - need this one, not the busy test. }
 function AudioEngineProcessingActive: Boolean;
+function AudioEngineTakeFatalError: string;
 function AudioEngineHasClip: Boolean;
 { No-op since the Beats warp stopped caching grain lookups - see
   BeatsClipSample, which derives a slice's position from its segment in O(1)
@@ -410,6 +411,11 @@ var
   TrackClips: array[0..MaxTracks - 1] of TTrackClips;
   Playhead: Int64;
   Playing: Boolean;
+  { set by TPlaybackThread.Execute's except handler below, cleared by
+    AudioEngineTakeFatalError - a plain unsynchronized string, same
+    tolerance as TunerFreqHz: a UI poll seeing it one block late is fine,
+    it only needs to be noticed eventually, not instantly. }
+  LastEngineFatalError: string;
   LoopStart: Int64;
   LoopEnd: Int64;
   LoopActive: Boolean;
@@ -2835,11 +2841,33 @@ begin
     DrainCommands;
     if EngineProcessingActive then
     begin
-      FillBlock;
-      if SP1200Enabled then
-        SP1200Process(SP1200MixState, MixBuffer, BlockFrames, OutputChannels,
-          ProjectSampleRate);
-      Backend.WriteBlock(MixBuffer, BlockFrames);
+      try
+        FillBlock;
+        if SP1200Enabled then
+          SP1200Process(SP1200MixState, MixBuffer, BlockFrames, OutputChannels,
+            ProjectSampleRate);
+        Backend.WriteBlock(MixBuffer, BlockFrames);
+      except
+        { TThread.ThreadProc (see classes.inc) wraps Execute in its own
+          try/except that just stashes the exception in FFatalException and
+          lets this thread quietly end - nothing anywhere reads that field,
+          so an exception anywhere in FillBlock/an effect's ProcessEffect
+          (a bad param combination inside some effect's DSP, say) used to
+          kill this thread outright: no crash, no dialog, Playhead simply
+          never moves again because nothing is left alive to move it, and
+          it stayed dead even after removing whatever effect triggered it,
+          since by then there was no thread left to notice the removal.
+          Catching here instead means one bad block just stops playback
+          cleanly - EngineProcessingActive goes False on the next loop
+          check because Playing does - rather than ending the thread, so a
+          later Play command starts the engine fresh instead of doing
+          nothing forever. }
+        on E: Exception do
+        begin
+          Playing := False;
+          LastEngineFatalError := E.ClassName + ': ' + E.Message;
+        end;
+      end;
     end
     else
     begin
@@ -3197,6 +3225,15 @@ end;
 function AudioEngineProcessingActive: Boolean;
 begin
   Result := EngineProcessingActive;
+end;
+
+{ Empty string if nothing's failed. Non-empty exactly once per failure -
+  reading it clears it, so a UI Idle poll can treat "got a non-empty
+  result" as "show this and don't show it again" without a separate flag. }
+function AudioEngineTakeFatalError: string;
+begin
+  Result := LastEngineFatalError;
+  LastEngineFatalError := '';
 end;
 
 procedure AudioEngineInvalidateGrainCache;

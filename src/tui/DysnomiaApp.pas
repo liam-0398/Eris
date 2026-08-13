@@ -537,27 +537,16 @@ end;
   all whenever nothing is pending - confirmed by reading it directly, not
   guessed - so this method runs in a tight, un-throttled spin the entire
   time Dysnomia is running, keyboard-idle or not, burning close to a full
-  CPU core on whatever core the scheduler puts it on. Eris (LCL) has no
-  equivalent: GTK's own event loop blocks/sleeps when idle, so it puts
-  ~zero standing CPU load on the machine between user actions. That
-  difference matters here because AudioEngine's realtime callback runs on
-  its own thread, sharing the same CPU with this spin - a callback that
-  briefly needs more time than usual (e.g. a Quadraverb Reverb's first
-  activation, which does ~28 array allocations across its comb/diffuser/
-  tail-allpass lines on the audio thread itself, far more than any other
-  effect kind's first-activation cost) is far more likely to miss its
-  block deadline under Dysnomia's constant self-inflicted contention than
-  under Eris's idle-friendly one, even though the DSP code triggering it
-  is identical in both.
-
-  Sleep(10) throttles this to ~100Hz - still far faster than a human
-  perceives for cursor blink or playhead redraw, but it gives the CPU (and
-  so the audio thread) real gaps instead of none. Fixing the busy-spin
-  itself, rather than the specific effect that happens to expose it, since
-  any future effect with a similarly heavy first-activation cost would hit
-  the same risk otherwise. Not a Free Vision or aengine change - scoped to
-  this one already-existing override. }
+  CPU core. Eris (LCL) has no equivalent: GTK's own event loop blocks/sleeps
+  when idle. Sleep(10) throttles this to ~100Hz - still far faster than a
+  human perceives for cursor blink or playhead redraw - so this stops
+  burning a core for nothing. (This does NOT fix an effect freezing
+  playback - that turned out to be AudioEngine silently losing its
+  playback thread to an uncaught exception, see AudioEngineTakeFatalError
+  below and TPlaybackThread.Execute's except block.) }
 procedure TDysnomiaApp.Idle;
+var
+  FatalErr: string;
 begin
   inherited Idle;
   if (Timeline <> nil) and (Timeline^.Content <> nil) then
@@ -570,6 +559,17 @@ begin
     PollRecordState). }
   if ActiveToolBar <> nil then
     ActiveToolBar^.PollRecordState;
+  { TPlaybackThread.Execute now catches exceptions instead of letting them
+    silently kill the whole playback thread (FPC's TThread.ThreadProc
+    swallows a thread's uncaught exception into FFatalException and just
+    ends the thread - no crash, no dialog, Playhead simply never moves
+    again). This is the other half of that fix: without polling and
+    showing it, a caught exception would stop playback cleanly but just as
+    silently as before, leaving no clue anything went wrong. }
+  FatalErr := AudioEngineTakeFatalError;
+  if FatalErr <> '' then
+    MessageBox('The audio engine hit an error and stopped playback:' +
+      #13#13 + FatalErr, nil, mfError or mfOKButton);
   Sleep(10);
 end;
 
