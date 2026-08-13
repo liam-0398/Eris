@@ -20,7 +20,16 @@ one's terminal handling is true of the other's.
 **`grep` gotcha.** Plain `grep`/`grep -n` on some files under
 `fpcupdeluxe/fpcsrc` silently returns nothing even when the text is
 there (locale/encoding detection quirk) - use `grep -a`, or `awk`,
-against that tree.
+against that tree. Concretely bitten by this looking for `TView.MouseEvent`
+(`views.pas`) - a plain `grep -n "MouseEvent" views.pas` comes back empty,
+`grep -a` finds `FUNCTION MouseEvent (Var Event: TEvent; Mask: Word):
+Boolean;` immediately. Worth knowing `MouseEvent` exists at all: it's the
+standard Turbo-Vision-style drag-tracking primitive - loads the next event
+matching `Mask` into `Event` and returns `False` once the button comes up
+(or `Mask` no longer matches), so a `repeat ... until not MouseEvent(Event,
+evMouseMove + evMouseAuto)` loop after an `evMouseDown` is the idiomatic
+way to track a drag (see `editors.pas`'s own text-selection drag, and
+Dysnomia's waveform drag-to-chop selection in tui.md).
 
 **Coordinates are owner-local, not global.** `Bounds` passed to
 `TView.Init` is relative to the immediate Owner's origin, not the

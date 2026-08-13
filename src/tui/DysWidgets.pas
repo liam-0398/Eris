@@ -175,6 +175,21 @@ var
   SetWaveformClipProc: procedure(ASampleID: Integer; AOffset, ALength: Int64;
     AGain, ADetune: Single; AWarpMode: Integer) = nil;
 
+{ Called from DysEffectsRack.TDysWaveformContent.HandleEvent's Delete key,
+  once the user has drag-selected a span over the waveform (mouse handling
+  lives entirely in that view - Free Vision's own TView.MouseEvent drag
+  loop, nothing DysWidgets needs to know about) - same circularity as
+  SetWaveformClipProc above (DysEffectsRack `uses DysWidgets`, not the other
+  way around), except the real implementation this points to
+  (DysChopMarkedClipRegion) is in DysTimeline.pas, alongside
+  StartRecordingProc/FinalizeRecordingProc/SeekPlaybackToCursorProc, since
+  it needs to mutate the MARKED clip (DysTimeline.ActiveTimelineContent^.
+  MarkedTrack/MarkedClipIndex) rather than anything local to the waveform
+  widget itself. AStartFrame/AEndFrame are absolute source-domain sample
+  frame positions (same domain as TClip.Offset), not timeline frames. }
+var
+  ChopWaveformSelectionProc: procedure(AStartFrame, AEndFrame: Int64) = nil;
+
 implementation
 
 uses

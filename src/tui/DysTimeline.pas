@@ -1349,6 +1349,123 @@ begin
       SetWaveformClipProc(SampleID, Offset, Length, Gain, PitchSemitones, WarpMode);
 end;
 
+{ Wired to DysWidgets.ChopWaveformSelectionProc - see that var's own
+  comment. AStartSource/AEndSource are absolute source-domain frame
+  positions into the underlying sample (same domain as TClip.Offset),
+  exactly what the waveform widget's own drag-selection already works in
+  (TDysWaveformContent.ColToSourceFrame). Excises that span from the
+  MARKED clip (MarkedTrack/MarkedClipIndex, set by 'k' - not necessarily
+  whatever's under the timeline cursor right now), leaving a
+  timeline-domain gap the same size rather than rippling everything after
+  it leftward - same "delete leaves a gap" convention DeleteClipUnderCursor
+  above already establishes for a whole clip. Only supports an UNWARPED
+  clip (WarpMarkers empty/singleton, the default state for a clip fresh off
+  the file pane or a plain Ctrl+V/Ctrl+D copy - see SplitWarpMarkers's own
+  "Length(AMarkers) < 2 -> 1:1 playback" comment): the source-domain
+  selection this callback receives can only be mapped straight onto
+  timeline-domain Position/Length when source frame and timeline frame
+  advance 1:1, which a time-warped clip's own WarpMarkers deliberately
+  breaks. Chopping a warped clip needs the same piecewise-linear remap
+  SplitWarpMarkers already does, just at TWO cut points instead of one -
+  real, but not attempted here; refuses with a message instead of
+  producing a chop that would silently play back wrong. }
+procedure DysChopMarkedClipRegion(AStartSource, AEndSource: Int64);
+var
+  Track, ClipIdx: Integer;
+  Original, LeftPart, RightPart: TClip;
+  ClipStart, ClipEnd: Int64;
+  HaveLeft, HaveRight: Boolean;
+  NewClips: TClipArray;
+  i, k: Integer;
+begin
+  if ActiveTimelineContent = nil then
+    Exit;
+  Track := ActiveTimelineContent^.MarkedTrack;
+  ClipIdx := ActiveTimelineContent^.MarkedClipIndex;
+  if (Track < 0) or (Track > High(Project.Tracks)) then
+    Exit;
+  if (ClipIdx < 0) or (ClipIdx > High(Project.Tracks[Track].Clips)) then
+    Exit;
+  Original := Project.Tracks[Track].Clips[ClipIdx];
+  if Length(Original.WarpMarkers) >= 2 then
+  begin
+    MessageBox('Chopping a time-warped clip (after ''w''/Shift+W) is not ' +
+      'supported yet - only a plain, unwarped clip can be chopped.', nil,
+      mfError or mfOKButton);
+    Exit;
+  end;
+
+  ClipStart := Original.Offset;
+  ClipEnd := Original.Offset + Original.Length;
+  if AStartSource < ClipStart then
+    AStartSource := ClipStart;
+  if AEndSource > ClipEnd then
+    AEndSource := ClipEnd;
+  if AEndSource <= AStartSource then
+    Exit;
+
+  HaveLeft := AStartSource > ClipStart;
+  HaveRight := AEndSource < ClipEnd;
+
+  if HaveLeft then
+  begin
+    LeftPart := Original;
+    LeftPart.Length := AStartSource - ClipStart;
+  end;
+  if HaveRight then
+  begin
+    RightPart := Original;
+    RightPart.Offset := AEndSource;
+    RightPart.Length := ClipEnd - AEndSource;
+    { Unwarped (guarded above), so source and timeline frames advance 1:1 -
+      the right remainder's timeline start is exactly as far past the
+      original clip's own start as its source start is. }
+    RightPart.Position := Original.Position + (AEndSource - ClipStart);
+  end;
+
+  if not HaveLeft and not HaveRight then
+    { Whole clip selected - same outcome as Delete. }
+    Project.RemoveClipAt(Track, ClipIdx)
+  else
+  begin
+    SetLength(NewClips, Length(Project.Tracks[Track].Clips) -
+      1 + Ord(HaveLeft) + Ord(HaveRight));
+    k := 0;
+    for i := 0 to High(Project.Tracks[Track].Clips) do
+    begin
+      if i = ClipIdx then
+      begin
+        if HaveLeft then
+        begin
+          NewClips[k] := LeftPart;
+          Inc(k);
+        end;
+        if HaveRight then
+        begin
+          NewClips[k] := RightPart;
+          Inc(k);
+        end;
+      end
+      else
+      begin
+        NewClips[k] := Project.Tracks[Track].Clips[i];
+        Inc(k);
+      end;
+    end;
+    Project.ReplaceTrackClips(Track, NewClips);
+  end;
+  PushTrackToEngine(Track);
+
+  { The chopped span is gone from view either way - clear the waveform
+    widget rather than guessing which remaining piece (if any) to re-show;
+    press 'k' again on whichever piece to inspect it. }
+  ActiveTimelineContent^.MarkedTrack := -1;
+  ActiveTimelineContent^.MarkedClipIndex := -1;
+  if Assigned(SetWaveformClipProc) then
+    SetWaveformClipProc(-1, 0, 0, 0, 0, 0);
+  ActiveTimelineContent^.DrawView;
+end;
+
 procedure TDysTimelineContent.SolidifyResize;
 begin
   if not ResizeActive then
@@ -1502,5 +1619,6 @@ initialization
   StartRecordingProc := @DysStartRecording;
   FinalizeRecordingProc := @DysFinalizeRecording;
   SeekPlaybackToCursorProc := @DysSeekPlaybackToCursor;
+  ChopWaveformSelectionProc := @DysChopMarkedClipRegion;
 
 end.

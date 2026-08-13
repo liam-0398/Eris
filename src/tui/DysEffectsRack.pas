@@ -152,7 +152,16 @@ type
     SetWaveformClipProc - DysWidgets.pas's own comment explains why that's
     a callback and not a direct call). Peaks are computed once per mark
     (SetClip), not per Draw - ComputeWaveformPeaks walks the whole clip
-    span, and Draw can run far more often than the marked clip changes. }
+    span, and Draw can run far more often than the marked clip changes.
+
+    Row 0 is the info header (unchanged); row 1 is now a time ruler (tick
+    marks plus mm:ss labels, see DrawRuler); the wave itself starts at
+    WaveTopRow. A left-drag over the wave rows (SelStartFrame/SelEndFrame,
+    absolute source-domain frame positions - same domain as ClipOffset,
+    ComputeWaveformPeaks' own input) marks a span to chop; Delete sends it
+    off to DysWidgets.ChopWaveformSelectionProc - see that var's comment
+    for why the actual clip surgery happens in DysTimeline.pas instead of
+    here. }
   PDysWaveformContent = ^TDysWaveformContent;
   TDysWaveformContent = object(TView)
     SampleID: Integer; { -1 = nothing marked yet }
@@ -160,10 +169,16 @@ type
     ClipGain, ClipDetune: Single;
     ClipWarpMode: Integer;
     Peaks: TWaveformPeaks;
+    SelActive: Boolean;
+    SelStartFrame, SelEndFrame: Int64; { absolute source-domain frames }
     constructor Init(Bounds: TRect);
     procedure SetClip(ASampleID: Integer; AOffset, ALength: Int64;
       AGain, ADetune: Single; AWarpMode: Integer);
+    function ColToSourceFrame(ACol: Integer): Int64;
+    function FrameToCol(AFrame: Int64): Integer;
+    procedure DrawRuler(var B: TDrawBuffer; AAttr: Word);
     procedure Draw; virtual;
+    procedure HandleEvent(var Event: TEvent); virtual;
   end;
 
   { The bottom dock: hosts TDysEffectsContent and TDysWaveformContent,
@@ -334,11 +349,21 @@ end;
 
 { TDysWaveformContent }
 
+const
+  { Row layout - see the type's own comment. }
+  WaveTopRow = 2;
+  { Reverse-video byte for the drag-selection overlay: light-grey bg,
+    black fg, no blink - fvdoc.md's own "Palette cascade" note on why a
+    hand-picked background nibble needs bit 7 checked explicitly ($70, not
+    $F0). Skips GetColor entirely, same "hand-rolled view, raw attribute
+    bytes" convention as DysTimeline's grid (see fvdoc.md). }
+  WaveSelectionAttr = $70;
+
 constructor TDysWaveformContent.Init(Bounds: TRect);
 begin
   inherited Init(Bounds);
   GrowMode := 0;
-  EventMask := EventMask or evKeyDown;
+  EventMask := EventMask or evKeyDown or evMouseDown;
   Options := Options or (ofSelectable + ofFirstClick);
   SampleID := -1;
   ClipOffset := 0;
@@ -346,6 +371,37 @@ begin
   ClipGain := 1.0;
   ClipDetune := 0;
   ClipWarpMode := SampleTypes.WarpModeAudio;
+  SelActive := False;
+  SelStartFrame := 0;
+  SelEndFrame := 0;
+end;
+
+{ Col is a column within the wave rows (0-based, same X the row-drawing
+  loop in Draw uses); Result is the absolute source-domain frame position
+  (ClipOffset's own domain) that column represents - the inverse of
+  FrameToCol below. }
+function TDysWaveformContent.ColToSourceFrame(ACol: Integer): Int64;
+begin
+  if (ClipLength <= 0) or (Size.X <= 0) then
+    Exit(ClipOffset);
+  if ACol < 0 then
+    ACol := 0
+  else if ACol > Size.X - 1 then
+    ACol := Size.X - 1;
+  Result := ClipOffset + (Int64(ACol) * ClipLength) div Size.X;
+end;
+
+{ Inverse of ColToSourceFrame, for turning SelStartFrame/SelEndFrame back
+  into columns to paint the selection overlay in Draw. }
+function TDysWaveformContent.FrameToCol(AFrame: Int64): Integer;
+begin
+  if ClipLength <= 0 then
+    Exit(0);
+  Result := ((AFrame - ClipOffset) * Size.X) div ClipLength;
+  if Result < 0 then
+    Result := 0
+  else if Result > Size.X then
+    Result := Size.X;
 end;
 
 { Called from DysSetWaveformClip (this unit's own callback target for
@@ -368,6 +424,11 @@ begin
   ClipGain := AGain;
   ClipDetune := ADetune;
   ClipWarpMode := AWarpMode;
+  { A previous selection's column mapping is only valid against the OLD
+    ClipOffset/ClipLength/Size.X - clear it rather than let a stale
+    SelStartFrame/SelEndFrame appear to point somewhere in a different
+    clip's own data. }
+  SelActive := False;
 
   Peaks.Mins := nil;
   Peaks.Maxs := nil;
@@ -440,16 +501,57 @@ begin
     Exit('.');
 end;
 
+{ Row 1's ruler: a tick ('|') plus an mm:ss label (relative to the clip's
+  OWN start, not the underlying sample file's) every StepCols columns, or
+  wider if the label itself wouldn't otherwise fit before the next tick -
+  fvdoc.md's own "MoveStr at a tick column consumes more than one cell"
+  note on why the loop must advance by the label's length, not just 1, once
+  it writes one. AudioEngine.ProjectSampleRate is a plain constant (44100)
+  - see that unit - so this needs no engine state, only ClipLength/Size.X,
+  same domain ColToSourceFrame/FrameToCol already work in. }
+procedure TDysWaveformContent.DrawRuler(var B: TDrawBuffer; AAttr: Word);
+const
+  StepCols = 10;
+var
+  Col: Integer;
+  SecPerCol, Seconds: Double;
+  Mins, Secs: Integer;
+  MinStr, SecStr, Lbl: string;
+begin
+  MoveChar(B, ' ', AAttr, Size.X);
+  if (ClipLength <= 0) or (Size.X <= 0) then
+    Exit;
+  SecPerCol := (ClipLength / AudioEngine.ProjectSampleRate) / Size.X;
+  Col := 0;
+  while Col < Size.X do
+  begin
+    MoveChar(B[Col], '|', AAttr, 1);
+    Seconds := Col * SecPerCol;
+    Mins := Trunc(Seconds) div 60;
+    Secs := Trunc(Seconds) mod 60;
+    Str(Mins, MinStr);
+    Str(Secs, SecStr);
+    if Length(SecStr) < 2 then
+      SecStr := '0' + SecStr;
+    Lbl := MinStr + ':' + SecStr;
+    if Col + 1 + Length(Lbl) <= Size.X then
+      MoveStr(B[Col + 1], Lbl, AAttr);
+    Inc(Col, Max(StepCols, 2 + Length(Lbl)));
+  end;
+end;
+
 procedure TDysWaveformContent.Draw;
 var
   B: TDrawBuffer;
   Row, Col, WaveRows, BinCount, BinLo, BinHi, i: Integer;
   MidRow, MinV, MaxV, Top, Bot: Double;
   Hdr, IdStr, GainStr, DetuneStr: string;
-  C: Word;
+  C, SelC: Word;
+  SelColStart, SelColEnd: Integer;
 begin
   C := GetColor(1);
-  WaveRows := Size.Y - 1;
+  SelC := WaveSelectionAttr;
+  WaveRows := Size.Y - WaveTopRow;
   if WaveRows < 1 then
     WaveRows := 1;
 
@@ -466,6 +568,19 @@ begin
   end;
   MoveStr(B, Hdr, C);
   WriteLine(0, 0, Size.X, 1, B);
+
+  DrawRuler(B, C);
+  WriteLine(0, 1, Size.X, 1, B);
+
+  SelColStart := -1;
+  SelColEnd := -1;
+  if SelActive and (ClipLength > 0) then
+  begin
+    SelColStart := FrameToCol(SelStartFrame);
+    SelColEnd := FrameToCol(SelEndFrame);
+    if SelColEnd <= SelColStart then
+      SelColEnd := SelColStart + 1;
+  end;
 
   BinCount := Length(Peaks.Maxs);
   MidRow := WaveRows / 2;
@@ -499,10 +614,69 @@ begin
         Bot := MidRow - MinV * MidRow;
         if Bot < Top + 0.02 then
           Bot := Top + 0.02; { silence still shows a hairline, not nothing }
-        MoveChar(B[Col], WaveRowGlyph(Top - Row, Bot - Row), C, 1);
+        if (Col >= SelColStart) and (Col < SelColEnd) then
+          MoveChar(B[Col], WaveRowGlyph(Top - Row, Bot - Row), SelC, 1)
+        else
+          MoveChar(B[Col], WaveRowGlyph(Top - Row, Bot - Row), C, 1);
       end;
-    WriteLine(0, 1 + Row, Size.X, 1, B);
+    WriteLine(0, WaveTopRow + Row, Size.X, 1, B);
   end;
+end;
+
+{ Left-drag over the wave rows marks a chop selection (Free Vision's own
+  TView.MouseEvent drag-poll loop, same "repeat ... until not MouseEvent"
+  shape editors.pas's own TEditor.HandleEvent uses for text selection -
+  see fvdoc.md's grep gotcha note on why that method doesn't show up in a
+  plain `grep -n` of views.pas). Delete then hands the selection off to
+  DysWidgets.ChopWaveformSelectionProc - see that var's own comment for why
+  the actual clip surgery happens in DysTimeline.pas, not here. A plain
+  click with no movement (F1 = F2 at MouseUp) clears any existing
+  selection rather than leaving a stale one-column sliver selected. }
+procedure TDysWaveformContent.HandleEvent(var Event: TEvent);
+var
+  Local: TPoint;
+  F1, F2, Tmp: Int64;
+begin
+  if (Event.What = evMouseDown) and (SampleID >= 0) then
+  begin
+    MakeLocal(Event.Where, Local);
+    if Local.Y >= WaveTopRow then
+    begin
+      F1 := ColToSourceFrame(Local.X);
+      SelStartFrame := F1;
+      SelEndFrame := F1;
+      repeat
+        MakeLocal(Event.Where, Local);
+        F2 := ColToSourceFrame(Local.X);
+        if F2 <> SelEndFrame then
+        begin
+          SelEndFrame := F2;
+          DrawView;
+        end;
+      until not MouseEvent(Event, evMouseMove + evMouseAuto);
+      if SelEndFrame < SelStartFrame then
+      begin
+        Tmp := SelStartFrame;
+        SelStartFrame := SelEndFrame;
+        SelEndFrame := Tmp;
+      end;
+      SelActive := SelEndFrame > SelStartFrame;
+      DrawView;
+    end;
+    ClearEvent(Event);
+    Exit;
+  end;
+  if (Event.What = evKeyDown) and (Event.KeyCode = kbDel) then
+  begin
+    if SelActive and (SampleID >= 0) and Assigned(ChopWaveformSelectionProc) then
+    begin
+      ChopWaveformSelectionProc(SelStartFrame, SelEndFrame);
+      SelActive := False;
+    end;
+    ClearEvent(Event);
+    Exit;
+  end;
+  inherited HandleEvent(Event);
 end;
 
 { Wired to DysWidgets.SetWaveformClipProc from this unit's own
