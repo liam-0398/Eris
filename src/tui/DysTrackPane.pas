@@ -51,39 +51,51 @@ function SelectedTrackIndex: Integer;
 
 implementation
 
+{ TView.WriteChar/WriteStr treat their Color parameter as a PALETTE INDEX,
+  not a raw attribute byte - they call MapColor(Color), which climbs the
+  Owner chain re-mapping the index through each level's GetPalette exactly
+  like GetColor does (see fvdoc.md's "Palette cascade" note). Passing a
+  hand-picked byte like $04/$06 straight to WriteChar doesn't paint that
+  colour - it gets reinterpreted as palette index 4/6, walks up through
+  CListViewer/CGrayDialog/the app palette, and typically lands on
+  Drivers.ErrorAttr ($CF - blink, red background, white text): exactly the
+  "track numbers covered in a red border with flashing white text" bug.
+  DysTimeline.Draw never hits this because it never calls WriteChar/WriteStr
+  at all - it fills a TDrawBuffer with MoveChar/MoveStr (whose Attr
+  parameter IS the literal screen attribute byte, no palette lookup) and
+  blits it with WriteLine, which just copies the buffer to screen with no
+  colour remapping either. Same fix here: only touch the one cell that
+  needs a non-default colour, via MoveChar+WriteLine, and leave every other
+  row exactly as inherited Draw (TListBox's own normal rendering, including
+  its own focus/selection highlight) already painted it. }
 procedure TDysTrackListBox.Draw;
 var
   Item: Integer;
   Y: Integer;
   Attr: Byte;
+  B: TDrawBuffer;
 begin
-  { Call inherited to do normal list rendering }
   inherited Draw;
 
-  { Then overpaint track numbers with correct colors for mute/solo }
   for Item := TopItem to TopItem + Size.Y - 1 do
   begin
     if Item >= Range then
       Break;
-    Y := Item - TopItem;
-    if (Y < 0) or (Y >= Size.Y) then
-      Continue;
-
     if Item = 0 then
-      Continue; { skip blank row }
-
-    { Determine color based on state }
+      Continue; { blank alignment row, never coloured }
     if Item = Focused then
-      Attr := $70  { light grey bg, black fg - selection }
-    else if TrackMute[Item] then
+      Continue; { leave TListBox's own selection highlight alone }
+
+    if TrackMute[Item] then
       Attr := $04  { black bg, dark red fg }
     else if TrackSolo[Item] then
       Attr := $06  { black bg, brown/yellow fg }
     else
-      Attr := $0F; { black bg, bright white fg }
+      Continue; { normal colour is already correct from inherited Draw }
 
-    { Write the track number at column 1 with the appropriate color }
-    WriteChar(1, Y, PString(List^.At(Item))^[1], Attr, 1);
+    Y := Item - TopItem;
+    MoveChar(B, PString(List^.At(Item))^[1], Attr, 1);
+    WriteLine(1, Y, 1, 1, B);
   end;
 end;
 

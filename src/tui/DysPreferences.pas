@@ -191,8 +191,13 @@ begin
     in RunFileDialog (DysFileDialog.pas), reported as "closing a dialog
     glitches everything out". Forcing the whole desktop to repaint once the
     dialog is gone for good is the standard Turbo Vision/Free Vision fallback
-    for exactly this - see tui.md's Free Vision notes. }
-  Desktop^.DrawView;
+    for exactly this - see tui.md's Free Vision notes. ReDraw, not DrawView:
+    DrawView only repaints if Desktop's own Exposed flag happens to be set
+    and only forces a non-forced buffer flush - TGroup.ReDraw skips that
+    gate and forces the flush unconditionally, which is the more reliable
+    primitive when the whole point is "definitely clear this, regardless of
+    whatever Free Vision's own Exposed bookkeeping currently thinks". }
+  Desktop^.ReDraw;
 end;
 
 end.

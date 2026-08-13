@@ -451,23 +451,33 @@ begin
     TrackPane^.Listing^.DrawView;
   if FilePane <> nil then
     FilePane^.Listing^.DrawView;
+  { The actual fix for "the Open Project dialog's border is still visible
+    behind the timeline after a successful load": this path (cmFileNew's
+    success branch and DoFileOpen's success branch, both of which run
+    RunFileDialog/a dialog beforehand) never repainted the desktop as a
+    whole - only individual panes' own content views, above. RunFileDialog
+    already does its own Desktop redraw right after closing (see
+    DysFileDialog.pas), but that runs BEFORE WaitForEngineIdle/LoadProject,
+    not after - nothing between there and here ever re-asserted a full
+    repaint once this method's own content-only redraws ran. }
+  FullScreenRefresh;
 end;
 
+{ TView.DrawView only repaints if Exposed (TView.DrawView: "if Exposed then
+  ... Draw"), and only forces a non-forced DrawScreenBuf(false) - fine for a
+  view redrawing itself in the ordinary course of things, but not a reliable
+  "definitely clear whatever a just-closed dialog left behind" primitive:
+  Free Vision's own MessageBox/MessageBoxRect (msgbox.pas) Dispose their
+  dialog and return with NO redraw call of their own at all, relying
+  entirely on the caller. TGroup.ReDraw is the stronger tool for exactly
+  this: it calls DrawSubViews unconditionally (no Exposed gate) and forces
+  the buffer flush (DrawScreenBuf(true)), so it can't silently no-op the way
+  DrawView can if Desktop's own Exposed bookkeeping is ever stale right
+  after a modal Insert/Delete cycle. }
 procedure TDysnomiaApp.FullScreenRefresh;
 begin
-  { Force complete screen refresh: clear screen and redraw all panes to
-    eliminate any leftover dialog/popup artifacts. Calling ReDraw alone
-    doesn't update the display; we need to explicitly redraw each pane. }
-  if ToolBarPane <> nil then
-    ToolBarPane^.DrawView;
-  if FilePane <> nil then
-    FilePane^.DrawView;
-  if Timeline <> nil then
-    Timeline^.DrawView;
-  if TrackPane <> nil then
-    TrackPane^.DrawView;
-  if BottomPane <> nil then
-    BottomPane^.DrawView;
+  if DeskTop <> nil then
+    DeskTop^.ReDraw;
 end;
 
 procedure TDysnomiaApp.DoFileOpen;
@@ -509,11 +519,9 @@ begin
     Exit;
   end;
   if not ProjectFile.SaveProject(CurrentProjectPath) then
-  begin
     MessageBox('Could not save "' + CurrentProjectPath + '".', nil,
       mfError or mfOKButton);
-    FullScreenRefresh;
-  end;
+  FullScreenRefresh;
 end;
 
 procedure TDysnomiaApp.DoFileSaveAs;
@@ -535,12 +543,14 @@ begin
     Exit;
 
   if not ProjectFile.SaveProject(Path) then
-  begin
-    MessageBox('Could not save "' + Path + '".', nil, mfError or mfOKButton);
-    FullScreenRefresh;
-    Exit;
-  end;
-  CurrentProjectPath := Path;
+    MessageBox('Could not save "' + Path + '".', nil, mfError or mfOKButton)
+  else
+    CurrentProjectPath := Path;
+  { The dialog above (RunFileDialog) already redraws the desktop itself once
+    it closes, but that runs before SaveProject and before this Path gets
+    committed - same "success path never re-asserted a full repaint after
+    that" gap RefreshAfterProjectChange's own comment describes. }
+  FullScreenRefresh;
 end;
 
 procedure TDysnomiaApp.ShowAbout;
