@@ -531,7 +531,32 @@ end;
   closest thing to one. Without this the transport buttons worked (Play did
   call AudioEnginePlay) but nothing in the UI ever showed it: no playhead
   moving, so a press looked like it "did nothing" even when audio was
-  genuinely running. }
+  genuinely running.
+
+  TProgram.GetEvent (app.pas) loops straight back into Idle with no wait at
+  all whenever nothing is pending - confirmed by reading it directly, not
+  guessed - so this method runs in a tight, un-throttled spin the entire
+  time Dysnomia is running, keyboard-idle or not, burning close to a full
+  CPU core on whatever core the scheduler puts it on. Eris (LCL) has no
+  equivalent: GTK's own event loop blocks/sleeps when idle, so it puts
+  ~zero standing CPU load on the machine between user actions. That
+  difference matters here because AudioEngine's realtime callback runs on
+  its own thread, sharing the same CPU with this spin - a callback that
+  briefly needs more time than usual (e.g. a Quadraverb Reverb's first
+  activation, which does ~28 array allocations across its comb/diffuser/
+  tail-allpass lines on the audio thread itself, far more than any other
+  effect kind's first-activation cost) is far more likely to miss its
+  block deadline under Dysnomia's constant self-inflicted contention than
+  under Eris's idle-friendly one, even though the DSP code triggering it
+  is identical in both.
+
+  Sleep(10) throttles this to ~100Hz - still far faster than a human
+  perceives for cursor blink or playhead redraw, but it gives the CPU (and
+  so the audio thread) real gaps instead of none. Fixing the busy-spin
+  itself, rather than the specific effect that happens to expose it, since
+  any future effect with a similarly heavy first-activation cost would hit
+  the same risk otherwise. Not a Free Vision or aengine change - scoped to
+  this one already-existing override. }
 procedure TDysnomiaApp.Idle;
 begin
   inherited Idle;
@@ -545,6 +570,7 @@ begin
     PollRecordState). }
   if ActiveToolBar <> nil then
     ActiveToolBar^.PollRecordState;
+  Sleep(10);
 end;
 
 procedure TDysnomiaApp.HandleEvent(var Event: TEvent);
