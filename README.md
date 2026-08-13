@@ -132,11 +132,11 @@ working, self-contained install of both — without depending on whatever
 From the project root:
 
 ```sh
-# incremental build - only recompiles what changed
+# incremental build 
 <path-to-fpcupdeluxe>/lazarus/lazbuild eris.lpi
 
-# full clean rebuild - use this after pulling changes, switching branches,
-# or whenever something seems stale
+# full clean rebuild
+
 <path-to-fpcupdeluxe>/lazarus/lazbuild -B eris.lpi
 ```
 This produces an `eris` executable in the project root; run it directly
