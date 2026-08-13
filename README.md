@@ -102,8 +102,7 @@ and buffer size obviously dependant on if you are trying to run this on an M68k
 or not lol)
 - **Cross-Platform**: A big motivator for making this is to run on anything and
 everything, including running over SSH. Support for PowerPC Macs is coming soon
-and it will target G4s, optimized with Altivec for the absolute best performance. Theoretically it will compile on any platform FPC and FPC's 
-Free Vision will compile on.
+and it will target G4s, optimized with Altivec for the absolute best performance. Theoretically it will compile on any platform Free Vision will compile on.
 
 ## Getting the toolchain (fpcupdeluxe)
 
