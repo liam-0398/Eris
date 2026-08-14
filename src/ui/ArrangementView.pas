@@ -2557,6 +2557,7 @@ procedure TArrangementView.MouseUp(Button: TMouseButton; Shift: TShiftState;
 var
   OrigTrack: Integer;
   DiscardMarkers: TWarpMarkerArray;
+  DiscardZones: TDragZoneArray;
   SplitRel, SplitSource: Int64;
   t, g, i, GrabbedTrack, GrabbedIdx: Integer;
   Snapshotted: array[0..Project.MaxTracks - 1] of Boolean;
@@ -2660,10 +2661,15 @@ begin
           { Offset is SOURCE-domain: advance it by the source-side cut, not
             the timeline one - they differ on any stretched/warped clip (see
             SplitWarpMarkers' ASplitSourceOut comment) }
-          SplitRel := SplitWarpMarkers(FDragOrigClip.WarpMarkers,
-            FDragCurrentClip.Position - FDragOrigClip.Position, DiscardMarkers,
-            FDragCurrentClip.WarpMarkers, FDragOrigClip.WarpMode,
-            AudioEngine.ProjectSampleRate, @SplitSource);
+          if FDragOrigClip.WarpMode = SampleTypes.WarpModeDrag then
+            SplitRel := SplitDragZones(FDragOrigClip.DragZones,
+              FDragCurrentClip.Position - FDragOrigClip.Position, DiscardZones,
+              FDragCurrentClip.DragZones, @SplitSource)
+          else
+            SplitRel := SplitWarpMarkers(FDragOrigClip.WarpMarkers,
+              FDragCurrentClip.Position - FDragOrigClip.Position, DiscardMarkers,
+              FDragCurrentClip.WarpMarkers, FDragOrigClip.WarpMode,
+              AudioEngine.ProjectSampleRate, @SplitSource);
           FDragCurrentClip.Offset := FDragOrigClip.Offset + SplitSource;
           FDragCurrentClip.Position := FDragOrigClip.Position + SplitRel;
           FDragCurrentClip.Length := FDragOrigClip.Length - SplitRel;
@@ -2856,6 +2862,7 @@ function ExtractClipInRange(const AClip: TClip; ARangeStart, ARangeEnd: Int64;
 var
   ClipEnd, NewStart, NewEnd, SplitRel, SplitSource: Int64;
   DiscardMarkers, KeptMarkers: TWarpMarkerArray;
+  DiscardZones, KeptZones: TDragZoneArray;
 begin
   ClipEnd := AClip.Position + AClip.Length;
   if (ClipEnd <= ARangeStart) or (AClip.Position >= ARangeEnd) then
@@ -2869,19 +2876,37 @@ begin
   begin
     { Offset is SOURCE-domain - advance by the source-side cut, not the
       timeline one (see SplitWarpMarkers' ASplitSourceOut comment) }
-    SplitRel := SplitWarpMarkers(AClip.WarpMarkers, NewStart - AClip.Position,
-      DiscardMarkers, KeptMarkers, AClip.WarpMode,
-      AudioEngine.ProjectSampleRate, @SplitSource);
-    AResult.WarpMarkers := KeptMarkers;
+    if AClip.WarpMode = SampleTypes.WarpModeDrag then
+    begin
+      SplitRel := SplitDragZones(AClip.DragZones, NewStart - AClip.Position,
+        DiscardZones, KeptZones, @SplitSource);
+      AResult.DragZones := KeptZones;
+    end
+    else
+    begin
+      SplitRel := SplitWarpMarkers(AClip.WarpMarkers, NewStart - AClip.Position,
+        DiscardMarkers, KeptMarkers, AClip.WarpMode,
+        AudioEngine.ProjectSampleRate, @SplitSource);
+      AResult.WarpMarkers := KeptMarkers;
+    end;
     AResult.Offset := AClip.Offset + SplitSource;
     AResult.Position := AClip.Position + SplitRel;
   end;
 
   if NewEnd < ClipEnd then
   begin
-    SplitRel := SplitWarpMarkers(AResult.WarpMarkers, NewEnd - AResult.Position,
-      KeptMarkers, DiscardMarkers, AClip.WarpMode);
-    AResult.WarpMarkers := KeptMarkers;
+    if AClip.WarpMode = SampleTypes.WarpModeDrag then
+    begin
+      SplitRel := SplitDragZones(AResult.DragZones, NewEnd - AResult.Position,
+        KeptZones, DiscardZones);
+      AResult.DragZones := KeptZones;
+    end
+    else
+    begin
+      SplitRel := SplitWarpMarkers(AResult.WarpMarkers, NewEnd - AResult.Position,
+        KeptMarkers, DiscardMarkers, AClip.WarpMode);
+      AResult.WarpMarkers := KeptMarkers;
+    end;
     AResult.Length := SplitRel;
   end
   else
@@ -3220,16 +3245,21 @@ begin
     LeftPart := Selected;
     RightPart := Selected;
 
-    { carry the matching half of the warp markers across the cut instead of
-      discarding them - otherwise splitting a warped clip would silently
-      revert both halves to unwarped 1:1 playback. The returned split frame
-      may differ slightly from the requested one (see SplitWarpMarkers) -
-      use it for the clip geometry too so the halves' lengths stay
-      consistent with their markers. }
-    SplitRel := SplitWarpMarkers(Selected.WarpMarkers,
-      SplitFrame - Selected.Position, LeftPart.WarpMarkers,
-      RightPart.WarpMarkers, Selected.WarpMode,
-      AudioEngine.ProjectSampleRate, @SplitSource);
+    { carry the matching half of the warp markers/drag zones across the cut
+      instead of discarding them - otherwise splitting a warped clip would
+      silently revert both halves to unwarped 1:1 playback. The returned
+      split frame may differ slightly from the requested one (see
+      SplitWarpMarkers) - use it for the clip geometry too so the halves'
+      lengths stay consistent with their markers/zones. }
+    if Selected.WarpMode = SampleTypes.WarpModeDrag then
+      SplitRel := SplitDragZones(Selected.DragZones,
+        SplitFrame - Selected.Position, LeftPart.DragZones,
+        RightPart.DragZones, @SplitSource)
+    else
+      SplitRel := SplitWarpMarkers(Selected.WarpMarkers,
+        SplitFrame - Selected.Position, LeftPart.WarpMarkers,
+        RightPart.WarpMarkers, Selected.WarpMode,
+        AudioEngine.ProjectSampleRate, @SplitSource);
 
     LeftPart.Length := SplitRel;
 

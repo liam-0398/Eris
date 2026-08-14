@@ -138,6 +138,28 @@ function SplitWarpMarkers(const AMarkers: TWarpMarkerArray; ASplitFrame: Int64;
   AWarpMode: Integer = WarpModeBeats; ASampleRate: Integer = 44100;
   ASplitSourceOut: PInt64 = nil): Int64;
 
+{ Drag mode's own SplitWarpMarkers - same job (rebase a clip's warp state
+  across a split/trim so it isn't silently discarded), same ASplitSourceOut
+  contract, called from the exact same ArrangementView.pas sites right
+  alongside SplitWarpMarkers. Not built on SplitWarpMarkers/TWarpMarkerArray
+  though: a zone is always slope-1 (SourceEnd-SourceStart = REnd-RStart, no
+  resampling - see TDragZone), so there is no segment/grain search to reuse
+  from that machinery, only its REBASE IDIOM (subtract the split's source
+  value from source-domain fields, subtract ASplitFrame from timeline-domain
+  ones) - the same arithmetic SplitWarpMarkers itself does to build
+  ARightMarkers, and the same one every ArrangementView call site already
+  applies by hand to a split clip's Offset/Position.
+
+  Unlike Beats, a Drag split never needs to snap forward - a zone has no
+  loop fill to preserve - so the returned split frame always equals
+  ASplitFrame exactly. ASplitSourceOut falls back to ASplitFrame itself (the
+  same "unwarped 1:1" convention SplitWarpMarkers uses for an empty/short
+  marker array) when the cut lands in a gap between zones, since silence has
+  no source position of its own to report. }
+function SplitDragZones(const AZones: TDragZoneArray; ASplitFrame: Int64;
+  out ALeftZones, ARightZones: TDragZoneArray;
+  ASplitSourceOut: PInt64 = nil): Int64;
+
 { Independent per-clip pitch trim (the "Detune" slider) layered on top of
   WarpedSourcePosition rather than inside it, so Beats/RePitch warping
   itself is completely untouched by this - see AudioEngine.DetunedClipSample
@@ -1614,6 +1636,84 @@ begin
     ALeftMarkers := nil;
   if Length(ARightMarkers) < 2 then
     ARightMarkers := nil;
+end;
+
+function SplitDragZones(const AZones: TDragZoneArray; ASplitFrame: Int64;
+  out ALeftZones, ARightZones: TDragZoneArray;
+  ASplitSourceOut: PInt64): Int64;
+var
+  i, LCount, RCount: Integer;
+  RStart, REnd, SplitSource, ShiftDelta: Int64;
+  L, R: TDragZoneArray;
+begin
+  Result := ASplitFrame;
+
+  SplitSource := DragZoneSourcePosition(AZones, ASplitFrame);
+  if SplitSource = DragZoneSilence then
+    SplitSource := ASplitFrame; { gap - same "unwarped 1:1" fallback as SplitWarpMarkers uses for an empty marker array }
+  if ASplitSourceOut <> nil then
+    ASplitSourceOut^ := SplitSource;
+
+  { the uniform correction every RIGHT-side zone's Shift needs, for exactly
+    the reason SplitWarpMarkers' ARightMarkers rebase (TimelineFrame -
+    ASplitFrame, SourceFrame - SplitSource) needs two different subtractions
+    rather than one: Offset (source-domain) and Position (timeline-domain)
+    advance by different amounts whenever the split doesn't land in a gap,
+    and Shift = renderedTimeline - source has to absorb that difference to
+    keep each zone's RENDERED position unchanged by the rebase itself. }
+  ShiftDelta := SplitSource - ASplitFrame;
+
+  SetLength(L, Length(AZones));
+  SetLength(R, Length(AZones));
+  LCount := 0;
+  RCount := 0;
+
+  for i := 0 to High(AZones) do
+  begin
+    RStart := AZones[i].SourceStart + AZones[i].Shift;
+    REnd := AZones[i].SourceEnd + AZones[i].Shift;
+
+    if REnd <= ASplitFrame then
+    begin
+      { entirely left of the cut - this clip's Offset/Position aren't
+        changing, so the zone needs no rebasing at all }
+      L[LCount] := AZones[i];
+      Inc(LCount);
+      Continue;
+    end;
+
+    if RStart >= ASplitFrame then
+    begin
+      { entirely right - same rebase SplitWarpMarkers applies to a whole
+        marker, just carried through Shift instead of a single TimelineFrame
+        field }
+      R[RCount].SourceStart := AZones[i].SourceStart - SplitSource;
+      R[RCount].SourceEnd := AZones[i].SourceEnd - SplitSource;
+      R[RCount].Shift := AZones[i].Shift + ShiftDelta;
+      Inc(RCount);
+      Continue;
+    end;
+
+    { straddles the cut - truncate a copy for each side. The left half keeps
+      its own Shift (nothing about its rendered position changes); the right
+      half becomes a fresh, unshifted zone starting exactly at the split's
+      own source position, which is what SplitSource already is when the cut
+      lands inside this very zone (1:1 playback, so "source position at the
+      cut" and "this zone's own rebase point" are the same number) }
+    L[LCount] := AZones[i];
+    L[LCount].SourceEnd := ASplitFrame - AZones[i].Shift;
+    Inc(LCount);
+
+    R[RCount].SourceStart := 0;
+    R[RCount].SourceEnd := AZones[i].SourceEnd - SplitSource;
+    R[RCount].Shift := 0;
+    Inc(RCount);
+  end;
+
+  SetLength(L, LCount);
+  SetLength(R, RCount);
+  ALeftZones := L;
+  ARightZones := R;
 end;
 
 end.
