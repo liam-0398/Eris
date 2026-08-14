@@ -41,9 +41,6 @@ type
         AudioEngine.DragClipSample's own fade) instead of butting a hard edge
         against the winner. }
       DragZoneOverlapGapMs = 15;
-      { fallback zone width when double-clicking somewhere with no detected
-        transients to snap to (an unanalyzed or very short sample) }
-      DragZoneDefaultFrames = 22050;
     var
       FTrackIndex: Integer;
       FClipIndex: Integer;
@@ -51,6 +48,11 @@ type
       FDragZoneIndex: Integer;
       FZoneDragStartX: Integer;
       FZoneDragStartShift: Int64;
+      { -1 = no zone placement in progress. First double-click in D mode sets
+        this (the green start marker); the following double-click completes
+        the zone against it (the red end marker) and clears it back to -1.
+        See DblClick / HandleDragZoneDblClick. }
+      FPendingZoneStartFrame: Int64;
       FLastMouseX: Integer;
       FPlayheadFrame: Int64;
       FIsPlaying: Boolean;
@@ -79,7 +81,8 @@ type
       any earlier zones were dropped, since removal shifts indices down. }
     function ResolveDragZoneOverlaps(var AZones: TDragZoneArray; AActiveIndex: Integer): Integer;
     procedure DeleteDragZone(const AClip: TClip; AIndex: Integer);
-    procedure CreateDragZoneAtFrame(const AClip: TClip; AFrame: Int64);
+    procedure CreateDragZoneFromRange(const AClip: TClip; AStart, AEnd: Int64);
+    procedure HandleDragZoneDblClick(const AClip: TClip; AFrame: Int64);
     procedure DragZoneMouseDown(const AClip: TClip; X: Integer; Button: TMouseButton);
     procedure DragZoneMouseMove(const AClip: TClip; X: Integer; Shift: TShiftState);
   protected
@@ -131,6 +134,7 @@ begin
   FClipIndex := -1;
   FDragMarkerIndex := -1;
   FDragZoneIndex := -1;
+  FPendingZoneStartFrame := -1;
 end;
 
 function TWarpEditor.GetClip(out AClip: TClip): Boolean;
@@ -425,6 +429,22 @@ begin
     Canvas.Polygon([Point(xEnd - 5, WarpRulerHeight), Point(xEnd + 5, WarpRulerHeight),
       Point(xEnd, WarpRulerHeight + 8)]);
   end;
+
+  { the awaiting-its-end-marker start click, dashed so it reads as
+    "not committed yet" rather than a real zone edge }
+  if FPendingZoneStartFrame >= 0 then
+  begin
+    xStart := FrameToX(FPendingZoneStartFrame);
+    Canvas.Pen.Color := clGreen;
+    Canvas.Pen.Width := 2;
+    Canvas.Pen.Style := psDash;
+    Canvas.Line(xStart, WarpRulerHeight, xStart, Height);
+    Canvas.Pen.Style := psSolid;
+    Canvas.Pen.Width := 1;
+    Canvas.Brush.Color := clGreen;
+    Canvas.Polygon([Point(xStart - 5, WarpRulerHeight), Point(xStart + 5, WarpRulerHeight),
+      Point(xStart, WarpRulerHeight + 8)]);
+  end;
 end;
 
 function TWarpEditor.HitTestDragZone(const AClip: TClip; X: Integer): Integer;
@@ -546,121 +566,90 @@ begin
   SetClipData(Clip);
 end;
 
-{ Double-click gesture: grab the note/sample under the cursor by snapping to
-  the transients bounding it - see warp.md, "start marker... end marker
-  (marked at the end of the specific sample or note)". Falls back to a fixed
-  default width around the click when the sample has no detected transients
-  on one side (or either), rather than snapping all the way to 0 or the clip
-  end, which would grab far more audio than the click meant to. }
-procedure TWarpEditor.CreateDragZoneAtFrame(const AClip: TClip; AFrame: Int64);
-var
-  Transients: TFrameArray;
-  i, HitIndex, OutCount: Integer;
-  t, ZoneStart, ZoneEnd, HitRStart, HitREnd, HitShift, HitSrcEnd: Int64;
-  HasLeftRemainder, HasRightRemainder: Boolean;
-  Clip: TClip;
-  NewZones: TDragZoneArray;
+{ Two-click zone placement - see warp.md "you set a start marker that is
+  green and an end marker that is red". The first double-click in D mode
+  only records FPendingZoneStartFrame (drawn as a lone green marker with no
+  partner yet); this one completes it into an actual zone once the second
+  click supplies the other end. A second click before the pending frame
+  (i.e. clicking left of where you started) just swaps the order - the zone
+  spans whichever two points were clicked, direction doesn't matter. }
+procedure TWarpEditor.HandleDragZoneDblClick(const AClip: TClip; AFrame: Int64);
 begin
   if (AFrame < 0) or (AFrame >= AClip.Length) then
     Exit;
 
-  ZoneStart := AFrame - (DragZoneDefaultFrames div 2);
-  ZoneEnd := AFrame + (DragZoneDefaultFrames div 2);
-
-  if AClip.SampleID <= High(Project.SampleTransients) then
+  if FPendingZoneStartFrame < 0 then
   begin
-    Transients := Project.SampleTransients[AClip.SampleID];
-    for i := 0 to High(Transients) do
-    begin
-      t := Transients[i] - AClip.Offset;
-      if t <= AFrame then
-        ZoneStart := t
-      else
-      begin
-        ZoneEnd := t;
-        Break;
-      end;
-    end;
-  end;
-
-  if ZoneStart < 0 then
-    ZoneStart := 0;
-  if ZoneEnd > AClip.Length then
-    ZoneEnd := AClip.Length;
-
-  { Double-clicking inside an existing zone carves the new zone out of it
-    instead of refusing the click - a fresh clip switched into D mode starts
-    as a single zone covering the whole waveform (MainForm.SetSelectedClip-
-    WarpMode's one-time seed), so without this a double-click could never
-    do anything: every click point is "already inside a zone". See warp.md
-    "multiple areas can be warped in a same clip". The hole is clamped to
-    the hit zone's own rendered span so it never eats into a neighbouring
-    zone; whatever survives on either side keeps the hit zone's own Shift -
-    trimming a zone's extent doesn't change its Source<->timeline offset,
-    same as trimming a clip leaves its warp alone. }
-  HasLeftRemainder := False;
-  HasRightRemainder := False;
-  HitIndex := HitTestDragZone(AClip, FrameToX(AFrame));
-  HitShift := 0;
-  HitSrcEnd := 0;
-  if HitIndex >= 0 then
-  begin
-    HitShift := AClip.DragZones[HitIndex].Shift;
-    HitRStart := AClip.DragZones[HitIndex].SourceStart + HitShift;
-    HitREnd := AClip.DragZones[HitIndex].SourceEnd + HitShift;
-    HitSrcEnd := AClip.DragZones[HitIndex].SourceEnd;
-    if ZoneStart < HitRStart then
-      ZoneStart := HitRStart;
-    if ZoneEnd > HitREnd then
-      ZoneEnd := HitREnd;
-    HasLeftRemainder := ZoneStart > HitRStart;
-    HasRightRemainder := ZoneEnd < HitREnd;
-  end;
-
-  if ZoneEnd <= ZoneStart then
+    FPendingZoneStartFrame := AFrame;
+    Invalidate;
     Exit;
-
-  OutCount := Length(AClip.DragZones) + 1;
-  if HitIndex >= 0 then
-  begin
-    if not HasLeftRemainder then
-      Dec(OutCount);
-    if not HasRightRemainder then
-      Dec(OutCount);
   end;
-  if OutCount > MaxClipDragZones then
+
+  if FPendingZoneStartFrame < AFrame then
+    CreateDragZoneFromRange(AClip, FPendingZoneStartFrame, AFrame)
+  else
+    CreateDragZoneFromRange(AClip, AFrame, FPendingZoneStartFrame);
+  FPendingZoneStartFrame := -1;
+end;
+
+{ Carves [AStart, AEnd) out of every existing zone it overlaps (trimming
+  whichever edge is touched, dropping a zone entirely if the new range
+  covers it completely - same "who's covered gets shaved or dropped" idea
+  as ResolveDragZoneOverlaps, just against a fixed range instead of a zone
+  being actively dragged) and inserts it as a brand new zone with Shift=0.
+  Needed because a fresh D-mode clip starts as one zone covering the whole
+  waveform (MainForm.SetSelectedClipWarpMode's one-time seed), so without
+  this carve the very first placed zone would have nothing to cut into. }
+procedure TWarpEditor.CreateDragZoneFromRange(const AClip: TClip; AStart, AEnd: Int64);
+var
+  i: Integer;
+  RStart, REnd: Int64;
+  Clip: TClip;
+  NewZones: TDragZoneArray;
+begin
+  if AStart < 0 then
+    AStart := 0;
+  if AEnd > AClip.Length then
+    AEnd := AClip.Length;
+  if AEnd <= AStart then
     Exit;
 
   SetLength(NewZones, 0);
   for i := 0 to High(AClip.DragZones) do
   begin
-    if i = HitIndex then
+    RStart := AClip.DragZones[i].SourceStart + AClip.DragZones[i].Shift;
+    REnd := AClip.DragZones[i].SourceEnd + AClip.DragZones[i].Shift;
+
+    if (REnd <= AStart) or (RStart >= AEnd) then
     begin
-      if HasLeftRemainder then
-      begin
-        SetLength(NewZones, Length(NewZones) + 1);
-        NewZones[High(NewZones)].SourceStart := AClip.DragZones[i].SourceStart;
-        NewZones[High(NewZones)].SourceEnd := ZoneStart - HitShift;
-        NewZones[High(NewZones)].Shift := HitShift;
-      end;
-      if HasRightRemainder then
-      begin
-        SetLength(NewZones, Length(NewZones) + 1);
-        NewZones[High(NewZones)].SourceStart := ZoneEnd - HitShift;
-        NewZones[High(NewZones)].SourceEnd := HitSrcEnd;
-        NewZones[High(NewZones)].Shift := HitShift;
-      end;
-    end
-    else
-    begin
+      { no overlap - keep as-is }
       SetLength(NewZones, Length(NewZones) + 1);
       NewZones[High(NewZones)] := AClip.DragZones[i];
+      Continue;
     end;
+
+    if RStart < AStart then
+    begin
+      { survives on the left, trimmed back to where the new zone starts }
+      SetLength(NewZones, Length(NewZones) + 1);
+      NewZones[High(NewZones)] := AClip.DragZones[i];
+      NewZones[High(NewZones)].SourceEnd := AStart - AClip.DragZones[i].Shift;
+    end;
+    if REnd > AEnd then
+    begin
+      { survives on the right, trimmed back to where the new zone ends }
+      SetLength(NewZones, Length(NewZones) + 1);
+      NewZones[High(NewZones)] := AClip.DragZones[i];
+      NewZones[High(NewZones)].SourceStart := AEnd - AClip.DragZones[i].Shift;
+    end;
+    { fully covered by the new zone - dropped }
   end;
 
+  if Length(NewZones) >= MaxClipDragZones then
+    Exit;
   SetLength(NewZones, Length(NewZones) + 1);
-  NewZones[High(NewZones)].SourceStart := ZoneStart;
-  NewZones[High(NewZones)].SourceEnd := ZoneEnd;
+  NewZones[High(NewZones)].SourceStart := AStart;
+  NewZones[High(NewZones)].SourceEnd := AEnd;
   NewZones[High(NewZones)].Shift := 0;
 
   Clip := AClip;
@@ -771,6 +760,7 @@ begin
   FClipIndex := AClipIndex;
   FDragMarkerIndex := -1;
   FDragZoneIndex := -1;
+  FPendingZoneStartFrame := -1;
   GetClip(Clip); { triggers GetClip's own default-marker repair }
   Invalidate;
 end;
@@ -945,7 +935,7 @@ begin
 
   if Clip.WarpMode = WarpModeDrag then
   begin
-    CreateDragZoneAtFrame(Clip, XToFrame(FLastMouseX));
+    HandleDragZoneDblClick(Clip, XToFrame(FLastMouseX));
     Exit;
   end;
 
