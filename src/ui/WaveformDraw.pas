@@ -82,20 +82,22 @@ begin
       TimelineFrame1 := TimelineFrame0 + 1;
 
     { Drag has no markers/segments to walk - a column is either inside a
-      zone (draw that slice of the source peaks, shifted) or in a gap
-      (silence - leave the column blank rather than drawing whatever
-      unrelated audio happens to sit at that raw timeline position, which
-      WarpedSourcePosition's identity fallback would otherwise show). }
+      zone (draw that slice of the source peaks, shifted), a moved zone's
+      vacated hole (real silence - leave the column blank), or plain
+      raw/unedited audio (no zone covers it, but nothing moved out of it
+      either - draw it at its identity position, same as unwarped). }
     if AWarpMode = WarpModeDrag then
     begin
       ZonePos0 := DragZoneSourcePosition(AZones, TimelineFrame0);
       ZonePos1 := DragZoneSourcePosition(AZones, TimelineFrame1 - 1);
-      if (ZonePos0 = DragZoneSilence) and (ZonePos1 = DragZoneSilence) then
+      if (ZonePos0 = DragZoneSilence) and
+         DragFrameInVacatedHole(AZones, TimelineFrame0) and
+         DragFrameInVacatedHole(AZones, TimelineFrame1 - 1) then
         Continue;
       if ZonePos0 = DragZoneSilence then
-        ZonePos0 := ZonePos1;
+        ZonePos0 := TimelineFrame0;
       if ZonePos1 = DragZoneSilence then
-        ZonePos1 := ZonePos0;
+        ZonePos1 := TimelineFrame1 - 1;
       SrcFrame0 := AStartFrame + ZonePos0;
       SrcFrame1 := AStartFrame + ZonePos1 + 1;
     end

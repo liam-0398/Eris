@@ -78,6 +78,14 @@ const
 function DragZoneSourcePosition(const AZones: TDragZoneArray;
   ATimelineFrame: Int64): Int64;
 
+{ True if ATimelineFrame sits inside some zone's HOME span while that zone
+  has actually moved elsewhere (Shift <> 0) - the gap it left behind. Used to
+  tell that real silence apart from "no zone covers this frame, so it's just
+  raw/unedited audio" wherever DragZoneSourcePosition/DragZoneSourceSample
+  return their DragZoneSilence sentinel, since that sentinel alone no longer
+  means silence - see DragZoneSourceSample. }
+function DragFrameInVacatedHole(const AZones: TDragZoneArray; AFrame: Int64): Boolean;
+
 { The audio-producing warp entry point: Ableton-style Beats (a sum over the
   transient slices sounding at ATimelineFrame - see the implementation) or a
   straight read through the RePitch position map. This is the shared/offline
@@ -588,12 +596,31 @@ begin
   Result := DragZoneSilence;
 end;
 
+{ mirrors AudioEngine.DragFrameInVacatedHole - true if AFrame sits in some
+  zone's HOME span while that zone has actually moved elsewhere (Shift <> 0),
+  i.e. the gap it left behind. A zone that never moved has no hole - its home
+  is its rendered span, already covered by the caller's own zone scan. }
+function DragFrameInVacatedHole(const AZones: TDragZoneArray; AFrame: Int64): Boolean;
+var
+  z: Integer;
+begin
+  Result := False;
+  for z := 0 to High(AZones) do
+  begin
+    if AZones[z].Shift = 0 then
+      Continue;
+    if (AFrame >= AZones[z].SourceStart) and (AFrame < AZones[z].SourceEnd) then
+      Exit(True);
+  end;
+end;
+
 { mirrors AudioEngine.DragClipSample - see that function for the rationale
-  (1:1 playback inside a zone, silence in the gaps, tail-only crossfade into
-  the silence). Kept as a straight port rather than a shared helper because
-  the two sides read from different data shapes (PSingle/FrameCount here vs
-  a PPlaybackClip there) for the same reason every other mode's offline copy
-  does. }
+  (1:1 playback inside a zone; frames outside every zone are raw/unedited
+  audio, exactly as if unwarped, EXCEPT a moved zone's vacated home span,
+  which is silence; tail-only crossfade into a genuine hole). Kept as a
+  straight port rather than a shared helper because the two sides read from
+  different data shapes (PSingle/FrameCount here vs a PPlaybackClip there)
+  for the same reason every other mode's offline copy does. }
 function DragZoneSourceSample(const AZones: TDragZoneArray;
   ATimelineFrame: Int64; AOffset: Int64; AData: PSingle;
   AFrameCount: Integer; AChannels: Integer; ASampleRate: Integer;
@@ -625,7 +652,7 @@ begin
     if REnd - RStart < ZoneFadeCap then
       ZoneFadeCap := REnd - RStart;
     DistToEnd := REnd - ATimelineFrame;
-    if DistToEnd < ZoneFadeCap then
+    if (DistToEnd < ZoneFadeCap) and DragFrameInVacatedHole(AZones, REnd) then
     begin
       Gain := DistToEnd / ZoneFadeCap;
       Result := Result * Gain;
@@ -633,7 +660,15 @@ begin
     Exit;
   end;
 
-  Result := 0;
+  if DragFrameInVacatedHole(AZones, ATimelineFrame) then
+    Exit(0);
+
+  { raw/unedited background - plays the clip's own audio exactly as if it
+    had no warp at all }
+  AbsPos := AOffset + ATimelineFrame;
+  if (AbsPos < 0) or (AbsPos >= AFrameCount) then
+    Exit(0);
+  Result := LinearInterpolate(AData, AFrameCount, AChannels, AChannel, AbsPos);
 end;
 
 { Beats warp renderer - the offline/shared copy of AudioEngine.BeatsClipSample.

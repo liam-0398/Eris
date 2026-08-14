@@ -2081,23 +2081,46 @@ begin
     Result := CurVal;
 end;
 
+{ True if AFrame falls inside some zone's HOME span (DragZoneSourceStart[z]
+  .. DragZoneSourceEnd[z], i.e. where it would render if Shift were 0) while
+  that zone actually sits elsewhere now (Shift <> 0) - the gap a moved zone
+  leaves behind, per warp.md "filling silence between where the end marker
+  has moved and where it originally was". A zone that never moved has no
+  hole: its home IS its rendered span, already covered by the rendered-zone
+  scan in DragClipSample. }
+function DragFrameInVacatedHole(Clip: PPlaybackClip; AFrame: Int64): Boolean;
+var
+  z: Integer;
+begin
+  Result := False;
+  for z := 0 to Clip^.DragZoneCount - 1 do
+  begin
+    if Clip^.DragZoneShift[z] = 0 then
+      Continue;
+    if (AFrame >= Clip^.DragZoneSourceStart[z]) and (AFrame < Clip^.DragZoneSourceEnd[z]) then
+      Exit(True);
+  end;
+end;
+
 { Drag ("D") mode: zones slide along the timeline with no resampling at all -
   the opposite move from every other mode here, which all warp by changing
   read RATE. A zone's content plays back exactly 1:1 from
   DragZoneSourceStart[z] + Shift, so a dragged transient comes out bit-exact,
-  no vari-speed/granular artifacting possible. Timeline frames outside every
-  zone's rendered range are silence - the gap left behind when a zone moves
-  off its identity position - with the tail of the preceding zone faded into
-  that silence so the cut is not a click. Zones are kept sorted and
-  non-overlapping by the editor (WarpEditor's overlap trim), so a linear scan
-  is fine; clip zone counts are small (a handful of dragged hits, not one per
-  transient like Beats/Tones). }
+  no vari-speed/granular artifacting possible. Timeline frames not covered by
+  any zone are NOT automatically silent - see warp.md "D (drag) mode": only
+  the marked/dragged zones move, the rest of the clip is untouched raw audio,
+  exactly as if it had no warp at all. The only silence is the hole a moved
+  zone leaves behind at its old position (DragFrameInVacatedHole), with the
+  tail of the outgoing zone faded into that silence so the cut isn't a click.
+  Zones are kept sorted and non-overlapping by the editor (WarpEditor's
+  overlap trim), so a linear scan is fine; clip zone counts are small (a
+  handful of dragged hits, not one per transient like Beats/Tones). }
 function DragClipSample(Clip: PPlaybackClip; AClipRelativeFrame: Int64;
   AChannel: Integer): Single;
 const
-  { fades the tail of a zone into the silence that follows it - see comment
-    above. Short enough not to visibly eat into a short-note tail, long
-    enough to declick. }
+  { fades the tail of a zone into the silence that follows it, when what
+    follows really is a hole - see comment above. Short enough not to
+    visibly eat into a short-note tail, long enough to declick. }
   DragFadeMs = 8;
 var
   z: Integer;
@@ -2123,7 +2146,8 @@ begin
       AChannel, AbsPos);
 
     DistToEnd := REnd - AClipRelativeFrame;
-    if DistToEnd < Min(FadeFrames, REnd - RStart) then
+    if (DistToEnd < Min(FadeFrames, REnd - RStart)) and
+       DragFrameInVacatedHole(Clip, REnd) then
     begin
       Gain := DistToEnd / Min(FadeFrames, REnd - RStart);
       Result := Result * Gain;
@@ -2131,7 +2155,16 @@ begin
     Exit;
   end;
 
-  Result := 0;
+  if DragFrameInVacatedHole(Clip, AClipRelativeFrame) then
+    Exit(0);
+
+  { raw/unedited background - plays the clip's own audio exactly as if it
+    had no warp at all }
+  AbsPos := Clip^.Offset + AClipRelativeFrame;
+  if (AbsPos < 0) or (AbsPos >= Clip^.FrameCount) then
+    Exit(0);
+  Result := LinearInterpolate(Clip^.Data, Clip^.FrameCount, Clip^.Channels,
+    AChannel, AbsPos);
 end;
 
 { The audio-producing entry point for a warped clip: Beats goes through the

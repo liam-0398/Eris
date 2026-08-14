@@ -2063,24 +2063,13 @@ begin
     Project.Tracks[Track].Clips[ClipIdx].Length := SourceSpan;
   end;
 
-  { Drag has no markers at all - an empty DragZones plays total silence (see
-    AudioEngine.DragClipSample), so a clip that switches into D for the
-    first time needs a starting zone or it would just go silent, unlike
-    switching into any other mode. Only seeded when there is nothing there
-    yet: WarpEditor's own right-click zone delete is a real, deliberate way
-    to reach an empty DragZones, and re-seeding here every time this fires
-    would make that delete impossible to keep - see WarpEditor.GetClip's
-    comment on the same tradeoff. }
-  if (AMode = SampleTypes.WarpModeDrag) and (PrevMode <> SampleTypes.WarpModeDrag) and
-    (Length(Project.Tracks[Track].Clips[ClipIdx].DragZones) = 0) then
-  begin
-    SetLength(Project.Tracks[Track].Clips[ClipIdx].DragZones, 1);
-    Project.Tracks[Track].Clips[ClipIdx].DragZones[0].SourceStart := 0;
-    Project.Tracks[Track].Clips[ClipIdx].DragZones[0].SourceEnd :=
-      Project.Tracks[Track].Clips[ClipIdx].Length;
-    Project.Tracks[Track].Clips[ClipIdx].DragZones[0].Shift := 0;
-  end;
-
+  { Drag has no markers at all, and unlike every other mode an empty
+    DragZones is NOT "silent by default" - AudioEngine.DragClipSample treats
+    any frame not covered by a zone as plain raw/unedited audio, exactly as
+    if unwarped (see warp.md "D (drag) mode": only the marked/dragged zones
+    move, everything else stays put). So switching into D needs no seeding
+    at all - a fresh clip just plays normally until the user double-clicks a
+    start/end pair to carve out its first zone. }
   Project.Tracks[Track].Clips[ClipIdx].WarpMode := AMode;
 
   { Project.Tracks holds the UI/offline copy of the clip. The realtime
