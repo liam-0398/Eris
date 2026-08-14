@@ -555,17 +555,14 @@ end;
 procedure TWarpEditor.CreateDragZoneAtFrame(const AClip: TClip; AFrame: Int64);
 var
   Transients: TFrameArray;
-  i: Integer;
-  t, ZoneStart, ZoneEnd: Int64;
+  i, HitIndex, OutCount: Integer;
+  t, ZoneStart, ZoneEnd, HitRStart, HitREnd, HitShift, HitSrcEnd: Int64;
+  HasLeftRemainder, HasRightRemainder: Boolean;
   Clip: TClip;
   NewZones: TDragZoneArray;
 begin
-  if Length(AClip.DragZones) >= MaxClipDragZones then
-    Exit;
   if (AFrame < 0) or (AFrame >= AClip.Length) then
     Exit;
-  if HitTestDragZone(AClip, FrameToX(AFrame)) >= 0 then
-    Exit; { already inside a zone }
 
   ZoneStart := AFrame - (DragZoneDefaultFrames div 2);
   ZoneEnd := AFrame + (DragZoneDefaultFrames div 2);
@@ -590,12 +587,78 @@ begin
     ZoneStart := 0;
   if ZoneEnd > AClip.Length then
     ZoneEnd := AClip.Length;
+
+  { Double-clicking inside an existing zone carves the new zone out of it
+    instead of refusing the click - a fresh clip switched into D mode starts
+    as a single zone covering the whole waveform (MainForm.SetSelectedClip-
+    WarpMode's one-time seed), so without this a double-click could never
+    do anything: every click point is "already inside a zone". See warp.md
+    "multiple areas can be warped in a same clip". The hole is clamped to
+    the hit zone's own rendered span so it never eats into a neighbouring
+    zone; whatever survives on either side keeps the hit zone's own Shift -
+    trimming a zone's extent doesn't change its Source<->timeline offset,
+    same as trimming a clip leaves its warp alone. }
+  HasLeftRemainder := False;
+  HasRightRemainder := False;
+  HitIndex := HitTestDragZone(AClip, FrameToX(AFrame));
+  HitShift := 0;
+  HitSrcEnd := 0;
+  if HitIndex >= 0 then
+  begin
+    HitShift := AClip.DragZones[HitIndex].Shift;
+    HitRStart := AClip.DragZones[HitIndex].SourceStart + HitShift;
+    HitREnd := AClip.DragZones[HitIndex].SourceEnd + HitShift;
+    HitSrcEnd := AClip.DragZones[HitIndex].SourceEnd;
+    if ZoneStart < HitRStart then
+      ZoneStart := HitRStart;
+    if ZoneEnd > HitREnd then
+      ZoneEnd := HitREnd;
+    HasLeftRemainder := ZoneStart > HitRStart;
+    HasRightRemainder := ZoneEnd < HitREnd;
+  end;
+
   if ZoneEnd <= ZoneStart then
     Exit;
 
-  SetLength(NewZones, Length(AClip.DragZones) + 1);
+  OutCount := Length(AClip.DragZones) + 1;
+  if HitIndex >= 0 then
+  begin
+    if not HasLeftRemainder then
+      Dec(OutCount);
+    if not HasRightRemainder then
+      Dec(OutCount);
+  end;
+  if OutCount > MaxClipDragZones then
+    Exit;
+
+  SetLength(NewZones, 0);
   for i := 0 to High(AClip.DragZones) do
-    NewZones[i] := AClip.DragZones[i];
+  begin
+    if i = HitIndex then
+    begin
+      if HasLeftRemainder then
+      begin
+        SetLength(NewZones, Length(NewZones) + 1);
+        NewZones[High(NewZones)].SourceStart := AClip.DragZones[i].SourceStart;
+        NewZones[High(NewZones)].SourceEnd := ZoneStart - HitShift;
+        NewZones[High(NewZones)].Shift := HitShift;
+      end;
+      if HasRightRemainder then
+      begin
+        SetLength(NewZones, Length(NewZones) + 1);
+        NewZones[High(NewZones)].SourceStart := ZoneEnd - HitShift;
+        NewZones[High(NewZones)].SourceEnd := HitSrcEnd;
+        NewZones[High(NewZones)].Shift := HitShift;
+      end;
+    end
+    else
+    begin
+      SetLength(NewZones, Length(NewZones) + 1);
+      NewZones[High(NewZones)] := AClip.DragZones[i];
+    end;
+  end;
+
+  SetLength(NewZones, Length(NewZones) + 1);
   NewZones[High(NewZones)].SourceStart := ZoneStart;
   NewZones[High(NewZones)].SourceEnd := ZoneEnd;
   NewZones[High(NewZones)].Shift := 0;

@@ -791,14 +791,19 @@ begin
   { Zoom +/- get their own leftmost column now, separate from the mode
     buttons - five mode buttons plus the zoom pair no longer fit stacked
     in one Px(180)-tall column (188px needed vs 180 available), which was
-    hiding the D button. Two columns instead of shrinking buttons further. }
-  WarpZoomPanel := AddZoomButtons(FWarpWidget, @WarpZoomInClick, @WarpZoomOutClick);
-
+    hiding the D button. Two columns instead of shrinking buttons further.
+    WarpButtonsPanel is created FIRST here so it docks OUTWARD of
+    WarpZoomPanel - for alLeft, later-created lands closer to the edge
+    (opposite of the alBottom stacking used by the mode buttons below),
+    so creating the mode column first pushes the zoom column to the
+    true left edge, matching BT/AU/LF/RP/D staying as the inner column. }
   WarpButtonsPanel := TPanel.Create(Self);
   WarpButtonsPanel.Parent := FWarpWidget;
   WarpButtonsPanel.Align := alLeft;
   WarpButtonsPanel.Width := Px(34); { a bit wider than the plain zoom column, so the toggle isn't tiny }
   WarpButtonsPanel.BevelOuter := bvNone;
+
+  WarpZoomPanel := AddZoomButtons(FWarpWidget, @WarpZoomInClick, @WarpZoomOutClick);
 
   { Warp mode - two dedicated buttons instead of one toggle that renamed
     itself, since a single relabeling button read as ambiguous (couldn't
