@@ -221,7 +221,7 @@ const
   panes must render off the exact same value or the "track number lines
   up with the top row of its block" alignment breaks. }
 var
-  TrackHeight: Integer = 3;
+  TrackHeight: Integer = 1;
   { First track drawn at the top of the grid (row 1, just under the
     ruler) - vertical scroll in TRACK units, not screen rows. Changed only
     from DysTimeline (Up/Down following the cursor, PageUp/PageDown) per

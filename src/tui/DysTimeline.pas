@@ -614,21 +614,36 @@ end;
   snapped length instead of only the nearest power-of-two bar count -
   identical two-WarpMarker/WarpModeRePitch mechanism either way (see the
   header comment on WarpClipToNearestPow2Bar for why this changes nothing
-  about the underlying sample data). }
+  about the underlying sample data).
+
+  The end marker's SourceFrame has to be ClipSourceLength(Clip), NOT the
+  clip's own .Length - those only agree for a clip that's never been
+  warped before. Project.pas's own comment on ClipSourceLength spells out
+  why: .Length is a TIMELINE span that a PRIOR warp/tempo-rescale may
+  already have stretched away from how much source audio the clip actually
+  plays, while ClipSourceLength always reports the real, unstretched
+  source-content span (the last existing marker's SourceFrame, or .Length
+  itself if there's no warp yet - so this one call covers both the "first
+  time warping this clip" and "re-warping an already-warped clip" cases
+  identically). Using .Length here instead - the bug this fixes - meant
+  Shift+W/'w' on an already-warped clip silently re-warped it against the
+  WRONG source span (whatever the previous warp had already stretched it
+  to), compounding the error every time either ran again instead of always
+  resampling from the same real source content. }
 procedure WarpClipToLength(ATrack, AClipIndex: Integer; ATargetLength: Int64);
 var
-  OrigLength: Int64;
+  SourceLength: Int64;
 begin
   if (AClipIndex < 0) or (ATargetLength <= 0) then
     Exit;
-  OrigLength := Project.Tracks[ATrack].Clips[AClipIndex].Length;
-  if OrigLength <= 0 then
+  SourceLength := ClipSourceLength(Project.Tracks[ATrack].Clips[AClipIndex]);
+  if SourceLength <= 0 then
     Exit;
   Project.Tracks[ATrack].Clips[AClipIndex].WarpMode := SampleTypes.WarpModeRePitch;
   SetLength(Project.Tracks[ATrack].Clips[AClipIndex].WarpMarkers, 2);
   Project.Tracks[ATrack].Clips[AClipIndex].WarpMarkers[0].SourceFrame := 0;
   Project.Tracks[ATrack].Clips[AClipIndex].WarpMarkers[0].TimelineFrame := 0;
-  Project.Tracks[ATrack].Clips[AClipIndex].WarpMarkers[1].SourceFrame := OrigLength;
+  Project.Tracks[ATrack].Clips[AClipIndex].WarpMarkers[1].SourceFrame := SourceLength;
   Project.Tracks[ATrack].Clips[AClipIndex].WarpMarkers[1].TimelineFrame := ATargetLength;
   Project.Tracks[ATrack].Clips[AClipIndex].Length := ATargetLength;
 

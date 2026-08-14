@@ -1,20 +1,22 @@
 unit DysFilePane;
 
 { Left dock: a real directory listing (".." to go up, Enter to select,
-  Ctrl+T to drop straight in as an instrument track - see Bindings in
+  'i' to drop straight in as an instrument track - see Bindings in
   tui.md). Stage 7: Enter on a real file decodes it, adds it to the sample
   pool, and hands it to the timeline as a pending overlay on whatever
   track DysTrackPane.SelectedTrackIndex reports - see DysTimeline for what
-  happens next (Left/Right/Up/Down/Enter/Esc). Ctrl+T decodes the file the
+  happens next (Left/Right/Up/Down/Enter/Esc). 'i' decodes the file the
   same way and assigns it straight to Project.TrackInstrument on that same
   track, skipping the overlay - which is also what flips that track's A/I/S
   letter on the timeline to 'I' (see DysTimeline.TrackTypeChar, which reads
-  Project state fresh on every Draw). NOT Ctrl+I: on a raw terminal Ctrl+I
-  literally IS the Tab byte (0x09) - Free Vision's Unix keyboard driver
-  hard-maps that byte to the Tab scancode unconditionally (packages/
-  rtl-console/src/unix/keyboard.pp, EvalScan's "$09: EvalScan := $0F"),
-  so kbCtrlI can never arrive here; Tab is already claimed app-wide for
-  pane-cycling (DysWidgets.TDysPane.HandleEvent) and eats the byte first.
+  Project state fresh on every Draw). A plain letter, not Ctrl+I: on a raw
+  terminal Ctrl+I literally IS the Tab byte (0x09) - Free Vision's Unix
+  keyboard driver hard-maps that byte to the Tab scancode unconditionally
+  (packages/rtl-console/src/unix/keyboard.pp, EvalScan's "$09: EvalScan :=
+  $0F"), so kbCtrlI can never arrive here at all; Tab is already claimed
+  app-wide for pane-cycling (DysWidgets.TDysPane.HandleEvent) and eats the
+  byte first - the same reason this used to be Ctrl+T instead, before
+  settling on a bare letter as the simpler binding to reach for.
   Driving the track live from the bottom effects pane's keyboard once
   assigned - see DysEffectsRack.TDysEffectsContent. }
 
@@ -206,8 +208,14 @@ begin
       SelectItem(Focused);
     ClearEvent(Event);
   end
-  else if Event.KeyCode = kbCtrlT then
+  else if UpCase(Char(Event.CharCode)) = 'I' then
   begin
+    { Plain 'i', not Ctrl+I - see this unit's own header comment on why
+      Ctrl+I can never arrive here at all (it's indistinguishable from Tab
+      at the raw-byte level on a real terminal). Was Ctrl+T; moved to a
+      bare letter since nothing else on this listing binds one (Enter and
+      the inherited up/down/pgup/pgdn/Home/End navigation are the only
+      other keys TListBox's own HandleEvent, called above, reacts to). }
     if Focused < Range then
       SelectAsInstrument(Focused);
     ClearEvent(Event);
