@@ -169,14 +169,16 @@ end;
 
 procedure TInstrumentEditor.DrawGrid(ASampleRate: Integer);
 var
-  Eighth, Beat, BarLen, Frame: Int64;
+  Step, Beat, BarLen, Frame: Int64;
   x: Integer;
 begin
-  Eighth := BeatFrames(ASampleRate) div 2;
-  if Eighth <= 0 then
+  Beat := BeatFrames(ASampleRate);
+  if Beat <= 0 then
     Exit;
-  Beat := Eighth * 2;
   BarLen := Beat * 4;
+  Step := BarLen div WaveformGridDivision;
+  if Step <= 0 then
+    Exit;
 
   Frame := 0;
   x := FrameToX(Frame, ASampleRate);
@@ -198,7 +200,7 @@ begin
       Canvas.Pen.Width := 1;
     end;
     Canvas.Line(x, RulerHeight, x, Height);
-    Frame := Frame + Eighth;
+    Frame := Frame + Step;
     x := FrameToX(Frame, ASampleRate);
   end;
   Canvas.Pen.Width := 1;

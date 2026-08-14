@@ -21,7 +21,35 @@ procedure DrawWaveform(ACanvas: TCanvas; const ARect: TRect;
   const AMarkers: TWarpMarkerArray; AColor: TColor; AWarpMode: Integer = WarpModeBeats;
   const ATransients: TFrameArray = nil; const AZones: TDragZoneArray = nil);
 
+{ Grid resolution shared by the Warp/Instrument/Sampler waveform editors -
+  divisions per bar, cycled by their "1/4" zoom-column button. }
+var
+  WaveformGridDivision: Integer = 4;
+
+function CycleWaveformGridDivision: Integer;
+function WaveformGridDivisionLabel: string;
+
 implementation
+
+uses
+  SysUtils;
+
+function CycleWaveformGridDivision: Integer;
+begin
+  case WaveformGridDivision of
+    4: WaveformGridDivision := 8;
+    8: WaveformGridDivision := 16;
+    16: WaveformGridDivision := 32;
+  else
+    WaveformGridDivision := 4;
+  end;
+  Result := WaveformGridDivision;
+end;
+
+function WaveformGridDivisionLabel: string;
+begin
+  Result := '1/' + IntToStr(WaveformGridDivision);
+end;
 
 procedure DrawWaveform(ACanvas: TCanvas; const ARect: TRect;
   const APeaks: TWaveformPeaks; ATotalFrameCount, AStartFrame, AEndFrame: Int64;

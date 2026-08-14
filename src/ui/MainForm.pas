@@ -10,7 +10,7 @@ uses
   SampleTypes, AudioEngine, Project, ProjectFile, WarpEditor, ThemeScrollBar,
   { Theme last - it shadows Graphics' system colours; see Theme.pas }
   InstrumentEditor, SamplerEditor, Effects, EffectsRack, UIScale, MidiInput,
-  Theme;
+  WaveformDraw, Theme;
 
 type
   TForm1 = class(TForm)
@@ -69,6 +69,7 @@ type
     FDropHintLabel: TLabel;
     FWarpWidget: TPanel;
     FWarpEditor: TWarpEditor;
+    FWarpGridButton: TButton;
     FWarpRepitchButton: TSpeedButton;
     FWarpBeatsButton: TSpeedButton;
     FWarpAudioButton: TSpeedButton;
@@ -83,6 +84,7 @@ type
     FClipDetuneValueLabel: TLabel;
     FInstrumentEditorWidget: TPanel;
     FInstrumentEditor: TInstrumentEditor;
+    FInstrumentGridButton: TButton;
     FSamplerWidget: TPanel;
     FSamplerOctaveLabel: TLabel;
     FSamplerOctaveMinusButton: TButton;
@@ -90,6 +92,7 @@ type
     FSamplerKeys: TSamplerKeysWidget;
     FSamplerEditorWidget: TPanel;
     FSamplerKeyEditor: TSamplerKeyEditor;
+    FSamplerGridButton: TButton;
     FDeviceScrollBar: TThemeScrollBar;
     FEffectsMenu: TPopupMenu;
     FEffectWidgets: array of TEffectWidget;
@@ -179,6 +182,7 @@ type
     procedure UpdateSwingControls;
     procedure WarpZoomInClick(Sender: TObject);
     procedure WarpZoomOutClick(Sender: TObject);
+    procedure WaveformGridButtonClick(Sender: TObject);
     procedure InstrumentZoomInClick(Sender: TObject);
     procedure InstrumentZoomOutClick(Sender: TObject);
     procedure RefreshWarpWidgetSize;
@@ -486,14 +490,15 @@ end;
 
 procedure TForm1.BuildLayout;
 
-  function AddZoomButtons(AParent: TWinControl; AZoomInClick, AZoomOutClick: TNotifyEvent): TPanel;
+  function AddZoomButtons(AParent: TWinControl; AZoomInClick, AZoomOutClick: TNotifyEvent;
+    out AGridButton: TButton): TPanel;
   var
     BtnPlus, BtnMinus: TButton;
   begin
     Result := TPanel.Create(Self);
     Result.Parent := AParent;
     Result.Align := alLeft;
-    Result.Width := Px(22);
+    Result.Width := Px(40);
     Result.BevelOuter := bvNone;
 
     BtnPlus := TButton.Create(Self);
@@ -509,6 +514,15 @@ procedure TForm1.BuildLayout;
     BtnMinus.Align := alBottom;
     BtnMinus.Height := Px(24);
     BtnMinus.OnClick := AZoomOutClick;
+
+    { waveform grid resolution - cycles 1/4 -> 1/8 -> 1/16 -> 1/32 -> 1/4 }
+    AGridButton := TButton.Create(Self);
+    AGridButton.Parent := Result;
+    AGridButton.Caption := WaveformGridDivisionLabel;
+    AGridButton.Align := alClient;
+    AGridButton.ShowHint := True;
+    AGridButton.Hint := 'Waveform grid resolution';
+    AGridButton.OnClick := @WaveformGridButtonClick;
   end;
 
 var
@@ -803,7 +817,7 @@ begin
   WarpButtonsPanel.Width := Px(34); { a bit wider than the plain zoom column, so the toggle isn't tiny }
   WarpButtonsPanel.BevelOuter := bvNone;
 
-  WarpZoomPanel := AddZoomButtons(FWarpWidget, @WarpZoomInClick, @WarpZoomOutClick);
+  WarpZoomPanel := AddZoomButtons(FWarpWidget, @WarpZoomInClick, @WarpZoomOutClick, FWarpGridButton);
 
   { Warp mode - two dedicated buttons instead of one toggle that renamed
     itself, since a single relabeling button read as ambiguous (couldn't
@@ -1001,7 +1015,7 @@ begin
   FInstrumentEditorWidget.Visible := False;
   FInstrumentEditorWidget.Caption := '';
 
-  AddZoomButtons(FInstrumentEditorWidget, @InstrumentZoomInClick, @InstrumentZoomOutClick);
+  AddZoomButtons(FInstrumentEditorWidget, @InstrumentZoomInClick, @InstrumentZoomOutClick, FInstrumentGridButton);
 
   FInstrumentEditor := TInstrumentEditor.Create(Self);
   FInstrumentEditor.Parent := FInstrumentEditorWidget;
@@ -1068,7 +1082,7 @@ begin
     InstrumentEditor.InstrumentZoomPixelsPerSecond, so one zoom click
     affects whichever of the two is currently shown (and the other next
     time it's shown) via RefreshInstrumentWidgetSize/RefreshSamplerWidgetSize. }
-  AddZoomButtons(FSamplerEditorWidget, @InstrumentZoomInClick, @InstrumentZoomOutClick);
+  AddZoomButtons(FSamplerEditorWidget, @InstrumentZoomInClick, @InstrumentZoomOutClick, FSamplerGridButton);
 
   FSamplerKeyEditor := TSamplerKeyEditor.Create(Self);
   FSamplerKeyEditor.Parent := FSamplerEditorWidget;
@@ -2315,6 +2329,20 @@ procedure TForm1.WarpZoomOutClick(Sender: TObject);
 begin
   WarpEditor.WarpZoomOut;
   RefreshWarpWidgetSize;
+end;
+
+procedure TForm1.WaveformGridButtonClick(Sender: TObject);
+var
+  GridLabel: string;
+begin
+  CycleWaveformGridDivision;
+  GridLabel := WaveformGridDivisionLabel;
+  FWarpGridButton.Caption := GridLabel;
+  FInstrumentGridButton.Caption := GridLabel;
+  FSamplerGridButton.Caption := GridLabel;
+  FWarpEditor.Invalidate;
+  FInstrumentEditor.Invalidate;
+  FSamplerKeyEditor.Invalidate;
 end;
 
 procedure TForm1.InstrumentZoomInClick(Sender: TObject);

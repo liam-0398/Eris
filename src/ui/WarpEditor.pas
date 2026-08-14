@@ -70,7 +70,6 @@ type
     function FrameToX(AFrame: Int64): Integer;
     function XToFrame(AX: Integer): Int64;
     function BeatFrames: Int64;
-    function EighthNoteFrames: Int64;
     function BarBeatLabel(AFrame: Int64): string;
     function HitTestMarker(const AClip: TClip; X: Integer): Integer;
     function RightEdgeX(const AClip: TClip): Integer;
@@ -199,11 +198,6 @@ end;
 function TWarpEditor.BeatFrames: Int64;
 begin
   Result := Round((AudioEngine.ProjectSampleRate * 60) / Project.TempoBPM);
-end;
-
-function TWarpEditor.EighthNoteFrames: Int64;
-begin
-  Result := BeatFrames div 2;
 end;
 
 function TWarpEditor.BarBeatLabel(AFrame: Int64): string;
@@ -341,14 +335,16 @@ end;
 
 procedure TWarpEditor.DrawGrid;
 var
-  Eighth, Beat, BarLen, Frame: Int64;
+  Step, Beat, BarLen, Frame: Int64;
   x: Integer;
 begin
-  Eighth := EighthNoteFrames;
-  if Eighth <= 0 then
+  Beat := BeatFrames;
+  if Beat <= 0 then
     Exit;
-  Beat := Eighth * 2;
   BarLen := Beat * 4;
+  Step := BarLen div WaveformGridDivision;
+  if Step <= 0 then
+    Exit;
 
   Frame := 0;
   x := FrameToX(Frame);
@@ -370,7 +366,7 @@ begin
       Canvas.Pen.Width := 1;
     end;
     Canvas.Line(x, WarpRulerHeight, x, Height);
-    Frame := Frame + Eighth;
+    Frame := Frame + Step;
     x := FrameToX(Frame);
   end;
   Canvas.Pen.Width := 1;

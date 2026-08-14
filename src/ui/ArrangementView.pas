@@ -1369,7 +1369,7 @@ begin
   while x < LaneWidth do
   begin
     Canvas.Line(x, 0, x, RulerHeight);
-    Canvas.TextOut(x + 4, 4, IntToStr(BarNum + 1));
+    Canvas.TextOut(x + 4, 4, IntToStr(BarNum));
     Inc(BarNum);
     x := FrameToX(BarNum * BarF);
   end;
