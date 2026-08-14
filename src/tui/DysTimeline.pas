@@ -171,6 +171,21 @@ type
     { How many frames the visible grid (Size.X - LabelWidth columns) spans
       at the current zoom - 0 before the view has ever been sized. }
     function VisibleFrameSpan: Int64;
+    { Scrolls DysWidgets.ViewStartTrack (vertical, TRACK units) the minimum
+      amount to bring ATrack's whole TrackHeight-row block back inside the
+      grid - same "minimum nudge, not a re-centre" shape as EnsureFrameVisible.
+      Called after Up/Down moves CursorTrack and after 'h'/'H' changes
+      TrackHeight (a taller block can push the cursor's track off-screen even
+      though CursorTrack itself didn't move). Redraws the track pane too,
+      since it renders off the same ViewStartTrack/TrackHeight and would
+      otherwise fall out of sync with the grid until something else redrew it. }
+    procedure EnsureTrackVisible(ATrack: Integer);
+    { PageUp/PageDown: scrolls ViewStartTrack by one screenful of tracks
+      (ADelta = -1/+1) without moving CursorTrack UNLESS the cursor's track
+      scrolled out of view, in which case it's clamped back onto the nearest
+      now-visible track - see the field comment on ViewStartTrack in
+      DysWidgets.pas for why scrolling only ever happens from here. }
+    procedure ScrollTracksBy(ADelta: Integer);
     { The frame step Left/Right nudges the cursor (and a pending overlay)
       by - wired to the toolbar's interval cycle button (ActiveToolBar^.
       IntervalIdx: 1/4, 1/8, 1/16, 1 bar) instead of a fixed column, so the
@@ -715,10 +730,138 @@ begin
   MoveChar(B[StartCol], BlockChar, AAttr, EndCol - StartCol + 1);
 end;
 
+{ One row of one committed clip's waveform - called once per SubRow
+  (0..ATrackHeight-1) from Draw's per-track loop, same column range
+  DrawSpan itself would fill, but painted with DysWidgets.WaveRowGlyph
+  instead of a solid BlockChar. Column->source-frame mapping (including all
+  four warp modes) is ported from src/ui's WaveformDraw.DrawWaveform rather
+  than reinvented, so the GUI and the TUI draw the same shape for the same
+  clip - see that unit for the per-branch reasoning (RePitch/Beats/Tones/
+  Audio all fall through WarpedSourcePosition, Drag is its own zone lookup).
+  Falls back to DrawSpan's plain solid fill whenever peaks aren't available
+  (SampleID out of range, or the sample hasn't been through
+  ComputeWaveformPeaks yet) rather than drawing nothing. }
+procedure DrawClipWaveSpan(var B: TDrawBuffer; AFramesPerCol: Int64;
+  AWidth: Integer; const AClip: TClip; ASubRow, ATrackHeight: Integer;
+  AViewStart: Int64);
+var
+  StartCol, EndCol, ClipStartColUnclipped, RectWidth, x, ColOffset: Integer;
+  BinCount, Bin0, Bin1, BinIdx, HintK: Integer;
+  TotalFrameCount: Int64;
+  TimelineFrame0, TimelineFrame1, ZonePos0, ZonePos1: Int64;
+  SrcFrame0, SrcFrame1, MinV, MaxV, MidRow, Top, Bot: Double;
+  Attr: Word;
+begin
+  if (AClip.Length <= 0) or (AFramesPerCol <= 0) then
+    Exit;
+  if AClip.Position + AClip.Length <= AViewStart then
+    Exit;
+
+  Attr := SampleShadeAttr(AClip.SampleID);
+
+  if (AClip.SampleID < 0) or (AClip.SampleID > High(Project.SamplePeaks)) or
+     (AClip.SampleID > High(Project.SamplePool)) then
+  begin
+    DrawSpan(B, AFramesPerCol, AWidth, AClip.Position, AClip.Length, Attr,
+      AViewStart);
+    Exit;
+  end;
+
+  BinCount := Length(Project.SamplePeaks[AClip.SampleID].Maxs);
+  TotalFrameCount := Project.SamplePool[AClip.SampleID].FrameCount;
+  if (BinCount = 0) or (TotalFrameCount <= 0) then
+  begin
+    DrawSpan(B, AFramesPerCol, AWidth, AClip.Position, AClip.Length, Attr,
+      AViewStart);
+    Exit;
+  end;
+
+  StartCol := LabelWidth + ((AClip.Position - AViewStart) div AFramesPerCol);
+  ClipStartColUnclipped := StartCol;
+  EndCol := LabelWidth +
+    ((AClip.Position + AClip.Length - 1 - AViewStart) div AFramesPerCol);
+  if StartCol < LabelWidth then
+    StartCol := LabelWidth;
+  if EndCol > AWidth - 1 then
+    EndCol := AWidth - 1;
+  if EndCol < StartCol then
+    Exit;
+
+  RectWidth := AClip.Length div AFramesPerCol;
+  if RectWidth < 1 then
+    RectWidth := 1;
+
+  MidRow := ATrackHeight / 2;
+  HintK := 0; { fresh per row: each row is its own left-to-right sweep, and
+                WarpedSourcePosition's hint only helps within one }
+
+  for x := StartCol to EndCol do
+  begin
+    ColOffset := x - ClipStartColUnclipped;
+    TimelineFrame0 := (Int64(ColOffset) * AClip.Length) div RectWidth;
+    TimelineFrame1 := (Int64(ColOffset + 1) * AClip.Length) div RectWidth;
+    if TimelineFrame1 <= TimelineFrame0 then
+      TimelineFrame1 := TimelineFrame0 + 1;
+
+    if AClip.WarpMode = WarpModeDrag then
+    begin
+      ZonePos0 := DragZoneSourcePosition(AClip.DragZones, TimelineFrame0);
+      ZonePos1 := DragZoneSourcePosition(AClip.DragZones, TimelineFrame1 - 1);
+      if (ZonePos0 = DragZoneSilence) and
+         DragFrameInVacatedHole(AClip.DragZones, TimelineFrame0) and
+         DragFrameInVacatedHole(AClip.DragZones, TimelineFrame1 - 1) then
+        Continue;
+      if ZonePos0 = DragZoneSilence then
+        ZonePos0 := TimelineFrame0;
+      if ZonePos1 = DragZoneSilence then
+        ZonePos1 := TimelineFrame1 - 1;
+      SrcFrame0 := AClip.Offset + ZonePos0;
+      SrcFrame1 := AClip.Offset + ZonePos1 + 1;
+    end
+    else
+    begin
+      SrcFrame0 := AClip.Offset + WarpedSourcePosition(AClip.WarpMarkers,
+        TimelineFrame0, AudioEngine.ProjectSampleRate, AClip.WarpMode, @HintK);
+      SrcFrame1 := AClip.Offset + WarpedSourcePosition(AClip.WarpMarkers,
+        TimelineFrame1, AudioEngine.ProjectSampleRate, AClip.WarpMode, @HintK);
+    end;
+    if SrcFrame1 <= SrcFrame0 then
+      SrcFrame1 := SrcFrame0 + 1;
+
+    Bin0 := Trunc(SrcFrame0 * BinCount / TotalFrameCount);
+    if Bin0 < 0 then
+      Bin0 := 0;
+    if Bin0 >= BinCount then
+      Continue;
+    Bin1 := Trunc(SrcFrame1 * BinCount / TotalFrameCount);
+    if Bin1 <= Bin0 then
+      Bin1 := Bin0 + 1;
+    if Bin1 > BinCount then
+      Bin1 := BinCount;
+
+    MinV := Project.SamplePeaks[AClip.SampleID].Mins[Bin0];
+    MaxV := Project.SamplePeaks[AClip.SampleID].Maxs[Bin0];
+    for BinIdx := Bin0 + 1 to Bin1 - 1 do
+    begin
+      if Project.SamplePeaks[AClip.SampleID].Mins[BinIdx] < MinV then
+        MinV := Project.SamplePeaks[AClip.SampleID].Mins[BinIdx];
+      if Project.SamplePeaks[AClip.SampleID].Maxs[BinIdx] > MaxV then
+        MaxV := Project.SamplePeaks[AClip.SampleID].Maxs[BinIdx];
+    end;
+
+    Top := MidRow - MaxV * MidRow;
+    Bot := MidRow - MinV * MidRow;
+    if Bot < Top + 0.02 then
+      Bot := Top + 0.02; { silence still shows a hairline, not nothing }
+    MoveChar(B[x], WaveRowGlyph(Top - ASubRow, Bot - ASubRow), Attr, 1);
+  end;
+end;
+
 procedure TDysTimelineContent.Draw;
 var
   B: TDrawBuffer;
-  Col, Track, Row, i, Sec, PlayCol, CursorCol, LoopStartCol, LoopEndCol: Integer;
+  Col, Track, Row, SubRow, i, Sec, PlayCol, CursorCol, LoopStartCol,
+    LoopEndCol: Integer;
   Lbl, SecStr: string;
 begin
   PlayCol := -1;
@@ -780,92 +923,114 @@ begin
     MoveChar(B[PlayCol], PlayheadChar, PlayheadAttr, 1);
   WriteLine(0, 0, Size.X, 1, B);
 
-  { One grid row per track, clipped to however many rows actually fit. }
-  for Track := 0 to Project.TrackCount - 1 do
+  { One TrackHeight-row block per track, starting at ViewStartTrack (vertical
+    scroll - see EnsureTrackVisible/ScrollTracksBy) and clipped to however
+    many rows actually fit. Every layer below (background ticks, clips,
+    separators, overlays, loop/playhead markers, cursor) repeats once per
+    SubRow instead of writing a single row, and TrackTopRow is the ONE
+    formula (shared with DysTrackPane, see DysWidgets.pas) computing where
+    each block starts - nothing here re-derives that independently. }
+  for Track := ViewStartTrack to Project.TrackCount - 1 do
   begin
-    Row := 1 + Track;
+    Row := TrackTopRow(Track);
     if Row >= Size.Y then
       Break;
 
-    MoveChar(B, ' ', NormalAttr, Size.X);
     Lbl := TrackTypeChar(Track);
     while Length(Lbl) < LabelWidth do
       Lbl := Lbl + ' ';
-    if (Track = CursorTrack) and CursorInLabel then
-      MoveStr(B, Lbl, CursorAttr)
-    else
-      MoveStr(B, Lbl, NormalAttr);
 
-    Col := LabelWidth;
-    while Col < Size.X do
+    for SubRow := 0 to TrackHeight - 1 do
     begin
-      if ((Col - LabelWidth) mod PxPerSec) = 0 then
-        MoveChar(B[Col], '|', NormalAttr, 1)
+      if Row + SubRow >= Size.Y then
+        Break;
+
+      MoveChar(B, ' ', NormalAttr, Size.X);
+      { The A/I/S label only sits on the block's top row - the rest of a
+        tall block gets a blank label column, same "number/letter aligns
+        with the top row" convention DysTrackPane's own listing follows. }
+      if SubRow = 0 then
+      begin
+        if (Track = CursorTrack) and CursorInLabel then
+          MoveStr(B, Lbl, CursorAttr)
+        else
+          MoveStr(B, Lbl, NormalAttr);
+      end
       else
-        MoveChar(B[Col], '.', NormalAttr, 1);
-      Inc(Col);
+        MoveStr(B, StringOfChar(' ', LabelWidth), NormalAttr);
+
+      Col := LabelWidth;
+      while Col < Size.X do
+      begin
+        if ((Col - LabelWidth) mod PxPerSec) = 0 then
+          MoveChar(B[Col], '|', NormalAttr, 1)
+        else
+          MoveChar(B[Col], '.', NormalAttr, 1);
+        Inc(Col);
+      end;
+
+      for i := 0 to High(Project.Tracks[Track].Clips) do
+      begin
+        { The clip currently being interactively resized/moved is skipped here
+          and drawn again below with PendingAttr at its TENTATIVE span instead
+          - same "blink until solidified" look BeginOverlay's Pending clip
+          already has, see the field comments on ResizeActive/MoveActive. }
+        if (ResizeActive and (Track = ResizeTrack) and (i = ResizeClipIndex)) or
+           (MoveActive and (Track = MoveTrack) and (i = MoveClipIndex)) then
+          Continue;
+        DrawClipWaveSpan(B, FramesPerCol, Size.X, Project.Tracks[Track].Clips[i],
+          SubRow, TrackHeight, ViewStartFrame);
+      end;
+      DrawAdjoiningSeparators(B, Track, FramesPerCol, Size.X, ViewStartFrame);
+
+      if Pending and (Track = CursorTrack) then
+        DrawSpan(B, FramesPerCol, Size.X, CursorFrame, PendingLength, PendingAttr,
+          ViewStartFrame);
+
+      if ResizeActive and (Track = ResizeTrack) then
+        DrawSpan(B, FramesPerCol, Size.X,
+          Project.Tracks[Track].Clips[ResizeClipIndex].Position, ResizeLength,
+          PendingAttr, ViewStartFrame);
+
+      if MoveActive and (Track = MoveTrack) then
+        DrawSpan(B, FramesPerCol, Size.X, MovePosition, MoveLength, PendingAttr,
+          ViewStartFrame);
+
+      { 'k' - see MarkedTrack's own field comment on why this is bounds-
+        checked here rather than cleared by every edit that could move/
+        invalidate the index: a split/delete/duplicate on this track since
+        the mark was set could have shifted or removed it entirely, and
+        re-checking Length on every Draw is simpler than hunting down every
+        place that would otherwise need to fix the mark up. }
+      if (Track = MarkedTrack) and (MarkedClipIndex >= 0) and
+         (MarkedClipIndex <= High(Project.Tracks[Track].Clips)) then
+        DrawSpan(B, FramesPerCol, Size.X,
+          Project.Tracks[Track].Clips[MarkedClipIndex].Position,
+          Project.Tracks[Track].Clips[MarkedClipIndex].Length,
+          MarkedAttr, ViewStartFrame);
+
+      if LoopStartCol >= 0 then
+        MoveChar(B[LoopStartCol], LoopChar, LoopAttr, 1);
+      if LoopEndCol >= 0 then
+        MoveChar(B[LoopEndCol], LoopChar, LoopAttr, 1);
+
+      if PlayCol >= 0 then
+        MoveChar(B[PlayCol], PlayheadChar, PlayheadAttr, 1);
+
+      { The grid-side half of the track cursor - only drawn once it has moved
+        off the label column (see CursorInLabel), so the label highlight and
+        this marker are never both showing for the same track at once. Drawn
+        on every SubRow so the cursor reads as a full-height column through a
+        tall block, not just a mark on its top row. }
+      if (Track = CursorTrack) and (not CursorInLabel) then
+      begin
+        CursorCol := LabelWidth + ((CursorFrame - ViewStartFrame) div FramesPerCol);
+        if (CursorCol >= LabelWidth) and (CursorCol <= Size.X - 1) then
+          MoveChar(B[CursorCol], BlockChar, CursorAttr, 1);
+      end;
+
+      WriteLine(0, Row + SubRow, Size.X, 1, B);
     end;
-
-    for i := 0 to High(Project.Tracks[Track].Clips) do
-    begin
-      { The clip currently being interactively resized/moved is skipped here
-        and drawn again below with PendingAttr at its TENTATIVE span instead
-        - same "blink until solidified" look BeginOverlay's Pending clip
-        already has, see the field comments on ResizeActive/MoveActive. }
-      if (ResizeActive and (Track = ResizeTrack) and (i = ResizeClipIndex)) or
-         (MoveActive and (Track = MoveTrack) and (i = MoveClipIndex)) then
-        Continue;
-      DrawSpan(B, FramesPerCol, Size.X, Project.Tracks[Track].Clips[i].Position,
-        Project.Tracks[Track].Clips[i].Length,
-        SampleShadeAttr(Project.Tracks[Track].Clips[i].SampleID), ViewStartFrame);
-    end;
-    DrawAdjoiningSeparators(B, Track, FramesPerCol, Size.X, ViewStartFrame);
-
-    if Pending and (Track = CursorTrack) then
-      DrawSpan(B, FramesPerCol, Size.X, CursorFrame, PendingLength, PendingAttr,
-        ViewStartFrame);
-
-    if ResizeActive and (Track = ResizeTrack) then
-      DrawSpan(B, FramesPerCol, Size.X,
-        Project.Tracks[Track].Clips[ResizeClipIndex].Position, ResizeLength,
-        PendingAttr, ViewStartFrame);
-
-    if MoveActive and (Track = MoveTrack) then
-      DrawSpan(B, FramesPerCol, Size.X, MovePosition, MoveLength, PendingAttr,
-        ViewStartFrame);
-
-    { 'k' - see MarkedTrack's own field comment on why this is bounds-
-      checked here rather than cleared by every edit that could move/
-      invalidate the index: a split/delete/duplicate on this track since
-      the mark was set could have shifted or removed it entirely, and
-      re-checking Length on every Draw is simpler than hunting down every
-      place that would otherwise need to fix the mark up. }
-    if (Track = MarkedTrack) and (MarkedClipIndex >= 0) and
-       (MarkedClipIndex <= High(Project.Tracks[Track].Clips)) then
-      DrawSpan(B, FramesPerCol, Size.X,
-        Project.Tracks[Track].Clips[MarkedClipIndex].Position,
-        Project.Tracks[Track].Clips[MarkedClipIndex].Length,
-        MarkedAttr, ViewStartFrame);
-
-    if LoopStartCol >= 0 then
-      MoveChar(B[LoopStartCol], LoopChar, LoopAttr, 1);
-    if LoopEndCol >= 0 then
-      MoveChar(B[LoopEndCol], LoopChar, LoopAttr, 1);
-
-    if PlayCol >= 0 then
-      MoveChar(B[PlayCol], PlayheadChar, PlayheadAttr, 1);
-
-    { The grid-side half of the track cursor - only drawn once it has moved
-      off the label column (see CursorInLabel), so the label highlight and
-      this marker are never both showing for the same track at once. }
-    if (Track = CursorTrack) and (not CursorInLabel) then
-    begin
-      CursorCol := LabelWidth + ((CursorFrame - ViewStartFrame) div FramesPerCol);
-      if (CursorCol >= LabelWidth) and (CursorCol <= Size.X - 1) then
-        MoveChar(B[CursorCol], BlockChar, CursorAttr, 1);
-    end;
-
-    WriteLine(0, Row, Size.X, 1, B);
   end;
 end;
 
@@ -881,6 +1046,7 @@ begin
         begin
           if CursorTrack > 0 then
             Dec(CursorTrack);
+          EnsureTrackVisible(CursorTrack);
           DrawView;
           ClearEvent(Event);
           Exit;
@@ -889,6 +1055,21 @@ begin
         begin
           if CursorTrack < Project.TrackCount - 1 then
             Inc(CursorTrack);
+          EnsureTrackVisible(CursorTrack);
+          DrawView;
+          ClearEvent(Event);
+          Exit;
+        end;
+      kbPgUp:
+        begin
+          ScrollTracksBy(-1);
+          DrawView;
+          ClearEvent(Event);
+          Exit;
+        end;
+      kbPgDn:
+        begin
+          ScrollTracksBy(1);
           DrawView;
           ClearEvent(Event);
           Exit;
@@ -1113,6 +1294,19 @@ begin
       'k', 'K':
         begin
           MarkClipUnderCursor;
+          ClearEvent(Event);
+          Exit;
+        end;
+      'h', 'H':
+        begin
+          { Cycle the track row height 1/2/3 - see DysWidgets.TrackHeight
+            and the header comment on why waveforms need more than one row
+            to be legible. A taller block can push the cursor's own track
+            off-screen even though CursorTrack itself didn't move, so this
+            re-runs the same visibility check Up/Down use. }
+          CycleTrackHeight;
+          EnsureTrackVisible(CursorTrack);
+          DrawView;
           ClearEvent(Event);
           Exit;
         end;
@@ -1552,6 +1746,60 @@ begin
     ViewStartFrame := AFrame - VF + FramesPerCol;
   if ViewStartFrame < 0 then
     ViewStartFrame := 0;
+end;
+
+procedure TDysTimelineContent.EnsureTrackVisible(ATrack: Integer);
+var
+  VisibleRows, TracksVisible: Integer;
+begin
+  VisibleRows := Size.Y - 1; { row 0 is the ruler, not a track row }
+  if VisibleRows <= 0 then
+    Exit;
+  TracksVisible := VisibleRows div TrackHeight;
+  if TracksVisible < 1 then
+    TracksVisible := 1;
+  if ATrack < ViewStartTrack then
+    ViewStartTrack := ATrack
+  else if ATrack >= ViewStartTrack + TracksVisible then
+    ViewStartTrack := ATrack - TracksVisible + 1;
+  if ViewStartTrack < 0 then
+    ViewStartTrack := 0;
+  if ActiveTrackPane <> nil then
+    ActiveTrackPane^.Listing^.DrawView;
+end;
+
+procedure TDysTimelineContent.ScrollTracksBy(ADelta: Integer);
+var
+  VisibleRows, PageSize, MaxStart: Integer;
+begin
+  VisibleRows := Size.Y - 1;
+  if VisibleRows <= 0 then
+    Exit;
+  PageSize := VisibleRows div TrackHeight;
+  if PageSize < 1 then
+    PageSize := 1;
+  Inc(ViewStartTrack, ADelta * PageSize);
+  if ViewStartTrack < 0 then
+    ViewStartTrack := 0;
+  MaxStart := Project.TrackCount - PageSize;
+  if MaxStart < 0 then
+    MaxStart := 0;
+  if ViewStartTrack > MaxStart then
+    ViewStartTrack := MaxStart;
+  { PageUp/PageDown move the VIEW, not the cursor - but a cursor scrolled
+    out of sight would otherwise look like Up/Down stopped working until
+    it's nudged back into view by hand, so clamp it onto whatever's now
+    visible instead. }
+  if CursorTrack < ViewStartTrack then
+    CursorTrack := ViewStartTrack
+  else if CursorTrack >= ViewStartTrack + PageSize then
+    CursorTrack := ViewStartTrack + PageSize - 1;
+  if CursorTrack > Project.TrackCount - 1 then
+    CursorTrack := Project.TrackCount - 1;
+  if CursorTrack < 0 then
+    CursorTrack := 0;
+  if ActiveTrackPane <> nil then
+    ActiveTrackPane^.Listing^.DrawView;
 end;
 
 procedure TDysTimelineContent.SetZoom(ANewPxPerSec: Integer);

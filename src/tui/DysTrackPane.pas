@@ -8,7 +8,27 @@ unit DysTrackPane;
 
   What IS real as of stage 7: SelectedTrackIndex, below, is how DysFilePane
   finds "the track under the cursor" (see tui.md's Bindings table) when a
-  file gets loaded - the file pane has no track concept of its own. }
+  file gets loaded - the file pane has no track concept of its own.
+
+  Hand-rolled TView, not TListBox (which this used to be): once the
+  timeline grid grew a toggleable TrackHeight (see DysTimeline.pas/
+  DysWidgets.pas), the row a track's number sits on stopped being "the
+  track index" and became TrackTopRow(track) - a formula that also governs
+  vertical scroll (ViewStartTrack). TListBox's Focused/TopItem model is one
+  list item per row; keeping the pane's numbers aligned with the grid's
+  blocks under that model would mean padding the item list with blank
+  filler rows and intercepting every navigation key to skip them, i.e.
+  reimplementing this same row math a second time inside TListBox's frame
+  and hoping the two never drift apart. Building straight on TView instead
+  - same MoveChar/WriteLine, raw-attribute-byte approach DysTimeline's own
+  grid uses (see that unit and fvdoc.md's "Palette cascade" note on why
+  WriteChar/WriteStr are avoided) - means this pane reads TrackTopRow/
+  TrackHeight/ViewStartTrack directly from DysWidgets, the same values the
+  grid itself draws from, so alignment holds by construction instead of by
+  two implementations being kept in lockstep by hand. Per the "scroll only
+  ever happens from the timeline" decision, this pane never changes
+  ViewStartTrack itself - it only ever redraws against whatever DysTimeline
+  last set it to (see EnsureTrackVisible/ScrollTracksBy there). }
 
 {$mode objfpc}{$H+}
 
@@ -21,18 +41,20 @@ const
   PlaceholderTrackCount = 8;
 
 type
-  PDysTrackListBox = ^TDysTrackListBox;
-  TDysTrackListBox = object(TListBox)
-    TrackMute: array[0..PlaceholderTrackCount] of Boolean;
-    TrackSolo: array[0..PlaceholderTrackCount] of Boolean;
+  PDysTrackListing = ^TDysTrackListing;
+  TDysTrackListing = object(TView)
+    SelectedTrack: Integer; { 0-based - Project.Tracks index directly, no
+                               blank-row offset to correct for anymore }
+    TrackMute: array[0..PlaceholderTrackCount - 1] of Boolean;
+    TrackSolo: array[0..PlaceholderTrackCount - 1] of Boolean;
     constructor Init(Bounds: TRect);
-    procedure HandleEvent(var Event: TEvent); virtual;
     procedure Draw; virtual;
+    procedure HandleEvent(var Event: TEvent); virtual;
   end;
 
   PDysTrackPane = ^TDysTrackPane;
   TDysTrackPane = object(TDysPane)
-    Listing: PDysTrackListBox;
+    Listing: PDysTrackListing;
     constructor InitPane(Bounds: TRect);
   end;
 
@@ -41,112 +63,141 @@ type
 var
   ActiveTrackPane: PDysTrackPane = nil;
 
-{ 0-based, clamped to Project.TrackCount - 1: the list box shows one blank
-  row (aligns row 1 of the list with row 1 of the timeline grid, whose row 0
-  is the seconds ruler - see DysTimeline.Draw) followed by PlaceholderTrackCount
-  (8) numbered rows regardless of how many tracks the project actually has,
-  so a focused row past the real track count - or the blank row itself -
-  would otherwise hand DysFilePane an out-of-range Project.Tracks index. }
+{ 0-based, clamped to Project.TrackCount - 1. }
 function SelectedTrackIndex: Integer;
 
 implementation
 
-{ TView.WriteChar/WriteStr treat their Color parameter as a PALETTE INDEX,
-  not a raw attribute byte - they call MapColor(Color), which climbs the
-  Owner chain re-mapping the index through each level's GetPalette exactly
-  like GetColor does (see fvdoc.md's "Palette cascade" note). Passing a
-  hand-picked byte like $04/$06 straight to WriteChar doesn't paint that
-  colour - it gets reinterpreted as palette index 4/6, walks up through
-  CListViewer/CGrayDialog/the app palette, and typically lands on
-  Drivers.ErrorAttr ($CF - blink, red background, white text): exactly the
-  "track numbers covered in a red border with flashing white text" bug.
-  DysTimeline.Draw never hits this because it never calls WriteChar/WriteStr
-  at all - it fills a TDrawBuffer with MoveChar/MoveStr (whose Attr
-  parameter IS the literal screen attribute byte, no palette lookup) and
-  blits it with WriteLine, which just copies the buffer to screen with no
-  colour remapping either. Same fix here: only touch the one cell that
-  needs a non-default colour, via MoveChar+WriteLine, and leave every other
-  row exactly as inherited Draw (TListBox's own normal rendering, including
-  its own focus/selection highlight) already painted it. }
-procedure TDysTrackListBox.Draw;
+const
+  { Same literal bytes as DysTimeline's own NormalAttr/CursorAttr - kept as
+    a separate copy rather than a cross-unit reference (DysTimeline already
+    `uses DysTrackPane`, so the reverse would be circular), same convention
+    DysEffectsRack's own PlayheadAttr duplicate already follows. }
+  NormalAttr = $0F; { black bg, bright white fg }
+  CursorAttr = $70; { light grey bg, black fg - selected track }
+  MuteAttr   = $04; { black bg, dark red fg }
+  SoloAttr   = $06; { black bg, brown/yellow fg }
+
+constructor TDysTrackListing.Init(Bounds: TRect);
 var
-  Item: Integer;
-  Y: Integer;
-  Attr: Byte;
-  B: TDrawBuffer;
-begin
-  inherited Draw;
-
-  for Item := TopItem to TopItem + Size.Y - 1 do
-  begin
-    if Item >= Range then
-      Break;
-    if Item = 0 then
-      Continue; { blank alignment row, never coloured }
-    if Item = Focused then
-      Continue; { leave TListBox's own selection highlight alone }
-
-    if TrackMute[Item] then
-      Attr := $04  { black bg, dark red fg }
-    else if TrackSolo[Item] then
-      Attr := $06  { black bg, brown/yellow fg }
-    else
-      Continue; { normal colour is already correct from inherited Draw }
-
-    Y := Item - TopItem;
-    MoveChar(B, PString(List^.At(Item))^[1], Attr, 1);
-    WriteLine(1, Y, 1, 1, B);
-  end;
-end;
-
-constructor TDysTrackListBox.Init(Bounds: TRect);
-var
-  Entries: PUnSortedStrCollection;
   I: Integer;
 begin
-  inherited Init(Bounds, 1, nil);
-  for I := 0 to PlaceholderTrackCount do
+  inherited Init(Bounds);
+  GrowMode := 0;
+  EventMask := EventMask or evMouseDown or evKeyDown;
+  { ofSelectable/ofFirstClick - see DysTimeline.TDysTimelineContent.Init's
+    own comment on why a hand-rolled TView needs these set explicitly. }
+  Options := Options or (ofSelectable + ofFirstClick);
+  SelectedTrack := 0;
+  for I := 0 to PlaceholderTrackCount - 1 do
   begin
     TrackMute[I] := False;
     TrackSolo[I] := False;
   end;
-  Entries := New(PUnSortedStrCollection, Init(PlaceholderTrackCount + 1, 4));
-  Entries^.Insert(NewStr(''));
-  for I := 1 to PlaceholderTrackCount do
-    Entries^.Insert(NewStr(IntToStr(I)));
-  NewList(Entries);
 end;
 
-procedure TDysTrackListBox.HandleEvent(var Event: TEvent);
+{ Row 0 is always the blank row that aligns with the timeline grid's own
+  ruler row (TrackTopRow(ViewStartTrack) = 1, never 0 - see DysWidgets.pas);
+  every track after that occupies TrackHeight rows starting at
+  TrackTopRow(track), the exact formula the grid itself uses. Only the
+  block's top row carries the track number - the rest render blank, same
+  "number lines up with the top of its block" layout the grid's own A/I/S
+  label column follows for a tall track. }
+procedure TDysTrackListing.Draw;
 var
-  TrackIdx: Integer;
+  B: TDrawBuffer;
+  Track, Y, SubRow: Integer;
+  NumStr: string;
+  Attr: Word;
+begin
+  MoveChar(B, ' ', NormalAttr, Size.X);
+  WriteLine(0, 0, Size.X, 1, B);
+
+  for Track := ViewStartTrack to Project.TrackCount - 1 do
+  begin
+    Y := TrackTopRow(Track);
+    if Y >= Size.Y then
+      Break;
+
+    for SubRow := 0 to TrackHeight - 1 do
+    begin
+      if Y + SubRow >= Size.Y then
+        Break;
+
+      if Track = SelectedTrack then
+        MoveChar(B, ' ', CursorAttr, Size.X)
+      else
+        MoveChar(B, ' ', NormalAttr, Size.X);
+
+      if SubRow = 0 then
+      begin
+        NumStr := IntToStr(Track + 1);
+        if Track = SelectedTrack then
+          Attr := CursorAttr
+        else if (Track < PlaceholderTrackCount) and TrackMute[Track] then
+          Attr := MuteAttr
+        else if (Track < PlaceholderTrackCount) and TrackSolo[Track] then
+          Attr := SoloAttr
+        else
+          Attr := NormalAttr;
+        MoveStr(B, NumStr, Attr);
+      end;
+
+      WriteLine(0, Y + SubRow, Size.X, 1, B);
+    end;
+  end;
+end;
+
+procedure TDysTrackListing.HandleEvent(var Event: TEvent);
 begin
   inherited HandleEvent(Event);
 
-  { Handle mute (m) and solo (s) key presses on tracks 1-8 }
-  if (Event.What = evKeyDown) and (Focused > 0) then
+  if Event.What = evKeyDown then
   begin
-    TrackIdx := Focused;
-    case Char(Event.CharCode) of
-      'm', 'M':
-      begin
-        TrackMute[TrackIdx] := not TrackMute[TrackIdx];
-        if TrackIdx <= Project.TrackCount then
-          Project.TrackSolo[TrackIdx - 1] := False; { clear solo when muting }
-        DrawView;
-        ClearEvent(Event);
-      end;
-      's', 'S':
-      begin
-        TrackSolo[TrackIdx] := not TrackSolo[TrackIdx];
-        if TrackIdx <= Project.TrackCount then
-          Project.TrackSolo[TrackIdx - 1] := TrackSolo[TrackIdx];
-        if TrackSolo[TrackIdx] then
-          TrackMute[TrackIdx] := False; { clear mute when soloing }
-        DrawView;
-        ClearEvent(Event);
-      end;
+    case Event.KeyCode of
+      kbUp:
+        begin
+          if SelectedTrack > 0 then
+            Dec(SelectedTrack);
+          DrawView;
+          ClearEvent(Event);
+          Exit;
+        end;
+      kbDown:
+        begin
+          if SelectedTrack < Project.TrackCount - 1 then
+            Inc(SelectedTrack);
+          DrawView;
+          ClearEvent(Event);
+          Exit;
+        end;
     end;
+
+    { Handle mute (m) and solo (s) key presses on the selected track. Mute
+      is display-only (never pushed to Project - stage 8, same as before
+      this rewrite); solo mirrors into Project.TrackSolo so it actually
+      gates playback (see Project.TrackAudible). }
+    if SelectedTrack < PlaceholderTrackCount then
+      case Char(Event.CharCode) of
+        'm', 'M':
+          begin
+            TrackMute[SelectedTrack] := not TrackMute[SelectedTrack];
+            if SelectedTrack < Project.TrackCount then
+              Project.TrackSolo[SelectedTrack] := False;
+            DrawView;
+            ClearEvent(Event);
+          end;
+        's', 'S':
+          begin
+            TrackSolo[SelectedTrack] := not TrackSolo[SelectedTrack];
+            if SelectedTrack < Project.TrackCount then
+              Project.TrackSolo[SelectedTrack] := TrackSolo[SelectedTrack];
+            if TrackSolo[SelectedTrack] then
+              TrackMute[SelectedTrack] := False;
+            DrawView;
+            ClearEvent(Event);
+          end;
+      end;
   end;
 
   if ((Event.What = evKeyDown) and
@@ -154,10 +205,9 @@ begin
      ((Event.What = evMouseDown) and (Event.Buttons and mbActualRightButton <> 0))
   then
   begin
-    if Focused > 0 then
-      MessageBox('Track ' + PString(List^.At(Focused))^ +
-        ': mute / solo / volume popup is stage 8 - not wired yet.',
-        nil, mfInformation or mfOKButton);
+    MessageBox('Track ' + IntToStr(SelectedTrack + 1) +
+      ': mute / solo / volume popup is stage 8 - not wired yet.',
+      nil, mfInformation or mfOKButton);
     ClearEvent(Event);
   end;
 end;
@@ -167,10 +217,7 @@ begin
   Result := 0;
   if ActiveTrackPane = nil then
     Exit;
-  { -1: row 0 is the blank alignment row, not track 1 - see the comment
-    above. Focused = 0 clamps to track index 0 same as any other
-    out-of-range row, it just isn't allowed to read as "track 1 selected". }
-  Result := ActiveTrackPane^.Listing^.Focused - 1;
+  Result := ActiveTrackPane^.Listing^.SelectedTrack;
   if Result > Project.TrackCount - 1 then
     Result := Project.TrackCount - 1;
   if Result < 0 then
@@ -183,11 +230,9 @@ var
 begin
   inherited InitPane(Bounds, 'Tr');
   R := ContentRect;
-  Listing := New(PDysTrackListBox, Init(R));
+  Listing := New(PDysTrackListing, Init(R));
   Insert(Listing);
   Focusable := Listing;
-  { Start cursor at track 1 instead of blank row 0 }
-  Listing^.FocusItem(1);
   ActiveTrackPane := @Self;
 end;
 

@@ -485,51 +485,9 @@ begin
   DrawView;
 end;
 
-{ One row's worth of a single waveform bar column, given the bar's own
-  continuous vertical span (ATop..ABot, in fractional-row units where row 0
-  is this row's own top edge and row 1 its bottom) against THIS row's fixed
-  [0,1) slice. TDrawBuffer stores one CP437 byte per cell (views.pas:
-  `TDrawBuffer = array[...] of Word`, low byte character/high byte
-  attribute) - there is no sub-cell pixel or dot-matrix addressing
-  reachable through Free Vision's draw pipeline at all (checked the Unix
-  video driver, rtl-console/src/unix/video.pp: UTF-8 output is a FIXED
-  256-entry CP437-to-Unicode translation table, and Braille (U+2800+) isn't
-  one of the 256 characters it can ever produce). This is the closest
-  approximation CP437 actually allows: a full block for a row entirely
-  inside the bar, a half-block (upper or lower, whichever half the bar
-  reaches) for a row roughly half-covered, and a plain ASCII sliver
-  ('`'/'.') for anything finer than that - four visually distinct levels
-  per row edge from a combination of block-drawing and plain text
-  characters, instead of one (solid block or nothing). }
-function WaveRowGlyph(ATop, ABot: Double): Char;
-var
-  OverlapTop, OverlapBot, Frac: Double;
-  FillsFromTop: Boolean;
-begin
-  OverlapTop := ATop;
-  if OverlapTop < 0 then
-    OverlapTop := 0;
-  OverlapBot := ABot;
-  if OverlapBot > 1 then
-    OverlapBot := 1;
-  if OverlapBot <= OverlapTop then
-    Exit(' ');
-  Frac := OverlapBot - OverlapTop;
-  if Frac >= 0.9 then
-    Exit(Chr(219)); { full block }
-  FillsFromTop := OverlapTop <= (1 - OverlapBot);
-  if Frac >= 0.4 then
-  begin
-    if FillsFromTop then
-      Exit(Chr(223)) { upper half block }
-    else
-      Exit(Chr(220)); { lower half block }
-  end;
-  if FillsFromTop then
-    Exit('''')
-  else
-    Exit('.');
-end;
+{ WaveRowGlyph moved to DysWidgets.pas (this unit already `uses DysWidgets`)
+  so DysTimeline's inline per-clip waveform can share it too - see that
+  unit for the CP437/half-block reasoning. }
 
 { Row 1's ruler: a tick ('|') plus an mm:ss label (relative to the clip's
   OWN start, not the underlying sample file's) every StepCols columns, or

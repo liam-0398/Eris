@@ -197,6 +197,49 @@ var
 var
   ChopWaveformSelectionProc: procedure(AStartFrame, AEndFrame: Int64) = nil;
 
+const
+  MinTrackHeight = 1;
+  MaxTrackHeight = 3;
+
+{ Rows a single track occupies in the timeline grid and the track pane
+  listing - toggled by 'h'/'H' on the timeline (DysTimeline.HandleEvent).
+  Lives here, not in DysTimeline, so DysTrackPane (which does not and
+  cannot `uses DysTimeline` - see DysTimeline's own implementation `uses
+  DysTrackPane`, the reverse would be circular) can read it too: both
+  panes must render off the exact same value or the "track number lines
+  up with the top row of its block" alignment breaks. }
+var
+  TrackHeight: Integer = 1;
+  { First track drawn at the top of the grid (row 1, just under the
+    ruler) - vertical scroll in TRACK units, not screen rows. Changed only
+    from DysTimeline (Up/Down following the cursor, PageUp/PageDown) per
+    the "scroll only happens from the timeline" decision - DysTrackPane's
+    own listing has no independent scroll of its own, it just redraws
+    against whatever this currently is. See DysTimeline.EnsureTrackVisible. }
+  ViewStartTrack: Integer = 0;
+
+{ Cycles TrackHeight through 1/2/3 and returns the new value - same shape
+  as WaveformDraw.CycleWaveformGridDivision (src/ui) in the GUI. }
+function CycleTrackHeight: Integer;
+
+{ The screen row (0 = the seconds ruler) the TOP of ATrack's block sits
+  on, given the current TrackHeight/ViewStartTrack - the one formula both
+  DysTimeline.Draw and DysTrackPane's listing key off, so their row math
+  can't independently drift apart. ATrack is 0-based, same as
+  Project.Tracks. }
+function TrackTopRow(ATrack: Integer): Integer;
+
+{ One row's worth of a single waveform bar column, given the bar's own
+  continuous vertical span (ATop..ABot, in fractional-row units where row 0
+  is this row's own top edge and row 1 its bottom) against THIS row's fixed
+  [0,1) slice. Shared by DysEffectsRack's bottom-pane waveform widget and
+  DysTimeline's inline per-clip waveform - see either call site for the
+  CP437/half-block reasoning (checked against the Unix video driver: no
+  sub-cell or Braille addressing is reachable through Free Vision's draw
+  pipeline at all, so a half-block plus a plain-ASCII sliver is the finest
+  vertical resolution actually achievable per row). }
+function WaveRowGlyph(ATop, ABot: Double): Char;
+
 implementation
 
 uses
@@ -680,6 +723,49 @@ begin
     Bar^.Current^.Focus
   else
     Bar^.Tempo^.Focus;
+end;
+
+function CycleTrackHeight: Integer;
+begin
+  Inc(TrackHeight);
+  if TrackHeight > MaxTrackHeight then
+    TrackHeight := MinTrackHeight;
+  Result := TrackHeight;
+end;
+
+function TrackTopRow(ATrack: Integer): Integer;
+begin
+  Result := 1 + (ATrack - ViewStartTrack) * TrackHeight;
+end;
+
+function WaveRowGlyph(ATop, ABot: Double): Char;
+var
+  OverlapTop, OverlapBot, Frac: Double;
+  FillsFromTop: Boolean;
+begin
+  OverlapTop := ATop;
+  if OverlapTop < 0 then
+    OverlapTop := 0;
+  OverlapBot := ABot;
+  if OverlapBot > 1 then
+    OverlapBot := 1;
+  if OverlapBot <= OverlapTop then
+    Exit(' ');
+  Frac := OverlapBot - OverlapTop;
+  if Frac >= 0.9 then
+    Exit(Chr(219)); { full block }
+  FillsFromTop := OverlapTop <= (1 - OverlapBot);
+  if Frac >= 0.4 then
+  begin
+    if FillsFromTop then
+      Exit(Chr(223)) { upper half block }
+    else
+      Exit(Chr(220)); { lower half block }
+  end;
+  if FillsFromTop then
+    Exit('''')
+  else
+    Exit('.');
 end;
 
 end.
