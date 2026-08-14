@@ -543,10 +543,10 @@ begin
   FGridTrackBar := TTrackBar.Create(Self);
   FGridTrackBar.Parent := FTransportPanel;
   FGridTrackBar.Min := 0;
-  FGridTrackBar.Max := 4;
+  FGridTrackBar.Max := 5;
   FGridTrackBar.Frequency := 1;
   FGridTrackBar.TickStyle := tsAuto;
-  FGridTrackBar.Position := 2; { 1/4 note - matches ArrangementView's default }
+  FGridTrackBar.Position := 3; { 1/4 note - matches ArrangementView's default }
   FGridTrackBar.Width := Px(140);
   FGridTrackBar.Height := Px(36);
   FGridTrackBar.ShowHint := True;
@@ -1833,8 +1833,8 @@ end;
 
 procedure TForm1.GridTrackBarChange(Sender: TObject);
 const
-  Divisions: array[0..4] of Integer = (16, 8, 4, 2, 1);
-  Labels: array[0..4] of string = ('1/16', '1/8', '1/4', '1/2', '1 bar');
+  Divisions: array[0..5] of Integer = (32, 16, 8, 4, 2, 1);
+  Labels: array[0..5] of string = ('1/32', '1/16', '1/8', '1/4', '1/2', '1 bar');
 var
   Idx: Integer;
 begin
