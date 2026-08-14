@@ -34,6 +34,7 @@ type
     var
       FTrackIndex: Integer;
       FDragWhich: Integer; { -1 none, 0 start marker, 1 end marker }
+      FLastMouseX: Integer;
       FPlayheadFrame: Int64;
       FIsPlaying: Boolean;
       FOnChanged: TNotifyEvent;
@@ -61,6 +62,7 @@ type
     procedure MouseMove(Shift: TShiftState; X, Y: Integer); override;
     procedure MouseUp(Button: TMouseButton; Shift: TShiftState;
       X, Y: Integer); override;
+    procedure DblClick; override;
   public
     constructor Create(AOwner: TComponent); override;
     procedure SetTrack(ATrackIndex: Integer);
@@ -130,9 +132,12 @@ var
   sx, ex: Integer;
 begin
   Result := -1;
-  ex := FrameToX(Project.TrackInstrumentEnd[FTrackIndex], ASampleRate);
-  if Abs(X - ex) <= MarkerGrabPixels then
-    Exit(1);
+  if Project.TrackInstrumentEnd[FTrackIndex] <> Project.InstrumentEndUnset then
+  begin
+    ex := FrameToX(Project.TrackInstrumentEnd[FTrackIndex], ASampleRate);
+    if Abs(X - ex) <= MarkerGrabPixels then
+      Exit(1);
+  end;
   sx := FrameToX(Project.TrackInstrumentStart[FTrackIndex], ASampleRate);
   if Abs(X - sx) <= MarkerGrabPixels then
     Exit(0);
@@ -252,6 +257,8 @@ begin
   Canvas.Brush.Color := clLime;
   Canvas.Polygon([Point(sx - 5, RulerHeight), Point(sx + 5, RulerHeight), Point(sx, RulerHeight + 8)]);
 
+  if Project.TrackInstrumentEnd[FTrackIndex] = Project.InstrumentEndUnset then
+    Exit;
   ex := FrameToX(Project.TrackInstrumentEnd[FTrackIndex], ASampleRate);
   Canvas.Pen.Color := clRed;
   Canvas.Pen.Width := 2;
@@ -298,10 +305,27 @@ var
   SampleID: Integer;
 begin
   inherited MouseDown(Button, Shift, X, Y);
-  if Button <> mbLeft then
-    Exit;
+  FLastMouseX := X;
   SampleID := GetSampleID;
   if SampleID < 0 then
+    Exit;
+
+  { right-click removes the end marker, same as a normal warp marker - the
+    start marker is permanent (it is the sample's own beginning) so there is
+    nothing for a right-click to do there }
+  if Button = mbRight then
+  begin
+    if HitTestMarker(X, Project.SamplePool[SampleID].SampleRate) = 1 then
+    begin
+      Project.TrackInstrumentEnd[FTrackIndex] := Project.InstrumentEndUnset;
+      if Assigned(FOnChanged) then
+        FOnChanged(Self);
+      Invalidate;
+    end;
+    Exit;
+  end;
+
+  if Button <> mbLeft then
     Exit;
   FDragWhich := HitTestMarker(X, Project.SamplePool[SampleID].SampleRate);
 end;
@@ -352,6 +376,34 @@ procedure TInstrumentEditor.MouseUp(Button: TMouseButton; Shift: TShiftState;
 begin
   inherited MouseUp(Button, Shift, X, Y);
   FDragWhich := -1;
+end;
+
+{ Drops the end marker at the last clicked position, or moves it there if one
+  already exists - there is no default end marker any more (see
+  Project.InstrumentEndUnset), so this is the only way one gets created. }
+procedure TInstrumentEditor.DblClick;
+var
+  SampleID: Integer;
+  FrameCount, NewFrame: Int64;
+begin
+  inherited DblClick;
+  SampleID := GetSampleID;
+  if SampleID < 0 then
+    Exit;
+
+  FrameCount := Project.SamplePool[SampleID].FrameCount;
+  NewFrame := XToFrame(FLastMouseX, Project.SamplePool[SampleID].SampleRate);
+  if NewFrame <= Project.TrackInstrumentStart[FTrackIndex] then
+    NewFrame := Project.TrackInstrumentStart[FTrackIndex] + 1;
+  if NewFrame > FrameCount then
+    NewFrame := FrameCount;
+  if NewFrame <= Project.TrackInstrumentStart[FTrackIndex] then
+    Exit;
+
+  Project.TrackInstrumentEnd[FTrackIndex] := NewFrame;
+  if Assigned(FOnChanged) then
+    FOnChanged(Self);
+  Invalidate;
 end;
 
 procedure TInstrumentEditor.SetTrack(ATrackIndex: Integer);

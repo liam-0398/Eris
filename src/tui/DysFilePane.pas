@@ -186,12 +186,11 @@ begin
   end;
   SampleID := Project.AddSampleToPool(Sample, Name, FullPath);
   TrackIdx := SelectedTrackIndex;
-  { Mirrors MainForm.AssignSampleAsKeyboardInstrumentFor (src/ui): the start/
-    end trim markers default to the whole sample since there's no clip to
-    inherit a trim window from here. }
+  { Mirrors MainForm.AssignSampleAsKeyboardInstrumentFor (src/ui): no end
+    marker by default, so playback runs to the actual end of the sample. }
   Project.TrackInstrument[TrackIdx] := SampleID;
   Project.TrackInstrumentStart[TrackIdx] := 0;
-  Project.TrackInstrumentEnd[TrackIdx] := Sample.FrameCount;
+  Project.TrackInstrumentEnd[TrackIdx] := Project.InstrumentEndUnset;
   if ActiveTimelineContent <> nil then
     ActiveTimelineContent^.DrawView;
 end;

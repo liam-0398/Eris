@@ -273,7 +273,7 @@ begin
   EndFrame := Project.TrackInstrumentEnd[Track];
   if StartFrame < 0 then
     StartFrame := 0;
-  if EndFrame > Sample.FrameCount then
+  if (EndFrame <= 0) or (EndFrame > Sample.FrameCount) then
     EndFrame := Sample.FrameCount;
   TrimmedCount := EndFrame - StartFrame;
   if TrimmedCount <= 0 then

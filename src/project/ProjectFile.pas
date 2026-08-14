@@ -1364,12 +1364,8 @@ begin
         end;
 
       Project.TrackInstrumentStart[t] := Ini.ReadInt64(Section, 'InstrumentStart', 0);
-      if (Project.TrackInstrument[t] >= 0) and
-        (Project.TrackInstrument[t] <= High(Project.SamplePool)) then
-        Project.TrackInstrumentEnd[t] := Ini.ReadInt64(Section, 'InstrumentEnd',
-          Project.SamplePool[Project.TrackInstrument[t]].FrameCount)
-      else
-        Project.TrackInstrumentEnd[t] := Ini.ReadInt64(Section, 'InstrumentEnd', 0);
+      Project.TrackInstrumentEnd[t] := Ini.ReadInt64(Section, 'InstrumentEnd',
+        Project.InstrumentEndUnset);
 
       Project.TrackEffectCount[t] := Ini.ReadInteger(Section, 'EffectCount', 0);
       if Project.TrackEffectCount[t] > Effects.MaxEffectsPerTrack then

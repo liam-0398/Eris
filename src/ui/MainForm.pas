@@ -2911,23 +2911,20 @@ end;
   already-resident sample (a timeline clip double-clicked or dragged onto
   the device panel - see ArrangementViewClipActivate) - the latter has
   nothing to decode/import, the sample's already in Project.SamplePool.
-  AStartFrame/AEndFrame seed the start/end markers - normally the
-  activating clip's own Offset/Offset+Length, so the end marker auto-
-  populates at wherever that clip was trimmed to rather than always the
-  whole underlying sample; falls back to the full sample if the window
-  doesn't make sense (e.g. AEndFrame <= AStartFrame). }
+  AStartFrame seeds the start marker - normally the activating clip's own
+  Offset. No end marker is placed here (see InstrumentEditor): playback
+  always runs to the actual end of the sample until the user double-clicks
+  the widget to drop one. }
 procedure TForm1.AssignSampleAsKeyboardInstrumentFor(ATrack, ASampleID: Integer;
   AStartFrame, AEndFrame: Int64);
 begin
   if (ATrack < 0) or (ASampleID < 0) or (ASampleID > High(Project.SamplePool)) then
     Exit;
   Project.TrackInstrument[ATrack] := ASampleID;
-  if AStartFrame < 0 then
+  if (AStartFrame < 0) or (AStartFrame >= Project.SamplePool[ASampleID].FrameCount) then
     AStartFrame := 0;
-  if (AEndFrame <= AStartFrame) or (AEndFrame > Project.SamplePool[ASampleID].FrameCount) then
-    AEndFrame := Project.SamplePool[ASampleID].FrameCount;
   Project.TrackInstrumentStart[ATrack] := AStartFrame;
-  Project.TrackInstrumentEnd[ATrack] := AEndFrame;
+  Project.TrackInstrumentEnd[ATrack] := Project.InstrumentEndUnset;
   UpdateDevicePanel;
 end;
 
@@ -3141,7 +3138,7 @@ begin
   EndFrame := Project.TrackInstrumentEnd[Track];
   if StartFrame < 0 then
     StartFrame := 0;
-  if EndFrame > Sample.FrameCount then
+  if (EndFrame <= 0) or (EndFrame > Sample.FrameCount) then
     EndFrame := Sample.FrameCount;
   TrimmedCount := EndFrame - StartFrame;
   if TrimmedCount <= 0 then
@@ -3242,7 +3239,7 @@ var
       the engine }
     if AStart < 0 then
       AStart := 0;
-    if AEnd > Sample.FrameCount then
+    if (AEnd <= 0) or (AEnd > Sample.FrameCount) then
       AEnd := Sample.FrameCount;
     Count := AEnd - AStart;
     if Count <= 0 then

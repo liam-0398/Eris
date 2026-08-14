@@ -13,6 +13,10 @@ const
   DefaultTempoBPM = 160.0;
   SamplerKeysPerOctave = 12;
 
+  { TrackInstrumentEnd sentinel: no end marker placed, play to the sample's
+    actual end - see TrackInstrumentEnd below. }
+  InstrumentEndUnset = -1;
+
   { Send buses. Two of them, fixed - the point of a send is that one
     expensive effect chain serves many tracks, and two is what a 90s desk
     with a pair of aux buses gave you. Any track can feed either. }
@@ -97,7 +101,9 @@ var
   TrackPan: array[0..MaxTracks - 1] of Single;
 
   { trim points (in source sample frames) for the keyboard-play instrument on
-    each track; default is the entire sample (Start=0, End=FrameCount) }
+    each track. End = InstrumentEndUnset means no end marker has been placed -
+    playback runs to the actual end of the sample - rather than always
+    tracking a concrete frame that has to be kept in sync with FrameCount. }
   TrackInstrumentStart: array[0..MaxTracks - 1] of Int64;
   TrackInstrumentEnd: array[0..MaxTracks - 1] of Int64;
 
@@ -351,7 +357,7 @@ begin
   TrackVolume[ATrackIndex] := 1.0;
   TrackPan[ATrackIndex] := 0.0;
   TrackInstrumentStart[ATrackIndex] := 0;
-  TrackInstrumentEnd[ATrackIndex] := 0;
+  TrackInstrumentEnd[ATrackIndex] := InstrumentEndUnset;
   TrackEnabled[ATrackIndex] := True;
   TrackSolo[ATrackIndex] := False;
   TrackCollapsed[ATrackIndex] := False;
@@ -394,7 +400,7 @@ begin
     TrackVolume[i] := 1.0;
     TrackPan[i] := 0.0;
     TrackInstrumentStart[i] := 0;
-    TrackInstrumentEnd[i] := 0;
+    TrackInstrumentEnd[i] := InstrumentEndUnset;
     TrackEnabled[i] := True;
     TrackSolo[i] := False;
     TrackCollapsed[i] := False;
