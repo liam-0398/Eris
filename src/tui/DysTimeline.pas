@@ -25,10 +25,12 @@ unit DysTimeline;
   'w' re-warps the clip under the cursor to the nearest power-of-two bar
   count (WarpClipToNearestPow2Bar); 'l' cycles a transport loop range
   start/end/clear at the cursor's frame (LoopStart/LoopEnd). Committed
-  clips are shaded per-SampleID (SampleShadeAttr) rather than one fixed
-  colour, with a forced black divider (DrawAdjoiningSeparators) wherever
-  two same-shade clips are back-to-back and would otherwise look like one
-  clip - see tui.md's Bindings and Free Vision notes for all four. }
+  clips are shaded per-TRACK (TrackColorAttr/TrackColors, randomly assigned
+  once at startup - same idea as Eris's own ArrangementView.FTrackColors,
+  src/ui) rather than one fixed colour, with a grey marker at every clip's
+  own leading column (DrawClipStartMarker) so two same-track clips placed
+  back-to-back still read as two clips, not one - see tui.md's Bindings and
+  Free Vision notes for all four. }
 
 {$mode objfpc}{$H+}
 
@@ -219,10 +221,17 @@ var
 procedure DysStartRecording;
 procedure DysFinalizeRecording;
 
+{ Ctrl+D/Ctrl+V on the waveform pane's own selection/paste-cursor - called
+  from DysnomiaApp.pas's cmEditDuplicate/cmEditPaste, same routing as
+  DysChopMarkedClipRegion (ChopWaveformSelectionProc) for Delete. See
+  either procedure's own implementation comment. }
+procedure DysDuplicateWaveformSelection;
+procedure DysPasteWaveformClipboard;
+
 implementation
 
 uses
-  DysTrackPane;
+  DysTrackPane, DysEffectsRack;
 
 { The clip clipboard: a single TClip, not Eris's array-of-(RelTrack,TClip) -
   there's no multi-track range selection here to copy, just "the clip under
@@ -257,16 +266,31 @@ const
   PlayheadChar = '|';
   LoopChar = 'L';
 
-  { A committed clip's colour, per-sample not per-clip: BlockChar is a solid
-    CP437 glyph that fills the whole cell in the FOREGROUND colour - the
-    background nibble underneath never shows through it - so "shade" here
-    means picking a foreground, not a background. The 16-colour set only has
-    three true grey/white tones (0 and 15 are the ramp's black/white
-    endpoints, kept out of the rotation so a clip is never black-on-black or
-    indistinguishable from PlayheadChar's own white-on-red): dark grey (8),
-    light grey (7), bright white (15). See SampleShadeAttr. }
-  ClipShades: array[0..2] of Byte = ($08, $07, $0F);
-  SeparatorAttr = $00; { solid black - see DrawAdjoiningSeparators }
+  { One random colour per TRACK (not per-sample - see TrackColors below),
+    same idea as Eris's own ArrangementView.FTrackColors (src/ui), just
+    drawn from the 16-colour CGA set instead of RGBToColor's full range.
+    Excludes black/white/grey (reserved for ClipStartAttr's marker, below,
+    so it's never mistaken for a track's own colour) and red/green (already
+    PlayheadAttr/LoopAttr) - 8 remaining hues, saturated enough to stay
+    readable on the black background every clip uses. }
+  TrackColorPalette: array[0..7] of Byte =
+    ($01, $02, $03, $05, $06, $09, $0B, $0D);
+  { The clip's own leading column, always - not just where two same-colour
+    clips happen to touch (the old DrawAdjoiningSeparators). Per-track
+    colour means every clip on a track shares its neighbour's exact shade
+    as the common case now, not a rare hash collision, so marking only
+    actual adjacency stopped being enough: this marks EVERY clip's start,
+    so two clips back-to-back are always visibly two clips. Grey, not
+    black, so it reads as "a seam" rather than a gap of silence. }
+  ClipStartAttr = $08; { black bg, dark grey fg }
+
+var
+  { Assigned once per track index at TDysTimelineContent.Init, same
+    "Randomize, then one Random call per slot" as ArrangementView's own
+    FTrackColors - see TrackColorPalette above. Session-only, like Eris's:
+    not saved to the project, just needs to stay stable for as long as this
+    run of the app is open. }
+  TrackColors: array[0..Project.MaxTracks - 1] of Byte;
 
 { A/I/S per tui.md: Sampler Track wins over instrument (a track can carry
   both TrackIsSampler and a live TrackInstrument at once - see Project.pas's
@@ -287,55 +311,30 @@ begin
     Result := 'A';
 end;
 
-{ Deterministic per-sample shade, not per-clip - two clips referencing the
-  same SampleID (the same audio file dropped twice) always render
-  identically, matching "all break01.wav starts white" from the feature
-  request. Knuth's multiplicative hash constant rather than SampleID mod 3
-  so consecutive file drops don't visibly cycle 1-2-3-1-2-3 - it still has
-  only 3 possible outputs (see ClipShades), it just scrambles which SampleID
-  lands on which of the 3, and 3-way collisions are expected and handled by
-  DrawAdjoiningSeparators below, not avoided here. }
-function SampleShadeAttr(ASampleID: Integer): Word;
-var
-  H: LongWord;
+function TrackColorAttr(ATrack: Integer): Word;
 begin
-  H := LongWord(ASampleID) * 2654435761;
-  Result := ClipShades[(H shr 28) mod Length(ClipShades)];
+  if (ATrack < 0) or (ATrack > High(TrackColors)) then
+    Result := TrackColorPalette[0]
+  else
+    Result := TrackColors[ATrack];
 end;
 
-{ Same-colour clips placed back-to-back (one ends exactly where the next
-  starts) render as a single unbroken block with no visible seam between
-  two different files - see the feature request. Paints a one-column black
-  divider at the second clip's leading column whenever that happens; that
-  column is "spent" on the divider rather than either clip, which is the
-  best this grid's resolution (FramesPerCol frames/column) can do. }
-procedure DrawAdjoiningSeparators(var B: TDrawBuffer; ATrack: Integer;
-  AFramesPerCol: Int64; AWidth: Integer; AViewStart: Int64);
+{ The clip-start grey marker - see ClipStartAttr. Called once per clip per
+  SubRow from Draw's per-track loop, after that row's clips have already
+  been filled in solid, so this always wins the top pixel of a clip's own
+  leading edge regardless of what colour sits behind it. }
+procedure DrawClipStartMarker(var B: TDrawBuffer; AFramesPerCol: Int64;
+  AWidth: Integer; APos: Int64; AViewStart: Int64);
 var
-  i, j, Col: Integer;
-  EndA, PosB: Int64;
+  Col: Integer;
 begin
-  for i := 0 to High(Project.Tracks[ATrack].Clips) do
-  begin
-    EndA := Project.Tracks[ATrack].Clips[i].Position +
-      Project.Tracks[ATrack].Clips[i].Length;
-    for j := 0 to High(Project.Tracks[ATrack].Clips) do
-    begin
-      if i = j then
-        Continue;
-      PosB := Project.Tracks[ATrack].Clips[j].Position;
-      if PosB <> EndA then
-        Continue;
-      if PosB < AViewStart then
-        Continue; { off the left edge of the visible grid }
-      if SampleShadeAttr(Project.Tracks[ATrack].Clips[j].SampleID) <>
-         SampleShadeAttr(Project.Tracks[ATrack].Clips[i].SampleID) then
-        Continue;
-      Col := LabelWidth + ((PosB - AViewStart) div AFramesPerCol);
-      if (Col >= LabelWidth) and (Col <= AWidth - 1) then
-        MoveChar(B[Col], BlockChar, SeparatorAttr, 1);
-    end;
-  end;
+  if AFramesPerCol <= 0 then
+    Exit;
+  if APos < AViewStart then
+    Exit; { off the left edge of the visible grid }
+  Col := LabelWidth + ((APos - AViewStart) div AFramesPerCol);
+  if (Col >= LabelWidth) and (Col <= AWidth - 1) then
+    MoveChar(B[Col], BlockChar, ClipStartAttr, 1);
 end;
 
 { Frames per bar at the project's current tempo, hardcoded to 4/4 like
@@ -470,6 +469,24 @@ procedure DysSeekPlaybackToCursor;
 begin
   if ActiveTimelineContent <> nil then
     AudioEngineSeek(ActiveTimelineContent^.CursorFrame);
+end;
+
+{ Real implementation behind DysWidgets.CycleTrackHeightProc - the toolbar's
+  height button (next to IntervalBtn) can't call
+  TDysTimelineContent.EnsureTrackVisible itself (DysWidgets can't `uses
+  DysTimeline`, see that unit's own comment on the callback), so it goes
+  through this instead. Same effect as the timeline's own 'h'/'H' key
+  (HandleEvent below) - both end up here, so there's exactly one place that
+  re-derives "is the cursor's track still visible after the height
+  changed". }
+procedure DysCycleTrackHeight;
+begin
+  CycleTrackHeight;
+  if ActiveTimelineContent <> nil then
+  begin
+    ActiveTimelineContent^.EnsureTrackVisible(ActiveTimelineContent^.CursorTrack);
+    ActiveTimelineContent^.DrawView;
+  end;
 end;
 
 procedure DysStartRecording;
@@ -669,8 +686,18 @@ end;
 { TDysTimelineContent }
 
 constructor TDysTimelineContent.Init(Bounds: TRect);
+var
+  i: Integer;
 begin
   inherited Init(Bounds);
+  { One random colour per track slot, same "Randomize once, one Random call
+    per slot" as ArrangementView.FTrackColors (src/ui) - see TrackColorAttr/
+    TrackColorPalette. All MaxTracks slots get one up front, not just
+    Project.TrackCount's current value, so a track added later already has
+    a colour waiting rather than needing this re-run. }
+  Randomize;
+  for i := 0 to High(TrackColors) do
+    TrackColors[i] := TrackColorPalette[Random(Length(TrackColorPalette))];
   GrowMode := 0;
   EventMask := EventMask or evMouseDown or evKeyDown;
   { Bare TView.Init leaves Options at 0 - ofSelectable is what makes
@@ -728,133 +755,6 @@ begin
   if EndCol < StartCol then
     Exit;
   MoveChar(B[StartCol], BlockChar, AAttr, EndCol - StartCol + 1);
-end;
-
-{ One row of one committed clip's waveform - called once per SubRow
-  (0..ATrackHeight-1) from Draw's per-track loop, same column range
-  DrawSpan itself would fill, but painted with DysWidgets.WaveRowGlyph
-  instead of a solid BlockChar. Column->source-frame mapping (including all
-  four warp modes) is ported from src/ui's WaveformDraw.DrawWaveform rather
-  than reinvented, so the GUI and the TUI draw the same shape for the same
-  clip - see that unit for the per-branch reasoning (RePitch/Beats/Tones/
-  Audio all fall through WarpedSourcePosition, Drag is its own zone lookup).
-  Falls back to DrawSpan's plain solid fill whenever peaks aren't available
-  (SampleID out of range, or the sample hasn't been through
-  ComputeWaveformPeaks yet) rather than drawing nothing. }
-procedure DrawClipWaveSpan(var B: TDrawBuffer; AFramesPerCol: Int64;
-  AWidth: Integer; const AClip: TClip; ASubRow, ATrackHeight: Integer;
-  AViewStart: Int64);
-var
-  StartCol, EndCol, ClipStartColUnclipped, RectWidth, x, ColOffset: Integer;
-  BinCount, Bin0, Bin1, BinIdx, HintK: Integer;
-  TotalFrameCount: Int64;
-  TimelineFrame0, TimelineFrame1, ZonePos0, ZonePos1: Int64;
-  SrcFrame0, SrcFrame1, MinV, MaxV, MidRow, Top, Bot: Double;
-  Attr: Word;
-begin
-  if (AClip.Length <= 0) or (AFramesPerCol <= 0) then
-    Exit;
-  if AClip.Position + AClip.Length <= AViewStart then
-    Exit;
-
-  Attr := SampleShadeAttr(AClip.SampleID);
-
-  if (AClip.SampleID < 0) or (AClip.SampleID > High(Project.SamplePeaks)) or
-     (AClip.SampleID > High(Project.SamplePool)) then
-  begin
-    DrawSpan(B, AFramesPerCol, AWidth, AClip.Position, AClip.Length, Attr,
-      AViewStart);
-    Exit;
-  end;
-
-  BinCount := Length(Project.SamplePeaks[AClip.SampleID].Maxs);
-  TotalFrameCount := Project.SamplePool[AClip.SampleID].FrameCount;
-  if (BinCount = 0) or (TotalFrameCount <= 0) then
-  begin
-    DrawSpan(B, AFramesPerCol, AWidth, AClip.Position, AClip.Length, Attr,
-      AViewStart);
-    Exit;
-  end;
-
-  StartCol := LabelWidth + ((AClip.Position - AViewStart) div AFramesPerCol);
-  ClipStartColUnclipped := StartCol;
-  EndCol := LabelWidth +
-    ((AClip.Position + AClip.Length - 1 - AViewStart) div AFramesPerCol);
-  if StartCol < LabelWidth then
-    StartCol := LabelWidth;
-  if EndCol > AWidth - 1 then
-    EndCol := AWidth - 1;
-  if EndCol < StartCol then
-    Exit;
-
-  RectWidth := AClip.Length div AFramesPerCol;
-  if RectWidth < 1 then
-    RectWidth := 1;
-
-  MidRow := ATrackHeight / 2;
-  HintK := 0; { fresh per row: each row is its own left-to-right sweep, and
-                WarpedSourcePosition's hint only helps within one }
-
-  for x := StartCol to EndCol do
-  begin
-    ColOffset := x - ClipStartColUnclipped;
-    TimelineFrame0 := (Int64(ColOffset) * AClip.Length) div RectWidth;
-    TimelineFrame1 := (Int64(ColOffset + 1) * AClip.Length) div RectWidth;
-    if TimelineFrame1 <= TimelineFrame0 then
-      TimelineFrame1 := TimelineFrame0 + 1;
-
-    if AClip.WarpMode = WarpModeDrag then
-    begin
-      ZonePos0 := DragZoneSourcePosition(AClip.DragZones, TimelineFrame0);
-      ZonePos1 := DragZoneSourcePosition(AClip.DragZones, TimelineFrame1 - 1);
-      if (ZonePos0 = DragZoneSilence) and
-         DragFrameInVacatedHole(AClip.DragZones, TimelineFrame0) and
-         DragFrameInVacatedHole(AClip.DragZones, TimelineFrame1 - 1) then
-        Continue;
-      if ZonePos0 = DragZoneSilence then
-        ZonePos0 := TimelineFrame0;
-      if ZonePos1 = DragZoneSilence then
-        ZonePos1 := TimelineFrame1 - 1;
-      SrcFrame0 := AClip.Offset + ZonePos0;
-      SrcFrame1 := AClip.Offset + ZonePos1 + 1;
-    end
-    else
-    begin
-      SrcFrame0 := AClip.Offset + WarpedSourcePosition(AClip.WarpMarkers,
-        TimelineFrame0, AudioEngine.ProjectSampleRate, AClip.WarpMode, @HintK);
-      SrcFrame1 := AClip.Offset + WarpedSourcePosition(AClip.WarpMarkers,
-        TimelineFrame1, AudioEngine.ProjectSampleRate, AClip.WarpMode, @HintK);
-    end;
-    if SrcFrame1 <= SrcFrame0 then
-      SrcFrame1 := SrcFrame0 + 1;
-
-    Bin0 := Trunc(SrcFrame0 * BinCount / TotalFrameCount);
-    if Bin0 < 0 then
-      Bin0 := 0;
-    if Bin0 >= BinCount then
-      Continue;
-    Bin1 := Trunc(SrcFrame1 * BinCount / TotalFrameCount);
-    if Bin1 <= Bin0 then
-      Bin1 := Bin0 + 1;
-    if Bin1 > BinCount then
-      Bin1 := BinCount;
-
-    MinV := Project.SamplePeaks[AClip.SampleID].Mins[Bin0];
-    MaxV := Project.SamplePeaks[AClip.SampleID].Maxs[Bin0];
-    for BinIdx := Bin0 + 1 to Bin1 - 1 do
-    begin
-      if Project.SamplePeaks[AClip.SampleID].Mins[BinIdx] < MinV then
-        MinV := Project.SamplePeaks[AClip.SampleID].Mins[BinIdx];
-      if Project.SamplePeaks[AClip.SampleID].Maxs[BinIdx] > MaxV then
-        MaxV := Project.SamplePeaks[AClip.SampleID].Maxs[BinIdx];
-    end;
-
-    Top := MidRow - MaxV * MidRow;
-    Bot := MidRow - MinV * MidRow;
-    if Bot < Top + 0.02 then
-      Bot := Top + 0.02; { silence still shows a hairline, not nothing }
-    MoveChar(B[x], WaveRowGlyph(Top - ASubRow, Bot - ASubRow), Attr, 1);
-  end;
 end;
 
 procedure TDysTimelineContent.Draw;
@@ -978,10 +878,12 @@ begin
         if (ResizeActive and (Track = ResizeTrack) and (i = ResizeClipIndex)) or
            (MoveActive and (Track = MoveTrack) and (i = MoveClipIndex)) then
           Continue;
-        DrawClipWaveSpan(B, FramesPerCol, Size.X, Project.Tracks[Track].Clips[i],
-          SubRow, TrackHeight, ViewStartFrame);
+        DrawSpan(B, FramesPerCol, Size.X, Project.Tracks[Track].Clips[i].Position,
+          Project.Tracks[Track].Clips[i].Length, TrackColorAttr(Track),
+          ViewStartFrame);
+        DrawClipStartMarker(B, FramesPerCol, Size.X,
+          Project.Tracks[Track].Clips[i].Position, ViewStartFrame);
       end;
-      DrawAdjoiningSeparators(B, Track, FramesPerCol, Size.X, ViewStartFrame);
 
       if Pending and (Track = CursorTrack) then
         DrawSpan(B, FramesPerCol, Size.X, CursorFrame, PendingLength, PendingAttr,
@@ -1299,14 +1201,14 @@ begin
         end;
       'h', 'H':
         begin
-          { Cycle the track row height 1/2/3 - see DysWidgets.TrackHeight
-            and the header comment on why waveforms need more than one row
-            to be legible. A taller block can push the cursor's own track
-            off-screen even though CursorTrack itself didn't move, so this
-            re-runs the same visibility check Up/Down use. }
-          CycleTrackHeight;
-          EnsureTrackVisible(CursorTrack);
-          DrawView;
+          { Cycle the track row height 1/2/3 - same as the toolbar's H:n
+            button next to the interval selector (DysWidgets.HeightBtn) -
+            both go through DysCycleTrackHeight so there's one place that
+            keeps the cursor's track visible after a taller block could
+            have pushed it off-screen. }
+          DysCycleTrackHeight;
+          if ActiveToolBar <> nil then
+            ActiveToolBar^.UpdateButtons;
           ClearEvent(Event);
           Exit;
         end;
@@ -1687,6 +1589,171 @@ begin
   ActiveTimelineContent^.DrawView;
 end;
 
+{ Inverse of DysChopMarkedClipRegion's own left-ripple: splits the
+  CURRENTLY MARKED clip at AAtSourceFrame (absolute source-domain, same
+  convention as that function's AStartSource/AEndSource) and inserts a
+  brand new clip [ASampleID,AOffset,ALength) between the two halves,
+  rippling every OTHER clip on the track whose Position is at or past the
+  split point rightward by ALength to make room. Shared by Ctrl+D
+  (DysDuplicateWaveformSelection - duplicates the waveform pane's current
+  selection immediately after itself) and Ctrl+V
+  (DysPasteWaveformClipboard - pastes at the pane's click-set insertion
+  cursor). Same "only a plain unwarped clip" restriction as the chop, for
+  the same reason: source and timeline frames need to advance 1:1 for
+  AAtSourceFrame to translate into a timeline position at all. }
+procedure DysInsertIntoMarkedClip(AAtSourceFrame: Int64; ASampleID: Integer;
+  AOffset, ALength: Int64);
+var
+  Track, ClipIdx: Integer;
+  Original, LeftPart, MiddlePart, RightPart: TClip;
+  ClipStart, ClipEnd, SplitPos: Int64;
+  HaveLeft, HaveRight: Boolean;
+  NewClips: TClipArray;
+  i, k: Integer;
+begin
+  if (ActiveTimelineContent = nil) or (ALength <= 0) then
+    Exit;
+  Track := ActiveTimelineContent^.MarkedTrack;
+  ClipIdx := ActiveTimelineContent^.MarkedClipIndex;
+  if (Track < 0) or (Track > High(Project.Tracks)) then
+    Exit;
+  if (ClipIdx < 0) or (ClipIdx > High(Project.Tracks[Track].Clips)) then
+    Exit;
+  Original := Project.Tracks[Track].Clips[ClipIdx];
+  if Length(Original.WarpMarkers) >= 2 then
+  begin
+    MessageBox('Editing a time-warped clip''s waveform this way is not ' +
+      'supported yet - only a plain, unwarped clip can be chopped.', nil,
+      mfError or mfOKButton);
+    Exit;
+  end;
+
+  ClipStart := Original.Offset;
+  ClipEnd := Original.Offset + Original.Length;
+  if AAtSourceFrame < ClipStart then
+    AAtSourceFrame := ClipStart;
+  if AAtSourceFrame > ClipEnd then
+    AAtSourceFrame := ClipEnd;
+
+  HaveLeft := AAtSourceFrame > ClipStart;
+  HaveRight := AAtSourceFrame < ClipEnd;
+  SplitPos := Original.Position + (AAtSourceFrame - ClipStart);
+
+  if HaveLeft then
+  begin
+    LeftPart := Original;
+    LeftPart.Length := AAtSourceFrame - ClipStart;
+  end;
+
+  FillChar(MiddlePart, SizeOf(MiddlePart), 0);
+  MiddlePart.SampleID := ASampleID;
+  MiddlePart.Offset := AOffset;
+  MiddlePart.Length := ALength;
+  MiddlePart.Position := SplitPos;
+  MiddlePart.TrackID := Track;
+  MiddlePart.Gain := 1.0;
+  MiddlePart.PitchSemitones := 0;
+  MiddlePart.WarpMode := WarpModeBeats;
+
+  if HaveRight then
+  begin
+    RightPart := Original;
+    RightPart.Offset := AAtSourceFrame;
+    RightPart.Length := ClipEnd - AAtSourceFrame;
+    RightPart.Position := SplitPos + ALength;
+  end;
+
+  SetLength(NewClips, Length(Project.Tracks[Track].Clips) +
+    1 + Ord(HaveLeft) + Ord(HaveRight) - 1);
+  k := 0;
+  for i := 0 to High(Project.Tracks[Track].Clips) do
+  begin
+    if i = ClipIdx then
+    begin
+      if HaveLeft then
+      begin
+        NewClips[k] := LeftPart;
+        Inc(k);
+      end;
+      NewClips[k] := MiddlePart;
+      Inc(k);
+      if HaveRight then
+      begin
+        NewClips[k] := RightPart;
+        Inc(k);
+      end;
+    end
+    else
+    begin
+      { An unrelated clip on the same track: ripple it right if it started
+        at or past the split point - RightPart (above) is already at its
+        final post-insert position and is handled in the `if i = ClipIdx`
+        branch instead, so it's never seen here and can't be double-shifted. }
+      NewClips[k] := Project.Tracks[Track].Clips[i];
+      if NewClips[k].Position >= SplitPos then
+        Inc(NewClips[k].Position, ALength);
+      Inc(k);
+    end;
+  end;
+  Project.ReplaceTrackClips(Track, NewClips);
+  PushTrackToEngine(Track);
+
+  { Same "clear the mark, press 'k' again" convention as the chop - the
+    marked clip just became two or three different clips, none of which is
+    unambiguously "the same one" to keep showing. }
+  ActiveTimelineContent^.MarkedTrack := -1;
+  ActiveTimelineContent^.MarkedClipIndex := -1;
+  if Assigned(SetWaveformClipProc) then
+    SetWaveformClipProc(-1, 0, 0, 0, 0, 0, -1, -1);
+  ActiveTimelineContent^.DrawView;
+end;
+
+{ Ctrl+D on the waveform pane - see tui.md's Bindings and
+  DysCopyWaveformSelection's own comment on why this lives here rather
+  than in DysEffectsRack. Duplicates the CURRENT SELECTION (not the
+  clipboard - same "act on what's selected, not what was last copied"
+  distinction the timeline's own Ctrl+D already draws) immediately after
+  itself, Ableton-style, same as DuplicateClipUnderCursor. }
+procedure DysDuplicateWaveformSelection;
+var
+  SelStart, SelEnd: Int64;
+  SelSampleID: Integer;
+begin
+  if (ActiveBottomPane = nil) or (ActiveBottomPane^.WaveformView = nil) then
+    Exit;
+  with ActiveBottomPane^.WaveformView^ do
+  begin
+    if (not SelActive) or (SampleID < 0) then
+      Exit;
+    SelStart := SelStartFrame;
+    SelEnd := SelEndFrame;
+    SelSampleID := SampleID;
+  end;
+  DysInsertIntoMarkedClip(SelEnd, SelSampleID, SelStart, SelEnd - SelStart);
+end;
+
+{ Ctrl+V on the waveform pane - pastes DysCopyWaveformSelection's clipboard
+  at the pane's own click-set insertion cursor (CursorActive/CursorFrame -
+  see that field's comment). Does nothing (rather than guessing a
+  position) if either is missing. }
+procedure DysPasteWaveformClipboard;
+var
+  AtFrame, ClipOffset, ClipLength: Int64;
+  ClipSampleID: Integer;
+begin
+  if (ActiveBottomPane = nil) or (ActiveBottomPane^.WaveformView = nil) then
+    Exit;
+  if not DysGetWaveClipboard(ClipSampleID, ClipOffset, ClipLength) then
+    Exit;
+  with ActiveBottomPane^.WaveformView^ do
+  begin
+    if not CursorActive then
+      Exit;
+    AtFrame := CursorFrame;
+  end;
+  DysInsertIntoMarkedClip(AtFrame, ClipSampleID, ClipOffset, ClipLength);
+end;
+
 procedure TDysTimelineContent.SolidifyResize;
 begin
   if not ResizeActive then
@@ -1895,5 +1962,6 @@ initialization
   FinalizeRecordingProc := @DysFinalizeRecording;
   SeekPlaybackToCursorProc := @DysSeekPlaybackToCursor;
   ChopWaveformSelectionProc := @DysChopMarkedClipRegion;
+  CycleTrackHeightProc := @DysCycleTrackHeight;
 
 end.

@@ -21,6 +21,7 @@ const
   cmTransportPlay   = 2003;
   cmTransportRecord = 2004;
   cmCycleInterval   = 2005;
+  cmCycleTrackHeight = 2006;
   cmDropdownStub    = 2006;
 
   { Ctrl+Enter can never actually reach this app from a real terminal -
@@ -71,7 +72,7 @@ type
   PDysToolBar = ^TDysToolBar;
   TDysToolBar = object(TGroup)
     Tempo: PInputLine;
-    MetronomeBtn, StopBtn, PlayBtn, RecordBtn, IntervalBtn: PButton;
+    MetronomeBtn, StopBtn, PlayBtn, RecordBtn, IntervalBtn, HeightBtn: PButton;
     MetronomeOn, Playing: Boolean;
     IntervalIdx: Integer;
     constructor Init(Bounds: TRect);
@@ -160,6 +161,17 @@ var
 var
   SeekPlaybackToCursorProc: procedure = nil;
 
+{ Same circularity as the callbacks above: the toolbar's height button
+  (next to IntervalBtn - see HeightBtn/cmCycleTrackHeight) needs more than
+  just DysWidgets.CycleTrackHeight itself, since a taller block can push
+  the timeline cursor's own track off-screen - it also has to re-run
+  DysTimeline.TDysTimelineContent.EnsureTrackVisible and redraw both the
+  grid and the track pane, exactly like the 'h'/'H' key on the timeline
+  does. DysTimeline's own `initialization` section points this at the real
+  implementation. }
+var
+  CycleTrackHeightProc: procedure = nil;
+
 { Called from DysTimeline.TDysTimelineContent.MarkClipUnderCursor (the 'k'
   key) to hand the marked clip off to the bottom pane's waveform widget -
   same circularity as the two callbacks above (DysTimeline `uses
@@ -209,7 +221,7 @@ const
   panes must render off the exact same value or the "track number lines
   up with the top row of its block" alignment breaks. }
 var
-  TrackHeight: Integer = 1;
+  TrackHeight: Integer = 3;
   { First track drawn at the top of the grid (row 1, just under the
     ruler) - vertical scroll in TRACK units, not screen rows. Changed only
     from DysTimeline (Up/Down following the cursor, PageUp/PageDown) per
@@ -221,6 +233,14 @@ var
 { Cycles TrackHeight through 1/2/3 and returns the new value - same shape
   as WaveformDraw.CycleWaveformGridDivision (src/ui) in the GUI. }
 function CycleTrackHeight: Integer;
+
+{ 'H:' plus the current TrackHeight, for HeightBtn's caption - a plain
+  function rather than IntToStr inline at the call site because this
+  unit's implementation section deliberately does not `uses SysUtils` (see
+  the comment just above `implementation`: it would shadow Objects.NewStr,
+  which TDysToolBar.SetTitle needs), so this uses Str() instead, same as
+  DysEffectsRack's own IdStr/GainStr. }
+function TrackHeightLabel: string;
 
 { The screen row (0 = the seconds ruler) the TOP of ATrack's block sits
   on, given the current TrackHeight/ViewStartTrack - the one formula both
@@ -404,11 +424,21 @@ begin
   Insert(RecordBtn);
   X := X + 6;
 
-  IntervalIdx := 0;
+  IntervalIdx := 2; { 1/16 - see IntervalNames; also the bottom waveform
+                       pane's default grid, DysEffectsRack.DysWaveGridStepFrames }
   R.Assign(X, 0, X + 6, 1);
-  IntervalBtn := New(PButton, Init(R, IntervalNames[0], cmCycleInterval,
+  IntervalBtn := New(PButton, Init(R, IntervalNames[IntervalIdx], cmCycleInterval,
     bfNormal));
   Insert(IntervalBtn);
+  X := X + 7;
+
+  { Right next to the interval (cursor movement/grid step) button - same
+    "cycle on click, caption shows the current value" shape, for
+    DysWidgets.TrackHeight/CycleTrackHeight rather than IntervalIdx. }
+  R.Assign(X, 0, X + 4, 1);
+  HeightBtn := New(PButton, Init(R, TrackHeightLabel, cmCycleTrackHeight,
+    bfNormal));
+  Insert(HeightBtn);
 
   ActiveToolBar := @Self;
   { Was hardcoded to the text '120.0' regardless of Project.TempoBPM's own
@@ -447,6 +477,7 @@ begin
     sync with reality the moment that happened; reading the engine's own
     state directly on every Idle pass can't drift). }
   SetTitle(IntervalBtn, IntervalNames[IntervalIdx]);
+  SetTitle(HeightBtn, TrackHeightLabel);
 end;
 
 { Mirrors MainForm.PlayPauseClick: Stop wins if already playing, otherwise
@@ -687,6 +718,15 @@ begin
           IntervalIdx := (IntervalIdx + 1) mod Length(IntervalNames);
           UpdateButtons;
         end;
+      cmCycleTrackHeight:
+        begin
+          if Assigned(CycleTrackHeightProc) then
+            CycleTrackHeightProc
+          else
+            CycleTrackHeight; { no timeline yet - still update the shared
+                                 value/caption, just nothing to re-scroll }
+          UpdateButtons;
+        end;
     else
       Exit;
     end;
@@ -738,10 +778,28 @@ begin
   Result := 1 + (ATrack - ViewStartTrack) * TrackHeight;
 end;
 
+function TrackHeightLabel: string;
+var
+  HStr: string;
+begin
+  Str(TrackHeight, HStr);
+  Result := 'H:' + HStr;
+end;
+
+{ Deliberately only 2 levels (full block or blank), not the 4-level full/
+  half/sliver ramp this used to be: a real signal's noise floor between
+  drum hits is never EXACTLY zero, so the old sliver tier ('.'/'`' for
+  anything covering under 40% of a row) lit up on almost every quiet
+  column, not just genuinely loud ones - across a busy break every row
+  chattered with punctuation and the whole clip read as static rather than
+  a shape with peaks in it. A hard 50% threshold means a row is either
+  clearly hit or clearly not, so the ear-relevant question ("where's the
+  kick/snare/hat, where can I chop") reads at a glance instead of needing
+  to squint at texture. See DysTimeline.DrawClipWaveSpan for the transient
+  tick marks that do the actual "where exactly to chop" job on top of this. }
 function WaveRowGlyph(ATop, ABot: Double): Char;
 var
-  OverlapTop, OverlapBot, Frac: Double;
-  FillsFromTop: Boolean;
+  OverlapTop, OverlapBot: Double;
 begin
   OverlapTop := ATop;
   if OverlapTop < 0 then
@@ -751,21 +809,10 @@ begin
     OverlapBot := 1;
   if OverlapBot <= OverlapTop then
     Exit(' ');
-  Frac := OverlapBot - OverlapTop;
-  if Frac >= 0.9 then
-    Exit(Chr(219)); { full block }
-  FillsFromTop := OverlapTop <= (1 - OverlapBot);
-  if Frac >= 0.4 then
-  begin
-    if FillsFromTop then
-      Exit(Chr(223)) { upper half block }
-    else
-      Exit(Chr(220)); { lower half block }
-  end;
-  if FillsFromTop then
-    Exit('''')
+  if OverlapBot - OverlapTop >= 0.5 then
+    Exit(Chr(219)) { full block }
   else
-    Exit('.');
+    Exit(' ');
 end;
 
 end.

@@ -182,6 +182,13 @@ type
     Peaks: TWaveformPeaks;
     SelActive: Boolean;
     SelStartFrame, SelEndFrame: Int64; { absolute source-domain frames }
+    { The paste/insertion point - a plain click (no drag) outside any
+      existing selection sets this instead, so Ctrl+V has somewhere
+      unambiguous to land. Mutually exclusive with SelActive: a real
+      drag-selection clears this, and a plain click clears SelActive - see
+      HandleEvent. Also absolute source-domain, same as SelStartFrame. }
+    CursorActive: Boolean;
+    CursorFrame: Int64;
     { Which Project.Tracks[MarkedTrackIdx].Clips[MarkedClipIdx] this is -
       see SetWaveformClipProc's own comment on why the playhead needs this
       instead of a cached Position. -1/-1 = nothing marked. }
@@ -232,6 +239,32 @@ type
   end;
 
 function DysEffectKindName(AKind: Integer): string;
+
+{ Ctrl+C/Ctrl+V/Ctrl+D on the waveform pane's own drag-selection - see
+  tui.md's Bindings. Like Delete (DysnomiaApp.pas's cmEditDelete case),
+  Ctrl+C/V/D are Free Vision menu-bar hotkeys (see InitMenuBar) that
+  TMenuBar intercepts in phPreProcess BEFORE any focused subview - here,
+  TDysWaveformContent - ever sees the raw key, so there is no HandleEvent
+  case for them in this unit; DysnomiaApp's own cmEditCopy/cmEditPaste/
+  cmEditDuplicate route here (or to DysTimeline's clip-level equivalents)
+  depending on whether the waveform pane is showing AND has a selection,
+  same precedence Delete already established.
+
+  Copy needs no Project mutation - just remembers which sample/span was
+  selected - so it lives here, entirely local to this unit, unlike
+  Duplicate/Paste (DysTimeline.DysDuplicateWaveformSelection/
+  DysPasteWaveformClipboard) which have to splice the marked clip and so
+  belong where the rest of that clip-surgery machinery
+  (DysChopMarkedClipRegion) already lives. Returns False (does nothing) if
+  there's no active selection to copy. }
+function DysCopyWaveformSelection: Boolean;
+
+{ The other half of DysCopyWaveformSelection - DysTimeline.
+  DysPasteWaveformClipboard reads the clipboard through this rather than
+  reaching into this unit's own private vars directly. Returns False (and
+  leaves the out params untouched) if nothing has been copied yet. }
+function DysGetWaveClipboard(out ASampleID: Integer;
+  out AOffset, ALength: Int64): Boolean;
 
 { Set once, by TDysEffectsContent.Init - there is exactly one effects
   content view in this single-window app, same "global points at the one
@@ -353,6 +386,40 @@ begin
   end;
 end;
 
+{ See the interface declarations' own comments. -1/0/0 = nothing copied. }
+var
+  WaveClipboardSampleID: Integer = -1;
+  WaveClipboardOffset: Int64 = 0;
+  WaveClipboardLength: Int64 = 0;
+
+function DysCopyWaveformSelection: Boolean;
+begin
+  Result := False;
+  if (ActiveBottomPane = nil) or (ActiveBottomPane^.WaveformView = nil) then
+    Exit;
+  with ActiveBottomPane^.WaveformView^ do
+  begin
+    if (not SelActive) or (SampleID < 0) then
+      Exit;
+    WaveClipboardSampleID := SampleID;
+    WaveClipboardOffset := SelStartFrame;
+    WaveClipboardLength := SelEndFrame - SelStartFrame;
+  end;
+  Result := True;
+end;
+
+function DysGetWaveClipboard(out ASampleID: Integer;
+  out AOffset, ALength: Int64): Boolean;
+begin
+  Result := (WaveClipboardSampleID >= 0) and (WaveClipboardLength > 0);
+  if Result then
+  begin
+    ASampleID := WaveClipboardSampleID;
+    AOffset := WaveClipboardOffset;
+    ALength := WaveClipboardLength;
+  end;
+end;
+
 function DysWarpModeName(AMode: Integer): string;
 begin
   case AMode of
@@ -381,6 +448,53 @@ const
     as "the same concept" rather than two different conventions. }
   WavePlayheadAttr = $4F;
   WavePlayheadChar = '|';
+  { A faint marker, not the bright '|' ruler tick a real playhead/selection
+    gets - see DysWaveGridStepFrames/DrawGridCols below. Dark grey on black,
+    same byte as DysTimeline.ClipStartAttr, so both read as "a quiet
+    structural line" rather than anything carrying its own meaning. Drawn
+    only where the waveform itself is otherwise blank (silence) - see
+    Draw's own row loop - so it never competes with the actual signal. }
+  WaveGridAttr = $08;
+  WaveGridChar = ':';
+  { The "you are here" paste point - see CursorActive/CursorFrame. Bright
+    cyan so it's unmistakably a DIFFERENT thing from the selection (grey
+    reverse-video), the playhead (red) and the grid (dark grey). }
+  WaveCursorAttr = $0B;
+  WaveCursorChar = '^';
+
+{ Same grid the toolbar's interval button drives for the timeline's own
+  Left/Right nudge (DysTimeline.TDysTimelineContent.GridStepFrames) -
+  duplicated here rather than exported from DysTimeline, since DysTimeline
+  already `uses DysEffectsRack` (for the waveform-selection edit commands -
+  see DysTimeline.DysCopyWaveformSelection and friends) and the reverse
+  import would be circular. BarFrames' own formula (4/4 only, no time
+  signature in Project.pas) is copied alongside it for the same reason. }
+function DysWaveGridStepFrames: Int64;
+var
+  BarFrames: Int64;
+begin
+  if Project.TempoBPM <= 0 then
+  begin
+    Result := 0;
+    Exit;
+  end;
+  BarFrames := Round((AudioEngine.ProjectSampleRate * 60) / Project.TempoBPM) * 4;
+  if ActiveToolBar = nil then
+  begin
+    Result := BarFrames div 4;
+    Exit;
+  end;
+  case ActiveToolBar^.IntervalIdx of
+    0: Result := BarFrames div 4;  { 1/4 }
+    1: Result := BarFrames div 8;  { 1/8 }
+    2: Result := BarFrames div 16; { 1/16 }
+    3: Result := BarFrames;        { 1 bar }
+  else
+    Result := BarFrames div 4;
+  end;
+  if Result <= 0 then
+    Result := 0;
+end;
 
 constructor TDysWaveformContent.Init(Bounds: TRect);
 begin
@@ -397,6 +511,8 @@ begin
   SelActive := False;
   SelStartFrame := 0;
   SelEndFrame := 0;
+  CursorActive := False;
+  CursorFrame := 0;
   MarkedTrackIdx := -1;
   MarkedClipIdx := -1;
   PlayheadActive := False;
@@ -455,10 +571,11 @@ begin
   MarkedClipIdx := AClipIdx;
   PlayheadActive := False;
   { A previous selection's column mapping is only valid against the OLD
-    ClipOffset/ClipLength/Size.X - clear it rather than let a stale
-    SelStartFrame/SelEndFrame appear to point somewhere in a different
-    clip's own data. }
+    ClipOffset/ClipLength/Size.X - clear it (and the paste cursor, same
+    reasoning) rather than let a stale SelStartFrame/SelEndFrame/
+    CursorFrame appear to point somewhere in a different clip's own data. }
   SelActive := False;
+  CursorActive := False;
 
   Peaks.Mins := nil;
   Peaks.Maxs := nil;
@@ -489,19 +606,23 @@ end;
   so DysTimeline's inline per-clip waveform can share it too - see that
   unit for the CP437/half-block reasoning. }
 
-{ Row 1's ruler: a tick ('|') plus an mm:ss label (relative to the clip's
-  OWN start, not the underlying sample file's) every StepCols columns, or
-  wider if the label itself wouldn't otherwise fit before the next tick -
-  fvdoc.md's own "MoveStr at a tick column consumes more than one cell"
-  note on why the loop must advance by the label's length, not just 1, once
-  it writes one. AudioEngine.ProjectSampleRate is a plain constant (44100)
-  - see that unit - so this needs no engine state, only ClipLength/Size.X,
-  same domain ColToSourceFrame/FrameToCol already work in. }
+{ Row 1's ruler: a tick ('|') at every DysWaveGridStepFrames boundary - the
+  SAME grid the toolbar's interval button drives everywhere else (the
+  timeline's own Left/Right nudge, GridStepFrames) - instead of the old
+  fixed-every-10-columns mm:ss ruler. An mm:ss label (relative to the
+  clip's OWN start, not the underlying sample file's) rides along at
+  whichever of those ticks have room for one; at a fine grid (1/16 at a
+  fast tempo, low zoom) most ticks are only a column or two apart, far too
+  close for text, so labels are throttled to whenever enough columns have
+  passed since the last one - every tick still gets its own '|', just not
+  every tick gets a label. Falls back to the old fixed-StepCols behaviour
+  when DysWaveGridStepFrames can't be computed (no tempo yet). }
 procedure TDysWaveformContent.DrawRuler(var B: TDrawBuffer; AAttr: Word);
 const
   StepCols = 10;
 var
-  Col: Integer;
+  Col, LastLabelCol, k, IterCap: Integer;
+  Step: Int64;
   SecPerCol, Seconds: Double;
   Mins, Secs: Integer;
   MinStr, SecStr, Lbl: string;
@@ -510,8 +631,41 @@ begin
   if (ClipLength <= 0) or (Size.X <= 0) then
     Exit;
   SecPerCol := (ClipLength / AudioEngine.ProjectSampleRate) / Size.X;
-  Col := 0;
-  while Col < Size.X do
+  Step := DysWaveGridStepFrames;
+  LastLabelCol := -1000;
+
+  if Step <= 0 then
+  begin
+    Col := 0;
+    while Col < Size.X do
+    begin
+      MoveChar(B[Col], '|', AAttr, 1);
+      Seconds := Col * SecPerCol;
+      Mins := Trunc(Seconds) div 60;
+      Secs := Trunc(Seconds) mod 60;
+      Str(Mins, MinStr);
+      Str(Secs, SecStr);
+      if Length(SecStr) < 2 then
+        SecStr := '0' + SecStr;
+      Lbl := MinStr + ':' + SecStr;
+      if Col + 1 + Length(Lbl) <= Size.X then
+        MoveStr(B[Col + 1], Lbl, AAttr);
+      Inc(Col, Max(StepCols, 2 + Length(Lbl)));
+    end;
+    Exit;
+  end;
+
+  { A fine grid (1/16 at a fast tempo, zoomed out) can pack far more grid
+    steps into ClipLength than there are columns to put them in - many k's
+    then land on the same Col, and without a cap the loop would keep
+    grinding through every one of them for no visible change. Size.X*4 is
+    generous headroom (each column could still get a handful of steps
+    before this kicks in) while keeping the worst case a small multiple of
+    the terminal width instead of ClipLength/Step. }
+  IterCap := Size.X * 4 + 16;
+  k := 0;
+  Col := FrameToCol(ClipOffset);
+  while (Col < Size.X) and (k < IterCap) do
   begin
     MoveChar(B[Col], '|', AAttr, 1);
     Seconds := Col * SecPerCol;
@@ -522,9 +676,14 @@ begin
     if Length(SecStr) < 2 then
       SecStr := '0' + SecStr;
     Lbl := MinStr + ':' + SecStr;
-    if Col + 1 + Length(Lbl) <= Size.X then
+    if (Col - LastLabelCol >= 2 + Length(Lbl)) and
+       (Col + 1 + Length(Lbl) <= Size.X) then
+    begin
       MoveStr(B[Col + 1], Lbl, AAttr);
-    Inc(Col, Max(StepCols, 2 + Length(Lbl)));
+      LastLabelCol := Col;
+    end;
+    Inc(k);
+    Col := FrameToCol(ClipOffset + k * Step);
   end;
 end;
 
@@ -574,11 +733,13 @@ end;
 procedure TDysWaveformContent.Draw;
 var
   B: TDrawBuffer;
-  Row, Col, WaveRows, BinCount, BinLo, BinHi, i: Integer;
+  Row, Col, WaveRows, BinCount, BinLo, BinHi, i, k, IterCap: Integer;
   MidRow, MinV, MaxV, Top, Bot: Double;
   Hdr, IdStr, GainStr, DetuneStr: string;
   C, SelC: Word;
-  SelColStart, SelColEnd, PlayheadCol: Integer;
+  SelColStart, SelColEnd, PlayheadCol, CursorCol: Integer;
+  GridStep: Int64;
+  GridCols: array of Boolean;
 begin
   C := GetColor(1);
   SelC := WaveSelectionAttr;
@@ -620,6 +781,29 @@ begin
       SelColEnd := SelColStart + 1;
   end;
 
+  { Faint grid columns through the wave rows themselves, same
+    DysWaveGridStepFrames the ruler ticks off - computed once here (not
+    per-row) since it's the same set of columns on every row. Same
+    IterCap safety as DrawRuler: a fine grid at low zoom can pack far more
+    steps into ClipLength than there are columns for. }
+  SetLength(GridCols, Size.X);
+  for Col := 0 to Size.X - 1 do
+    GridCols[Col] := False;
+  GridStep := DysWaveGridStepFrames;
+  if (GridStep > 0) and (ClipLength > 0) then
+  begin
+    IterCap := Size.X * 4 + 16;
+    k := 0;
+    Col := FrameToCol(ClipOffset);
+    while (Col < Size.X) and (k < IterCap) do
+    begin
+      if (Col >= 0) and (Col < Size.X) then
+        GridCols[Col] := True;
+      Inc(k);
+      Col := FrameToCol(ClipOffset + k * GridStep);
+    end;
+  end;
+
   BinCount := Length(Peaks.Maxs);
   MidRow := WaveRows / 2;
   for Row := 0 to WaveRows - 1 do
@@ -652,13 +836,29 @@ begin
         Bot := MidRow - MinV * MidRow;
         if Bot < Top + 0.02 then
           Bot := Top + 0.02; { silence still shows a hairline, not nothing }
-        if (Col >= SelColStart) and (Col < SelColEnd) then
+        if (WaveRowGlyph(Top - Row, Bot - Row) = ' ') and GridCols[Col] then
+        begin
+          { Blank cell on a grid column - show the faint grid tick instead
+            of empty space, still tinted with the selection colour if
+            selected so the grid doesn't visually poke through a selection. }
+          if (Col >= SelColStart) and (Col < SelColEnd) then
+            MoveChar(B[Col], WaveGridChar, SelC, 1)
+          else
+            MoveChar(B[Col], WaveGridChar, WaveGridAttr, 1);
+        end
+        else if (Col >= SelColStart) and (Col < SelColEnd) then
           MoveChar(B[Col], WaveRowGlyph(Top - Row, Bot - Row), SelC, 1)
         else
           MoveChar(B[Col], WaveRowGlyph(Top - Row, Bot - Row), C, 1);
       end;
     if (PlayheadCol >= 0) and (PlayheadCol < Size.X) then
       MoveChar(B[PlayheadCol], WavePlayheadChar, WavePlayheadAttr, 1);
+    if (not SelActive) and CursorActive and (ClipLength > 0) then
+    begin
+      CursorCol := FrameToCol(CursorFrame);
+      if (CursorCol >= 0) and (CursorCol < Size.X) then
+        MoveChar(B[CursorCol], WaveCursorChar, WaveCursorAttr, 1);
+    end;
     WriteLine(0, WaveTopRow + Row, Size.X, 1, B);
   end;
 end;
@@ -701,6 +901,13 @@ begin
         SelEndFrame := Tmp;
       end;
       SelActive := SelEndFrame > SelStartFrame;
+      { A plain click (no drag - SelActive came out False above) sets the
+        paste cursor instead, so Ctrl+V has somewhere unambiguous to land -
+        see CursorActive's own field comment. A real drag-selection clears
+        it, so the two markers are never both showing at once. }
+      CursorActive := not SelActive;
+      if CursorActive then
+        CursorFrame := SelStartFrame;
       DrawView;
     end;
     ClearEvent(Event);

@@ -672,13 +672,32 @@ begin
           FullScreenRefresh;
         end;
       cmEditCopy:
-        if Timeline <> nil then
-          Timeline^.Content^.CopyClipUnderCursor;
+        { Same routing as cmEditDelete below: Ctrl+C/V/D are menu-bar
+          hotkeys too (see InitMenuBar), so TMenuBar intercepts them before
+          TDysWaveformContent ever sees the raw key - this is the one place
+          each is handled. A waveform drag-selection wins over the
+          timeline's own clip-under-cursor Copy whenever the bottom pane is
+          showing the waveform AND has a selection; otherwise falls back to
+          the timeline as before. }
+        if not ((ActiveBottomPane <> nil) and ActiveBottomPane^.ShowingWaveform and
+          (ActiveBottomPane^.WaveformView <> nil) and
+          ActiveBottomPane^.WaveformView^.SelActive and
+          DysCopyWaveformSelection) then
+          if Timeline <> nil then
+            Timeline^.Content^.CopyClipUnderCursor;
       cmEditPaste:
-        if Timeline <> nil then
+        if (ActiveBottomPane <> nil) and ActiveBottomPane^.ShowingWaveform and
+          (ActiveBottomPane^.WaveformView <> nil) and
+          ActiveBottomPane^.WaveformView^.CursorActive then
+          DysPasteWaveformClipboard
+        else if Timeline <> nil then
           Timeline^.Content^.PasteClipAtCursor;
       cmEditDuplicate:
-        if Timeline <> nil then
+        if (ActiveBottomPane <> nil) and ActiveBottomPane^.ShowingWaveform and
+          (ActiveBottomPane^.WaveformView <> nil) and
+          ActiveBottomPane^.WaveformView^.SelActive then
+          DysDuplicateWaveformSelection
+        else if Timeline <> nil then
           Timeline^.Content^.DuplicateClipUnderCursor;
       cmEditSplit:
         if Timeline <> nil then
