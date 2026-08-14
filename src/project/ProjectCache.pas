@@ -98,8 +98,12 @@ const
     warping two ways depending on nothing but cache state. Bumping forces
     every existing entry to be recomputed once, after which hits and misses
     agree again. Raise this whenever any of the three cached analyses
-    changes its output for the same input, for the same reason. }
-  CacheVersion = 2;
+    changes its output for the same input, for the same reason.
+    3: per-clip binary layout gained a DragZones block (WarpModeDrag) right
+    after WarpMarkers - an old-version cache is a byte-for-byte different
+    shape, not just different analysis output, so it must be rejected
+    outright rather than misparsed; the version check does that. }
+  CacheVersion = 3;
 
   FnvOffset: QWord = QWord(14695981039346656037);
   FnvPrime: QWord = QWord(1099511628211);
@@ -227,6 +231,13 @@ begin
             WrInt64(Mem, Clips[c].WarpMarkers[m].SourceFrame);
             WrInt64(Mem, Clips[c].WarpMarkers[m].TimelineFrame);
           end;
+          WrInt32(Mem, Length(Clips[c].DragZones));
+          for m := 0 to High(Clips[c].DragZones) do
+          begin
+            WrInt64(Mem, Clips[c].DragZones[m].SourceStart);
+            WrInt64(Mem, Clips[c].DragZones[m].SourceEnd);
+            WrInt64(Mem, Clips[c].DragZones[m].Shift);
+          end;
         end;
       end;
 
@@ -348,8 +359,8 @@ var
   Buf: array of Byte;
   R: TCacheReader;
   Magic: array[0..7] of AnsiChar;
-  Version, TrackCount, ClipCount, MarkerCount, SampleCount, PeakCount,
-    TransientCount: LongInt;
+  Version, TrackCount, ClipCount, MarkerCount, DragZoneCount, SampleCount,
+    PeakCount, TransientCount: LongInt;
   t, c, m, i: Integer;
   Stream: TFileStream;
 begin
@@ -417,6 +428,16 @@ begin
       begin
         if not RdInt64(R, AData.Tracks[t][c].WarpMarkers[m].SourceFrame) then Exit;
         if not RdInt64(R, AData.Tracks[t][c].WarpMarkers[m].TimelineFrame) then Exit;
+      end;
+
+      if not RdCount(R, 3 * SizeOf(Int64), MaxCacheMarkersPerClip, DragZoneCount) then
+        Exit;
+      SetLength(AData.Tracks[t][c].DragZones, DragZoneCount);
+      for m := 0 to DragZoneCount - 1 do
+      begin
+        if not RdInt64(R, AData.Tracks[t][c].DragZones[m].SourceStart) then Exit;
+        if not RdInt64(R, AData.Tracks[t][c].DragZones[m].SourceEnd) then Exit;
+        if not RdInt64(R, AData.Tracks[t][c].DragZones[m].Shift) then Exit;
       end;
     end;
   end;

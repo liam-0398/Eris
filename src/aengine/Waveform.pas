@@ -58,7 +58,25 @@ function DetectFundamentalPeriod(AData: PSingle; AFrameCount, AChannels,
   - it is validated and reset - but gains nothing). }
 function WarpedSourcePosition(const AMarkers: TWarpMarkerArray;
   ATimelineFrame: Int64; ASampleRate: Integer = 44100;
-  AWarpMode: Integer = WarpModeBeats; AHintK: PInteger = nil): Double;
+  AWarpMode: Integer = WarpModeBeats; AHintK: PInteger = nil;
+  const AZones: TDragZoneArray = nil): Double;
+
+{ Drag ("D") mode's own nominal timeline -> source map, kept separate from
+  WarpedSourcePosition above because a drag zone (source span + timeline
+  shift) isn't representable as a TWarpMarker pair - there is no continuous
+  rate to interpolate, playback inside a zone is a flat 1:1 offset and the
+  gaps between zones are not "the warp", they are silence. AZones must be
+  sorted ascending by rendered start and non-overlapping - see WarpEditor's
+  overlap trim, which is what keeps that true.
+
+  Returns the source frame (clip-relative, like WarpedSourcePosition) when
+  ATimelineFrame falls inside a zone, or DragZoneSilence when it falls in a
+  gap - callers (waveform drawing, DragZoneSourceSample) must check for that
+  sentinel rather than treating it as a real position. }
+const
+  DragZoneSilence = -1;
+function DragZoneSourcePosition(const AZones: TDragZoneArray;
+  ATimelineFrame: Int64): Int64;
 
 { The audio-producing warp entry point: Ableton-style Beats (a sum over the
   transient slices sounding at ATimelineFrame - see the implementation) or a
@@ -71,7 +89,16 @@ function WarpedSourceSample(const AMarkers: TWarpMarkerArray;
   ATimelineFrame: Int64; AClipLength: Int64; AOffset: Int64; AData: PSingle;
   AFrameCount: Integer; AChannels: Integer; ASampleRate: Integer;
   AWarpMode: Integer; AChannel: Integer;
-  const ATransients: TFrameArray = nil; APeriodFrames: Integer = 0): Single;
+  const ATransients: TFrameArray = nil; APeriodFrames: Integer = 0;
+  const AZones: TDragZoneArray = nil): Single;
+
+{ Offline/shared copy of AudioEngine.DragClipSample - same zone lookup, same
+  short fade of a zone's tail into the silence that follows it, so a bounce
+  matches live Drag-mode playback exactly. }
+function DragZoneSourceSample(const AZones: TDragZoneArray;
+  ATimelineFrame: Int64; AOffset: Int64; AData: PSingle;
+  AFrameCount: Integer; AChannels: Integer; ASampleRate: Integer;
+  AChannel: Integer): Single;
 
 { Cuts a warp marker array in two at ASplitFrame (clip-relative timeline
   frame), for use whenever a clip itself is split or trimmed (explicit split,
@@ -124,7 +151,7 @@ function DetunedSample(const AMarkers: TWarpMarkerArray; ATimelineFrame: Int64;
   ADetuneSemitones: Single; AOffset: Int64; AData: PSingle;
   AFrameCount, AChannels, ASampleRate: Integer; AWarpMode, AChannel: Integer;
   AClipLength: Int64 = -1; const ATransients: TFrameArray = nil;
-  APeriodFrames: Integer = 0): Single;
+  APeriodFrames: Integer = 0; const AZones: TDragZoneArray = nil): Single;
 
 { DrawWaveform moved to src/ui/WaveformDraw.pas - it was the sole reason this
   unit depended on Graphics, and src/ui is unreachable from Dysnomia's build
@@ -431,14 +458,28 @@ const
 
 function WarpedSourcePosition(const AMarkers: TWarpMarkerArray;
   ATimelineFrame: Int64; ASampleRate: Integer; AWarpMode: Integer;
-  AHintK: PInteger): Double;
+  AHintK: PInteger; const AZones: TDragZoneArray): Double;
 var
   k: Integer;
   SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen: Int64;
   OffsetIntoSeg: Int64;
   RePitchFadeFrames, RePitchDistToEnd, NextSegSourceLen, NextSegTimelineLen: Int64;
   RePitchPosA, RePitchPosB, RePitchFadeT: Double;
+  ZonePos: Int64;
 begin
+  { Drag has no markers - the zone lookup stands in for the marker walk
+    below. A gap (no zone covers this frame) falls back to identity so a
+    detune grain anchored here still lands somewhere sane rather than at
+    the DragZoneSourceSample silence sentinel, which is only meaningful to
+    that function's own caller, not to a generic position consumer. }
+  if AWarpMode = WarpModeDrag then
+  begin
+    ZonePos := DragZoneSourcePosition(AZones, ATimelineFrame);
+    if ZonePos = DragZoneSilence then
+      Exit(ATimelineFrame);
+    Exit(ZonePos);
+  end;
+
   if Length(AMarkers) < 2 then
     Exit(ATimelineFrame);
 
@@ -507,6 +548,70 @@ begin
     Exit(SegStartSource);
 
   Result := SegStartSource + OffsetIntoSeg * (SegSourceLen / SegTimelineLen);
+end;
+
+function DragZoneSourcePosition(const AZones: TDragZoneArray;
+  ATimelineFrame: Int64): Int64;
+var
+  z: Integer;
+  RStart, REnd: Int64;
+begin
+  for z := 0 to High(AZones) do
+  begin
+    RStart := AZones[z].SourceStart + AZones[z].Shift;
+    REnd := AZones[z].SourceEnd + AZones[z].Shift;
+    if (ATimelineFrame >= RStart) and (ATimelineFrame < REnd) then
+      Exit(AZones[z].SourceStart + (ATimelineFrame - RStart));
+  end;
+  Result := DragZoneSilence;
+end;
+
+{ mirrors AudioEngine.DragClipSample - see that function for the rationale
+  (1:1 playback inside a zone, silence in the gaps, tail-only crossfade into
+  the silence). Kept as a straight port rather than a shared helper because
+  the two sides read from different data shapes (PSingle/FrameCount here vs
+  a PPlaybackClip there) for the same reason every other mode's offline copy
+  does. }
+function DragZoneSourceSample(const AZones: TDragZoneArray;
+  ATimelineFrame: Int64; AOffset: Int64; AData: PSingle;
+  AFrameCount: Integer; AChannels: Integer; ASampleRate: Integer;
+  AChannel: Integer): Single;
+const
+  DragFadeMs = 8;
+var
+  z: Integer;
+  RStart, REnd, FadeFrames, DistToEnd, ZoneFadeCap: Int64;
+  SrcFrame, AbsPos: Int64;
+  Gain: Single;
+begin
+  FadeFrames := (DragFadeMs * ASampleRate) div 1000;
+  for z := 0 to High(AZones) do
+  begin
+    RStart := AZones[z].SourceStart + AZones[z].Shift;
+    REnd := AZones[z].SourceEnd + AZones[z].Shift;
+    if (ATimelineFrame < RStart) or (ATimelineFrame >= REnd) then
+      Continue;
+
+    SrcFrame := AZones[z].SourceStart + (ATimelineFrame - RStart);
+    AbsPos := AOffset + SrcFrame;
+    if (AbsPos < 0) or (AbsPos >= AFrameCount) then
+      Exit(0);
+
+    Result := LinearInterpolate(AData, AFrameCount, AChannels, AChannel, AbsPos);
+
+    ZoneFadeCap := FadeFrames;
+    if REnd - RStart < ZoneFadeCap then
+      ZoneFadeCap := REnd - RStart;
+    DistToEnd := REnd - ATimelineFrame;
+    if DistToEnd < ZoneFadeCap then
+    begin
+      Gain := DistToEnd / ZoneFadeCap;
+      Result := Result * Gain;
+    end;
+    Exit;
+  end;
+
+  Result := 0;
 end;
 
 { Beats warp renderer - the offline/shared copy of AudioEngine.BeatsClipSample.
@@ -1012,7 +1117,8 @@ function WarpedSourceSample(const AMarkers: TWarpMarkerArray;
   ATimelineFrame: Int64; AClipLength: Int64; AOffset: Int64; AData: PSingle;
   AFrameCount: Integer; AChannels: Integer; ASampleRate: Integer;
   AWarpMode: Integer; AChannel: Integer;
-  const ATransients: TFrameArray; APeriodFrames: Integer): Single;
+  const ATransients: TFrameArray; APeriodFrames: Integer;
+  const AZones: TDragZoneArray): Single;
 var
   k: Integer;
   SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen: Int64;
@@ -1245,6 +1351,10 @@ var
   end;
 
 begin
+  if AWarpMode = WarpModeDrag then
+    Exit(DragZoneSourceSample(AZones, ATimelineFrame, AOffset, AData,
+      AFrameCount, AChannels, ASampleRate, AChannel));
+
   if Length(AMarkers) < 2 then
     Exit(SafeInterp(ATimelineFrame));
 
@@ -1315,7 +1425,7 @@ function DetunedSample(const AMarkers: TWarpMarkerArray; ATimelineFrame: Int64;
   ADetuneSemitones: Single; AOffset: Int64; AData: PSingle;
   AFrameCount, AChannels, ASampleRate: Integer; AWarpMode, AChannel: Integer;
   AClipLength: Int64; const ATransients: TFrameArray;
-  APeriodFrames: Integer): Single;
+  APeriodFrames: Integer; const AZones: TDragZoneArray): Single;
 const
   DetuneGrainMs = 25;
 var
@@ -1338,7 +1448,7 @@ begin
   if ADetuneSemitones = 0 then
     Exit(WarpedSourceSample(AMarkers, ATimelineFrame, AClipLength, AOffset,
       AData, AFrameCount, AChannels, ASampleRate, AWarpMode, AChannel,
-      ATransients, APeriodFrames));
+      ATransients, APeriodFrames, AZones));
 
   Rate := Exp((ADetuneSemitones / 12) * Ln(2));
   GrainFrames := (DetuneGrainMs * ASampleRate) div 1000;
@@ -1356,7 +1466,7 @@ begin
     realtime copy (AudioEngine.DetunedClipSample anchors to the same nominal
     map), so a bounce's detune grains land exactly where live playback's do }
   AnchorStart := WarpedSourcePosition(AMarkers, GrainStartTimeline,
-    ASampleRate, AWarpMode);
+    ASampleRate, AWarpMode, nil, AZones);
 
   PosCurrent := AnchorStart + GrainOffsetIntoGrain * Rate;
   SampleCurrent := SafeInterp(PosCurrent);
@@ -1369,7 +1479,7 @@ begin
     underneath the tail of this one and lands exactly on its own anchor at
     the boundary }
   AnchorEnd := WarpedSourcePosition(AMarkers, GrainStartTimeline + GrainFrames,
-    ASampleRate, AWarpMode);
+    ASampleRate, AWarpMode, nil, AZones);
   PosNext := AnchorEnd + (GrainOffsetIntoGrain - GrainFrames) * Rate;
   SampleNext := SafeInterp(PosNext);
 

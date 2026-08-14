@@ -32,6 +32,10 @@ type
       ClipGainMaxDb = 24;
       ClipDetuneMinSemitones = -12;
       ClipDetuneMaxSemitones = 12;
+      { the "R" (render) button's own vertical bar on the right edge of the
+        warp widget - see FWarpEditor.Width/RefreshWarpWidgetSize, which
+        both have to carve this much space back out of the waveform area }
+      WarpRightPanelWidth = 34;
     var
     FMainMenu: TMainMenu;
     FTransportPanel: TPanel;
@@ -69,6 +73,8 @@ type
     FWarpBeatsButton: TSpeedButton;
     FWarpAudioButton: TSpeedButton;
     FWarpTonesButton: TSpeedButton;
+    FWarpDragButton: TSpeedButton;
+    FWarpRenderButton: TSpeedButton;
     FInstrumentGainSlider: TTrackBar;
     FInstrumentGainValueLabel: TLabel;
     FClipGainSlider: TTrackBar;
@@ -160,6 +166,8 @@ type
     procedure InstrumentGainSliderChange(Sender: TObject);
     procedure WarpTonesButtonClick(Sender: TObject);
     procedure WarpAudioButtonClick(Sender: TObject);
+    procedure WarpDragButtonClick(Sender: TObject);
+    procedure WarpRenderButtonClick(Sender: TObject);
     procedure UpdateWindowTitle;
     function WaitForEngineIdle: Boolean;
     procedure ClipDetuneSliderChange(Sender: TObject);
@@ -504,7 +512,7 @@ procedure TForm1.BuildLayout;
   end;
 
 var
-  WarpButtonsPanel, ClipControlsPanel: TPanel;
+  WarpButtonsPanel, ClipControlsPanel, RightButtonsPanel: TPanel;
   GainLbl, DetuneLbl, InstGainLbl: TLabel;
 begin
   Width := 1280;
@@ -845,6 +853,23 @@ begin
   FWarpRepitchButton.ShowHint := True;
   FWarpRepitchButton.OnClick := @WarpRepitchButtonClick;
 
+  { D (Drag) - a blend of RePitch and Tones that slides whole zones of
+    audio along the timeline with no resampling at all instead of varying
+    playback rate, trading a little silence for zero warp distortion on
+    quantize-heavy sampled material; see AudioEngine.DragClipSample and
+    warp.md "D (drag) mode". Same exclusive group, created last so the
+    alBottom stacking puts it above RP. }
+  FWarpDragButton := TSpeedButton.Create(Self);
+  FWarpDragButton.Parent := WarpButtonsPanel;
+  FWarpDragButton.Caption := 'D';
+  FWarpDragButton.Align := alBottom;
+  FWarpDragButton.Height := Px(28);
+  FWarpDragButton.Font.Style := [fsBold];
+  FWarpDragButton.GroupIndex := 1;
+  FWarpDragButton.AllowAllUp := False;
+  FWarpDragButton.ShowHint := True;
+  FWarpDragButton.OnClick := @WarpDragButtonClick;
+
   { per-clip gain trim and pitch detune - sits between the zoom/RP button
     column and the waveform itself. Detune never changes the clip's own
     Length/Position (see AudioEngine.DetunedClipSourcePosition) - it's an
@@ -915,6 +940,28 @@ begin
   FClipDetuneValueLabel.Top := Px(154);
   FClipDetuneValueLabel.Caption := '0 st';
 
+  { "R" (Render): its own vertical bar on the right edge, same style/size as
+    the D/AU/LF/RP/BT column on the left - see warp.md "D (drag) mode".
+    Align:=alRight docks it to FWarpWidget's right edge automatically as
+    RefreshWarpWidgetSize resizes the widget, so nothing else has to track
+    its position - only its WIDTH, which FWarpEditor.Width and
+    RefreshWarpWidgetSize both subtract back out (WarpRightPanelWidth). }
+  RightButtonsPanel := TPanel.Create(Self);
+  RightButtonsPanel.Parent := FWarpWidget;
+  RightButtonsPanel.Align := alRight;
+  RightButtonsPanel.Width := Px(WarpRightPanelWidth);
+  RightButtonsPanel.BevelOuter := bvNone;
+
+  FWarpRenderButton := TSpeedButton.Create(Self);
+  FWarpRenderButton.Parent := RightButtonsPanel;
+  FWarpRenderButton.Caption := 'R';
+  FWarpRenderButton.Align := alTop;
+  FWarpRenderButton.Height := Px(28);
+  FWarpRenderButton.Font.Style := [fsBold];
+  FWarpRenderButton.ShowHint := True;
+  FWarpRenderButton.Hint := 'Render warped zones to a new clip (not yet implemented)';
+  FWarpRenderButton.OnClick := @WarpRenderButtonClick;
+
   FWarpEditor := TWarpEditor.Create(Self);
   FWarpEditor.Parent := FWarpWidget;
   { explicit bounds + right-anchor instead of Align:=alClient - ClipControlsPanel
@@ -923,7 +970,7 @@ begin
     rest of FWarpWidget's width as RefreshWarpWidgetSize resizes it. }
   FWarpEditor.Left := WarpButtonsPanel.Width + ClipControlsPanel.Width;
   FWarpEditor.Top := 0;
-  FWarpEditor.Width := FWarpWidget.Width - FWarpEditor.Left;
+  FWarpEditor.Width := FWarpWidget.Width - FWarpEditor.Left - RightButtonsPanel.Width;
   FWarpEditor.Height := Px(WidgetHeight);
   FWarpEditor.Anchors := [akLeft, akTop, akRight];
   FWarpEditor.OnClipChanged := @WarpEditorClipChanged;
@@ -1882,6 +1929,7 @@ begin
       SampleTypes.WarpModeRePitch: FWarpRepitchButton.Down := True;
       SampleTypes.WarpModeTones: FWarpTonesButton.Down := True;
       SampleTypes.WarpModeAudio: FWarpAudioButton.Down := True;
+      SampleTypes.WarpModeDrag: FWarpDragButton.Down := True;
     else
       { mode 0 and anything unrecognised, matching ClipSourceSample's own
         catch-all so the lit button always names what is actually playing }
@@ -1926,6 +1974,21 @@ end;
 procedure TForm1.WarpAudioButtonClick(Sender: TObject);
 begin
   SetSelectedClipWarpMode(SampleTypes.WarpModeAudio);
+end;
+
+procedure TForm1.WarpDragButtonClick(Sender: TObject);
+begin
+  SetSelectedClipWarpMode(SampleTypes.WarpModeDrag);
+end;
+
+{ Stub: "R" is meant to bounce the clip's warped zones into a plain new clip
+  that keeps sounding the same but drops the markers/zones, matching what AU/
+  LF/RP/BT clips can already do informally by ear-matching a re-recorded
+  bounce. warp.md asks for it explicitly; deferred to a later session rather
+  than rushed - see the button's own Hint for what to expect meanwhile. }
+procedure TForm1.WarpRenderButtonClick(Sender: TObject);
+begin
+  ShowMessage('Render to new clip is not implemented yet.');
 end;
 
 procedure TForm1.SetSelectedClipWarpMode(AMode: Integer);
@@ -1984,6 +2047,24 @@ begin
 
     Project.Tracks[Track].Clips[ClipIdx].WarpMarkers := NewMarkers;
     Project.Tracks[Track].Clips[ClipIdx].Length := SourceSpan;
+  end;
+
+  { Drag has no markers at all - an empty DragZones plays total silence (see
+    AudioEngine.DragClipSample), so a clip that switches into D for the
+    first time needs a starting zone or it would just go silent, unlike
+    switching into any other mode. Only seeded when there is nothing there
+    yet: WarpEditor's own right-click zone delete is a real, deliberate way
+    to reach an empty DragZones, and re-seeding here every time this fires
+    would make that delete impossible to keep - see WarpEditor.GetClip's
+    comment on the same tradeoff. }
+  if (AMode = SampleTypes.WarpModeDrag) and (PrevMode <> SampleTypes.WarpModeDrag) and
+    (Length(Project.Tracks[Track].Clips[ClipIdx].DragZones) = 0) then
+  begin
+    SetLength(Project.Tracks[Track].Clips[ClipIdx].DragZones, 1);
+    Project.Tracks[Track].Clips[ClipIdx].DragZones[0].SourceStart := 0;
+    Project.Tracks[Track].Clips[ClipIdx].DragZones[0].SourceEnd :=
+      Project.Tracks[Track].Clips[ClipIdx].Length;
+    Project.Tracks[Track].Clips[ClipIdx].DragZones[0].Shift := 0;
   end;
 
   Project.Tracks[Track].Clips[ClipIdx].WarpMode := AMode;
@@ -2144,6 +2225,20 @@ begin
   end;
   FWarpAudioButton.Hint :=
     'Warp mode: Audio/AU (period-synchronous - for pads, instruments, sampler output)';
+
+  if FWarpDragButton.Down then
+  begin
+    FWarpDragButton.Color := clFuchsia;
+    FWarpDragButton.Font.Color := clBlack;
+  end
+  else
+  begin
+    FWarpDragButton.Color := clBtnFace;
+    FWarpDragButton.Font.Color := clWindowText;
+  end;
+  FWarpDragButton.Hint :=
+    'Warp mode: Drag/D (slide zones with no resampling - drag start/end markers, ' +
+    'double-click to grab a note)';
 end;
 
 procedure TForm1.ClipGainSliderChange(Sender: TObject);
@@ -2248,11 +2343,12 @@ begin
       the clip's own end marker off the right edge and made it ungrabbable.
       The MinTotalWidth floor just below already assumed this shape. }
     FWarpWidget.Width := FWarpEditor.Left + WarpWidthForFrames(
-      Project.Tracks[FArrangementView.SelectedTrack].Clips[FArrangementView.SelectedClipIndex].Length);
+      Project.Tracks[FArrangementView.SelectedTrack].Clips[FArrangementView.SelectedClipIndex].Length)
+      + Px(WarpRightPanelWidth);
     { the zoom/RP buttons and the gain/detune sliders both take a fixed
       amount of width off the top - never let the waveform itself collapse
       to nothing for a short/zoomed-out clip }
-    MinTotalWidth := FWarpEditor.Left + Px(MinWaveformWidth);
+    MinTotalWidth := FWarpEditor.Left + Px(MinWaveformWidth) + Px(WarpRightPanelWidth);
     if FWarpWidget.Width < MinTotalWidth then
       FWarpWidget.Width := MinTotalWidth;
   end;

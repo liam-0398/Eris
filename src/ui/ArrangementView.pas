@@ -1147,7 +1147,7 @@ end;
 procedure TArrangementView.PushTrackToEngine(ATrackIndex: Integer);
 var
   Items: PPlaybackClip;
-  i, j, MarkerCount: Integer;
+  i, j, MarkerCount, DragZoneCount: Integer;
   Clip: TClip;
   Sample: TSample;
   Count: Integer;
@@ -1195,6 +1195,17 @@ begin
     begin
       Items[i].MarkerSource[j] := Clip.WarpMarkers[j].SourceFrame;
       Items[i].MarkerTimeline[j] := Clip.WarpMarkers[j].TimelineFrame;
+    end;
+
+    DragZoneCount := Length(Clip.DragZones);
+    if DragZoneCount > MaxClipDragZones then
+      DragZoneCount := MaxClipDragZones;
+    Items[i].DragZoneCount := DragZoneCount;
+    for j := 0 to DragZoneCount - 1 do
+    begin
+      Items[i].DragZoneSourceStart[j] := Clip.DragZones[j].SourceStart;
+      Items[i].DragZoneSourceEnd[j] := Clip.DragZones[j].SourceEnd;
+      Items[i].DragZoneShift[j] := Clip.DragZones[j].Shift;
     end;
   end;
 
@@ -1705,7 +1716,7 @@ begin
       Project.SamplePeaks[AClip.SampleID],
       Project.SamplePool[AClip.SampleID].FrameCount, AClip.Offset,
       AClip.Offset + AClip.Length, AClip.WarpMarkers, FTrackColors[ATrack],
-      AClip.WarpMode, Project.SampleTransients[AClip.SampleID]);
+      AClip.WarpMode, Project.SampleTransients[AClip.SampleID], AClip.DragZones);
 
   { border only (Frame, not Rectangle - Rectangle also fills the interior
     with the current brush, which would erase the waveform just drawn) }
@@ -3132,13 +3143,13 @@ begin
             Sample.Data, Sample.FrameCount, Sample.Channels,
             AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length,
             Project.SampleTransients[Clip.SampleID],
-            Project.SamplePeriods[Clip.SampleID]) * Clip.Gain;
+            Project.SamplePeriods[Clip.SampleID], Clip.DragZones) * Clip.Gain;
         Buffer[OutIdx + 1] := Buffer[OutIdx + 1] +
           DetunedSample(Clip.WarpMarkers, ClipRelFrame, Clip.PitchSemitones, Clip.Offset,
             Sample.Data, Sample.FrameCount, Sample.Channels,
             AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length,
             Project.SampleTransients[Clip.SampleID],
-            Project.SamplePeriods[Clip.SampleID]) * Clip.Gain;
+            Project.SamplePeriods[Clip.SampleID], Clip.DragZones) * Clip.Gain;
       end
       else
       begin
@@ -3147,13 +3158,13 @@ begin
             Sample.Data, Sample.FrameCount, Sample.Channels,
             AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length,
             Project.SampleTransients[Clip.SampleID],
-            Project.SamplePeriods[Clip.SampleID]) * Clip.Gain;
+            Project.SamplePeriods[Clip.SampleID], Clip.DragZones) * Clip.Gain;
         Buffer[OutIdx + 1] := Buffer[OutIdx + 1] +
           DetunedSample(Clip.WarpMarkers, ClipRelFrame, Clip.PitchSemitones, Clip.Offset,
             Sample.Data, Sample.FrameCount, Sample.Channels,
             AudioEngine.ProjectSampleRate, Clip.WarpMode, 1, Clip.Length,
             Project.SampleTransients[Clip.SampleID],
-            Project.SamplePeriods[Clip.SampleID]) * Clip.Gain;
+            Project.SamplePeriods[Clip.SampleID], Clip.DragZones) * Clip.Gain;
       end;
     end;
   end;

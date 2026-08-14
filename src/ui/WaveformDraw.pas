@@ -19,19 +19,20 @@ uses
 procedure DrawWaveform(ACanvas: TCanvas; const ARect: TRect;
   const APeaks: TWaveformPeaks; ATotalFrameCount, AStartFrame, AEndFrame: Int64;
   const AMarkers: TWarpMarkerArray; AColor: TColor; AWarpMode: Integer = WarpModeBeats;
-  const ATransients: TFrameArray = nil);
+  const ATransients: TFrameArray = nil; const AZones: TDragZoneArray = nil);
 
 implementation
 
 procedure DrawWaveform(ACanvas: TCanvas; const ARect: TRect;
   const APeaks: TWaveformPeaks; ATotalFrameCount, AStartFrame, AEndFrame: Int64;
   const AMarkers: TWarpMarkerArray; AColor: TColor; AWarpMode: Integer;
-  const ATransients: TFrameArray);
+  const ATransients: TFrameArray; const AZones: TDragZoneArray);
 var
   x, midY, halfH, RectWidth: Integer;
   BinCount: Integer;
   ClipLength, TimelineFrame0, TimelineFrame1: Int64;
   SrcFrame0, SrcFrame1: Double;
+  ZonePos0, ZonePos1: Int64;
   Bin0, Bin1, b: Integer;
   MinV, MaxV: Single;
   y0, y1: Integer;
@@ -80,17 +81,38 @@ begin
     if TimelineFrame1 <= TimelineFrame0 then
       TimelineFrame1 := TimelineFrame0 + 1;
 
-    { the nominal map is relative to the clip's own Offset, which AStartFrame
-      is here - so add it back to get an absolute source frame. Drawing the
-      nominal map (rather than the old per-grain ping-pong positions) is also
-      what makes a stretched region read as a smooth stretch on screen instead
-      of a scribble. }
-    { x ascends, so TimelineFrame0/1 do too - HintK carries the segment
-      search forward instead of restarting it from marker 0 every column }
-    SrcFrame0 := AStartFrame + WarpedSourcePosition(AMarkers, TimelineFrame0,
-      44100, AWarpMode, @HintK);
-    SrcFrame1 := AStartFrame + WarpedSourcePosition(AMarkers, TimelineFrame1,
-      44100, AWarpMode, @HintK);
+    { Drag has no markers/segments to walk - a column is either inside a
+      zone (draw that slice of the source peaks, shifted) or in a gap
+      (silence - leave the column blank rather than drawing whatever
+      unrelated audio happens to sit at that raw timeline position, which
+      WarpedSourcePosition's identity fallback would otherwise show). }
+    if AWarpMode = WarpModeDrag then
+    begin
+      ZonePos0 := DragZoneSourcePosition(AZones, TimelineFrame0);
+      ZonePos1 := DragZoneSourcePosition(AZones, TimelineFrame1 - 1);
+      if (ZonePos0 = DragZoneSilence) and (ZonePos1 = DragZoneSilence) then
+        Continue;
+      if ZonePos0 = DragZoneSilence then
+        ZonePos0 := ZonePos1;
+      if ZonePos1 = DragZoneSilence then
+        ZonePos1 := ZonePos0;
+      SrcFrame0 := AStartFrame + ZonePos0;
+      SrcFrame1 := AStartFrame + ZonePos1 + 1;
+    end
+    else
+    begin
+      { the nominal map is relative to the clip's own Offset, which
+        AStartFrame is here - so add it back to get an absolute source
+        frame. Drawing the nominal map (rather than the old per-grain
+        ping-pong positions) is also what makes a stretched region read as
+        a smooth stretch on screen instead of a scribble. }
+      { x ascends, so TimelineFrame0/1 do too - HintK carries the segment
+        search forward instead of restarting it from marker 0 every column }
+      SrcFrame0 := AStartFrame + WarpedSourcePosition(AMarkers, TimelineFrame0,
+        44100, AWarpMode, @HintK);
+      SrcFrame1 := AStartFrame + WarpedSourcePosition(AMarkers, TimelineFrame1,
+        44100, AWarpMode, @HintK);
+    end;
     if SrcFrame1 <= SrcFrame0 then
       SrcFrame1 := SrcFrame0 + 1;
 

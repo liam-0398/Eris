@@ -16,6 +16,11 @@ const
     snare is already past the old limit of 8, and quantising individual synth
     hits wants far more), at 16 bytes per marker per clip. }
   MaxClipWarpMarkers = 128;
+  { Ceiling on drag zones per clip - same fixed-size-for-realtime-safety
+    reasoning as MaxClipWarpMarkers, but sized much smaller: a zone is a
+    whole dragged note/sample, not a per-hit marker, so a clip carrying
+    dozens of dragged hits is already an extreme case. }
+  MaxClipDragZones = 64;
 
 type
   TPlaybackClip = record
@@ -30,7 +35,9 @@ type
     MarkerSource: array[0..MaxClipWarpMarkers - 1] of Int64;
     MarkerTimeline: array[0..MaxClipWarpMarkers - 1] of Int64;
     WarpMode: Integer; { 0 = Beats (transient slices), 1 = RePitch (vari-speed),
-      2 = Tones (pitch-synchronous, for sustained low-frequency material) }
+      2 = Tones (pitch-synchronous, for sustained low-frequency material),
+      3 = Audio (period-synchronous overlap-add), 4 = Drag (slide zones,
+      no resampling - see DragClipSample) }
     PeriodFrames: Integer; { detected fundamental period of the source sample,
       0 if none - Tones mode only, see TonesClipSample }
     DetuneSemitones: Single; { independent pitch trim that never changes the
@@ -38,6 +45,10 @@ type
     Transients: PInt64; { raw pointer into Project.SampleTransients[SampleID]'s
       data, same lifetime/ownership pattern as Data - see ClipSourcePosition }
     TransientCount: Integer;
+    DragZoneCount: Integer; { WarpMode 4 only - see DragClipSample }
+    DragZoneSourceStart: array[0..MaxClipDragZones - 1] of Int64;
+    DragZoneSourceEnd: array[0..MaxClipDragZones - 1] of Int64;
+    DragZoneShift: array[0..MaxClipDragZones - 1] of Int64;
   end;
   PPlaybackClip = ^TPlaybackClip;
 
@@ -240,7 +251,7 @@ uses
   {$ELSE}
   ALSABackend, JACKBackend, PipeWireBackend,
   {$ENDIF}
-  Resample, Project, SP1200, Effects, DenormalGuard, AVector, Config;
+  Resample, Project, SP1200, Effects, DenormalGuard, AVector, Config, Math;
 
 const
   DefaultBlockFrames = 512;
@@ -971,7 +982,28 @@ var
   OffsetIntoSeg: Int64;
   RePitchFadeFrames, RePitchDistToEnd, NextSegSourceLen, NextSegTimelineLen: Int64;
   RePitchPosA, RePitchPosB, RePitchFadeT: Double;
+  z: Integer;
+  ZRStart, ZREnd: Int64;
 begin
+  { Drag has no markers at all - it's the detune-grain anchor's job alone
+    to understand zones here, same as every other mode's nominal map. A
+    frame that lands in a gap (no zone covers it, i.e. silence) has no
+    natural "position" to anchor to; falling through to the identity
+    mapping just means a detuned Drag clip's silence stays silent-ish
+    rather than drifting into whatever raw audio sits at that timeline
+    frame, which would be the wrong failure to have. }
+  if Clip^.WarpMode = 4 then
+  begin
+    for z := 0 to Clip^.DragZoneCount - 1 do
+    begin
+      ZRStart := Clip^.DragZoneSourceStart[z] + Clip^.DragZoneShift[z];
+      ZREnd := Clip^.DragZoneSourceEnd[z] + Clip^.DragZoneShift[z];
+      if (AClipRelativeFrame >= ZRStart) and (AClipRelativeFrame < ZREnd) then
+        Exit(Clip^.DragZoneSourceStart[z] + (AClipRelativeFrame - ZRStart));
+    end;
+    Exit(AClipRelativeFrame);
+  end;
+
   if Clip^.MarkerCount < 2 then
     Exit(AClipRelativeFrame);
 
@@ -2049,17 +2081,73 @@ begin
     Result := CurVal;
 end;
 
+{ Drag ("D") mode: zones slide along the timeline with no resampling at all -
+  the opposite move from every other mode here, which all warp by changing
+  read RATE. A zone's content plays back exactly 1:1 from
+  DragZoneSourceStart[z] + Shift, so a dragged transient comes out bit-exact,
+  no vari-speed/granular artifacting possible. Timeline frames outside every
+  zone's rendered range are silence - the gap left behind when a zone moves
+  off its identity position - with the tail of the preceding zone faded into
+  that silence so the cut is not a click. Zones are kept sorted and
+  non-overlapping by the editor (WarpEditor's overlap trim), so a linear scan
+  is fine; clip zone counts are small (a handful of dragged hits, not one per
+  transient like Beats/Tones). }
+function DragClipSample(Clip: PPlaybackClip; AClipRelativeFrame: Int64;
+  AChannel: Integer): Single;
+const
+  { fades the tail of a zone into the silence that follows it - see comment
+    above. Short enough not to visibly eat into a short-note tail, long
+    enough to declick. }
+  DragFadeMs = 8;
+var
+  z: Integer;
+  RStart, REnd, FadeFrames, DistToEnd: Int64;
+  SrcFrame, AbsPos: Int64;
+  Gain: Single;
+begin
+  FadeFrames := (DragFadeMs * ProjectSampleRate) div 1000;
+  for z := 0 to Clip^.DragZoneCount - 1 do
+  begin
+    RStart := Clip^.DragZoneSourceStart[z] + Clip^.DragZoneShift[z];
+    REnd := Clip^.DragZoneSourceEnd[z] + Clip^.DragZoneShift[z];
+    if (AClipRelativeFrame < RStart) or (AClipRelativeFrame >= REnd) then
+      Continue;
+
+    SrcFrame := Clip^.DragZoneSourceStart[z] +
+      (AClipRelativeFrame - RStart);
+    AbsPos := Clip^.Offset + SrcFrame;
+    if (AbsPos < 0) or (AbsPos >= Clip^.FrameCount) then
+      Exit(0);
+
+    Result := LinearInterpolate(Clip^.Data, Clip^.FrameCount, Clip^.Channels,
+      AChannel, AbsPos);
+
+    DistToEnd := REnd - AClipRelativeFrame;
+    if DistToEnd < Min(FadeFrames, REnd - RStart) then
+    begin
+      Gain := DistToEnd / Min(FadeFrames, REnd - RStart);
+      Result := Result * Gain;
+    end;
+    Exit;
+  end;
+
+  Result := 0;
+end;
+
 { The audio-producing entry point for a warped clip: Beats goes through the
   slice renderer above, Tones through the pitch-synchronous one, Audio through
   the period-synchronous one, RePitch stays a plain continuous resample read
-  straight through its position map. Plain ClipSourcePosition remains
-  available for callers that want a single nominal position (detune anchors,
-  split points, marker placement) rather than audio. }
+  straight through its position map, Drag slides whole zones with no
+  resampling at all. Plain ClipSourcePosition remains available for callers
+  that want a single nominal position (detune anchors, split points, marker
+  placement) rather than audio. }
 function ClipSourceSample(Clip: PPlaybackClip; AClipRelativeFrame: Int64;
   AChannel: Integer; AHintK: PInteger): Single;
 var
   AbsPos: Double;
 begin
+  if Clip^.WarpMode = 4 then
+    Exit(DragClipSample(Clip, AClipRelativeFrame, AChannel));
   if (Clip^.MarkerCount >= 2) and (Clip^.WarpMode = 3) then
     Exit(AudioClipSample(Clip, AClipRelativeFrame, AChannel, AHintK));
   if (Clip^.MarkerCount >= 2) and (Clip^.WarpMode = 2) then

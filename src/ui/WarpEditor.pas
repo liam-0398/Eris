@@ -35,10 +35,22 @@ type
         on, so it should be easy to catch }
       EdgeGrabPixels = 10;
       MinMarkerGapFrames = 100;
+      { see WarpEditor.md / warp.md "D (drag) mode": the gap ResolveZoneOverlaps
+        leaves between a trimmed zone's new edge and whichever zone won the
+        overlap, so the loser's tail/head fades cleanly into silence (see
+        AudioEngine.DragClipSample's own fade) instead of butting a hard edge
+        against the winner. }
+      DragZoneOverlapGapMs = 15;
+      { fallback zone width when double-clicking somewhere with no detected
+        transients to snap to (an unanalyzed or very short sample) }
+      DragZoneDefaultFrames = 22050;
     var
       FTrackIndex: Integer;
       FClipIndex: Integer;
       FDragMarkerIndex: Integer;
+      FDragZoneIndex: Integer;
+      FZoneDragStartX: Integer;
+      FZoneDragStartShift: Int64;
       FLastMouseX: Integer;
       FPlayheadFrame: Int64;
       FIsPlaying: Boolean;
@@ -58,7 +70,18 @@ type
     procedure DrawGrid;
     procedure DrawClipWaveform(const AClip: TClip);
     procedure DrawMarkers(const AClip: TClip);
+    procedure DrawDragZones(const AClip: TClip);
     procedure DrawPlayhead(const AClip: TClip);
+    function HitTestDragZone(const AClip: TClip; X: Integer): Integer;
+    { trims/drops other zones that overlap AZones[AActiveIndex]'s rendered
+      range - the actively-dragged zone always wins, see the header comment
+      on the implementation. Returns the active zone's index in AZones after
+      any earlier zones were dropped, since removal shifts indices down. }
+    function ResolveDragZoneOverlaps(var AZones: TDragZoneArray; AActiveIndex: Integer): Integer;
+    procedure DeleteDragZone(const AClip: TClip; AIndex: Integer);
+    procedure CreateDragZoneAtFrame(const AClip: TClip; AFrame: Int64);
+    procedure DragZoneMouseDown(const AClip: TClip; X: Integer; Button: TMouseButton);
+    procedure DragZoneMouseMove(const AClip: TClip; X: Integer; Shift: TShiftState);
   protected
     procedure Paint; override;
     procedure MouseDown(Button: TMouseButton; Shift: TShiftState;
@@ -107,6 +130,7 @@ begin
   FTrackIndex := -1;
   FClipIndex := -1;
   FDragMarkerIndex := -1;
+  FDragZoneIndex := -1;
 end;
 
 function TWarpEditor.GetClip(out AClip: TClip): Boolean;
@@ -129,6 +153,14 @@ begin
     AClip.WarpMarkers[1].TimelineFrame := AClip.Length;
     Project.Tracks[FTrackIndex].Clips[FClipIndex] := AClip;
   end;
+
+  { deliberately NOT the same self-healing trick for DragZones: unlike
+    WarpMarkers (which can never usefully be empty), an empty DragZones is a
+    real, meaningful, user-reachable state - right-click deleting the last
+    zone. Seeding a default zone here on every fetch would resurrect it the
+    instant it was deleted. The one-time "don't silence a clip just because
+    it switched into D mode" default lives where the mode switch itself
+    happens instead - see MainForm.SetSelectedClipWarpMode. }
 end;
 
 procedure TWarpEditor.SetClipData(const AClip: TClip);
@@ -330,7 +362,7 @@ begin
   DrawWaveform(Canvas, Rect(0, WarpRulerHeight, RightX, Height),
     Project.SamplePeaks[AClip.SampleID], Sample.FrameCount, AClip.Offset,
     AClip.Offset + AClip.Length, AClip.WarpMarkers, clAqua, AClip.WarpMode,
-    Project.SampleTransients[AClip.SampleID]);
+    Project.SampleTransients[AClip.SampleID], AClip.DragZones);
 end;
 
 procedure TWarpEditor.DrawMarkers(const AClip: TClip);
@@ -359,6 +391,276 @@ begin
   x := RightEdgeX(AClip);
   Canvas.Brush.Color := clRed;
   Canvas.FillRect(Rect(x - 3, WarpRulerHeight, x, Height));
+end;
+
+{ Drag ("D") mode's own marker rendering - a green edge (the grabbed start of
+  a zone) and a red edge (its end, also a resize... except a zone doesn't
+  resize, it only slides, so the red edge here is decoration matching the
+  other modes' visual language rather than a second grab handle) for every
+  zone, at the zone's RENDERED (post-Shift) position. Called instead of
+  DrawMarkers, never alongside it - see Paint. }
+procedure TWarpEditor.DrawDragZones(const AClip: TClip);
+var
+  i, xStart, xEnd: Integer;
+  RStart, REnd: Int64;
+begin
+  for i := 0 to High(AClip.DragZones) do
+  begin
+    RStart := AClip.DragZones[i].SourceStart + AClip.DragZones[i].Shift;
+    REnd := AClip.DragZones[i].SourceEnd + AClip.DragZones[i].Shift;
+    xStart := FrameToX(RStart);
+    xEnd := FrameToX(REnd);
+
+    Canvas.Pen.Color := clGreen;
+    Canvas.Pen.Width := 2;
+    Canvas.Line(xStart, WarpRulerHeight, xStart, Height);
+    Canvas.Pen.Color := clRed;
+    Canvas.Line(xEnd, WarpRulerHeight, xEnd, Height);
+    Canvas.Pen.Width := 1;
+
+    Canvas.Brush.Color := clGreen;
+    Canvas.Polygon([Point(xStart - 5, WarpRulerHeight), Point(xStart + 5, WarpRulerHeight),
+      Point(xStart, WarpRulerHeight + 8)]);
+    Canvas.Brush.Color := clRed;
+    Canvas.Polygon([Point(xEnd - 5, WarpRulerHeight), Point(xEnd + 5, WarpRulerHeight),
+      Point(xEnd, WarpRulerHeight + 8)]);
+  end;
+end;
+
+function TWarpEditor.HitTestDragZone(const AClip: TClip; X: Integer): Integer;
+var
+  i: Integer;
+  Frame, RStart, REnd: Int64;
+begin
+  Result := -1;
+  Frame := XToFrame(X);
+  for i := 0 to High(AClip.DragZones) do
+  begin
+    RStart := AClip.DragZones[i].SourceStart + AClip.DragZones[i].Shift;
+    REnd := AClip.DragZones[i].SourceEnd + AClip.DragZones[i].Shift;
+    if (Frame >= RStart) and (Frame < REnd) then
+      Exit(i);
+  end;
+end;
+
+{ The actively-dragged zone (AActiveIndex) always keeps its full rendered
+  span - see warp.md "D (drag) mode": dragging one zone over another
+  overwrites the overlap, and the OTHER (stationary) zone loses whichever
+  edge touches the dragged one, trimmed back by a small gap so the loser's
+  own tail/head fade (DragClipSample/DragZoneSourceSample) has silence to
+  fade into instead of butting a hard edge against the winner. A stationary
+  zone trimmed down to nothing is dropped outright. }
+function TWarpEditor.ResolveDragZoneOverlaps(var AZones: TDragZoneArray;
+  AActiveIndex: Integer): Integer;
+var
+  GapFrames, ARStart, AREnd, ORStart, OREnd, NewEnd, NewStart: Int64;
+  i, KeptCount, RemovedBeforeActive: Integer;
+  Kept: TDragZoneArray;
+begin
+  Result := AActiveIndex;
+  if (AActiveIndex < 0) or (AActiveIndex > High(AZones)) then
+    Exit;
+
+  GapFrames := (DragZoneOverlapGapMs * AudioEngine.ProjectSampleRate) div 1000;
+  ARStart := AZones[AActiveIndex].SourceStart + AZones[AActiveIndex].Shift;
+  AREnd := AZones[AActiveIndex].SourceEnd + AZones[AActiveIndex].Shift;
+
+  SetLength(Kept, Length(AZones));
+  KeptCount := 0;
+  RemovedBeforeActive := 0;
+  for i := 0 to High(AZones) do
+  begin
+    if i = AActiveIndex then
+    begin
+      Kept[KeptCount] := AZones[i];
+      Inc(KeptCount);
+      Continue;
+    end;
+
+    ORStart := AZones[i].SourceStart + AZones[i].Shift;
+    OREnd := AZones[i].SourceEnd + AZones[i].Shift;
+
+    if (OREnd <= ARStart) or (ORStart >= AREnd) then
+    begin
+      Kept[KeptCount] := AZones[i];
+      Inc(KeptCount);
+      Continue;
+    end;
+
+    if ORStart < ARStart then
+    begin
+      { stationary zone sits to the left - shave its tail }
+      NewEnd := ARStart - GapFrames;
+      if NewEnd - AZones[i].Shift <= AZones[i].SourceStart then
+      begin
+        if i < AActiveIndex then
+          Inc(RemovedBeforeActive);
+        Continue;
+      end;
+      Kept[KeptCount] := AZones[i];
+      Kept[KeptCount].SourceEnd := NewEnd - AZones[i].Shift;
+      Inc(KeptCount);
+    end
+    else
+    begin
+      { stationary zone sits to the right (or is engulfed entirely, which
+        this also drops - see the header comment) - shave its head }
+      NewStart := AREnd + GapFrames;
+      if NewStart - AZones[i].Shift >= AZones[i].SourceEnd then
+      begin
+        if i < AActiveIndex then
+          Inc(RemovedBeforeActive);
+        Continue;
+      end;
+      Kept[KeptCount] := AZones[i];
+      Kept[KeptCount].SourceStart := NewStart - AZones[i].Shift;
+      Inc(KeptCount);
+    end;
+  end;
+
+  SetLength(Kept, KeptCount);
+  AZones := Kept;
+  Result := AActiveIndex - RemovedBeforeActive;
+end;
+
+procedure TWarpEditor.DeleteDragZone(const AClip: TClip; AIndex: Integer);
+var
+  NewZones: TDragZoneArray;
+  Clip: TClip;
+  InsertAt, i: Integer;
+begin
+  if (AIndex < 0) or (AIndex > High(AClip.DragZones)) then
+    Exit;
+
+  SetLength(NewZones, Length(AClip.DragZones) - 1);
+  InsertAt := 0;
+  for i := 0 to High(AClip.DragZones) do
+    if i <> AIndex then
+    begin
+      NewZones[InsertAt] := AClip.DragZones[i];
+      Inc(InsertAt);
+    end;
+
+  Clip := AClip;
+  Clip.DragZones := NewZones;
+  SetClipData(Clip);
+end;
+
+{ Double-click gesture: grab the note/sample under the cursor by snapping to
+  the transients bounding it - see warp.md, "start marker... end marker
+  (marked at the end of the specific sample or note)". Falls back to a fixed
+  default width around the click when the sample has no detected transients
+  on one side (or either), rather than snapping all the way to 0 or the clip
+  end, which would grab far more audio than the click meant to. }
+procedure TWarpEditor.CreateDragZoneAtFrame(const AClip: TClip; AFrame: Int64);
+var
+  Transients: TFrameArray;
+  i: Integer;
+  t, ZoneStart, ZoneEnd: Int64;
+  Clip: TClip;
+  NewZones: TDragZoneArray;
+begin
+  if Length(AClip.DragZones) >= MaxClipDragZones then
+    Exit;
+  if (AFrame < 0) or (AFrame >= AClip.Length) then
+    Exit;
+  if HitTestDragZone(AClip, FrameToX(AFrame)) >= 0 then
+    Exit; { already inside a zone }
+
+  ZoneStart := AFrame - (DragZoneDefaultFrames div 2);
+  ZoneEnd := AFrame + (DragZoneDefaultFrames div 2);
+
+  if AClip.SampleID <= High(Project.SampleTransients) then
+  begin
+    Transients := Project.SampleTransients[AClip.SampleID];
+    for i := 0 to High(Transients) do
+    begin
+      t := Transients[i] - AClip.Offset;
+      if t <= AFrame then
+        ZoneStart := t
+      else
+      begin
+        ZoneEnd := t;
+        Break;
+      end;
+    end;
+  end;
+
+  if ZoneStart < 0 then
+    ZoneStart := 0;
+  if ZoneEnd > AClip.Length then
+    ZoneEnd := AClip.Length;
+  if ZoneEnd <= ZoneStart then
+    Exit;
+
+  SetLength(NewZones, Length(AClip.DragZones) + 1);
+  for i := 0 to High(AClip.DragZones) do
+    NewZones[i] := AClip.DragZones[i];
+  NewZones[High(NewZones)].SourceStart := ZoneStart;
+  NewZones[High(NewZones)].SourceEnd := ZoneEnd;
+  NewZones[High(NewZones)].Shift := 0;
+
+  Clip := AClip;
+  Clip.DragZones := NewZones;
+  SetClipData(Clip);
+end;
+
+procedure TWarpEditor.DragZoneMouseDown(const AClip: TClip; X: Integer;
+  Button: TMouseButton);
+var
+  HitIndex: Integer;
+begin
+  HitIndex := HitTestDragZone(AClip, X);
+
+  if Button = mbRight then
+  begin
+    DeleteDragZone(AClip, HitIndex);
+    Exit;
+  end;
+  if Button <> mbLeft then
+    Exit;
+
+  FDragZoneIndex := HitIndex;
+  if FDragZoneIndex >= 0 then
+  begin
+    FZoneDragStartX := X;
+    FZoneDragStartShift := AClip.DragZones[FDragZoneIndex].Shift;
+  end;
+end;
+
+{ Slides the grabbed zone by the same pixel delta the mouse has moved since
+  MouseDown (not since the last MouseMove - re-deriving from the fixed start
+  avoids the drift plain incremental deltas accumulate from integer→frame
+  rounding every event), snaps its rendered start to the beat grid unless
+  Alt is held (matching the other modes' marker-drag convention), then runs
+  overlap resolution against every other zone before committing. }
+procedure TWarpEditor.DragZoneMouseMove(const AClip: TClip; X: Integer;
+  Shift: TShiftState);
+var
+  DeltaFrames, NewShift, NewRStart: Int64;
+  Clip: TClip;
+  NewZones: TDragZoneArray;
+begin
+  if FDragZoneIndex < 0 then
+    Exit;
+
+  Clip := AClip;
+  NewZones := Copy(Clip.DragZones, 0, Length(Clip.DragZones));
+
+  DeltaFrames := XToFrame(X) - XToFrame(FZoneDragStartX);
+  NewShift := FZoneDragStartShift + DeltaFrames;
+
+  if not (ssAlt in Shift) then
+  begin
+    NewRStart := SnapToBeat(NewZones[FDragZoneIndex].SourceStart + NewShift);
+    NewShift := NewRStart - NewZones[FDragZoneIndex].SourceStart;
+  end;
+
+  NewZones[FDragZoneIndex].Shift := NewShift;
+  FDragZoneIndex := ResolveDragZoneOverlaps(NewZones, FDragZoneIndex);
+
+  Clip.DragZones := NewZones;
+  SetClipData(Clip);
 end;
 
 procedure TWarpEditor.DrawPlayhead(const AClip: TClip);
@@ -391,7 +693,10 @@ begin
   DrawClipWaveform(Clip);
   DrawGrid;
   DrawRulerStrip(Clip);
-  DrawMarkers(Clip);
+  if Clip.WarpMode = WarpModeDrag then
+    DrawDragZones(Clip)
+  else
+    DrawMarkers(Clip);
   DrawPlayhead(Clip);
 end;
 
@@ -402,6 +707,7 @@ begin
   FTrackIndex := ATrackIndex;
   FClipIndex := AClipIndex;
   FDragMarkerIndex := -1;
+  FDragZoneIndex := -1;
   GetClip(Clip); { triggers GetClip's own default-marker repair }
   Invalidate;
 end;
@@ -426,6 +732,12 @@ begin
 
   if not GetClip(Clip) then
     Exit;
+
+  if Clip.WarpMode = WarpModeDrag then
+  begin
+    DragZoneMouseDown(Clip, X, Button);
+    Exit;
+  end;
 
   HitIndex := HitTestMarker(Clip, X);
 
@@ -457,6 +769,20 @@ var
   j: Integer;
 begin
   inherited MouseMove(Shift, X, Y);
+
+  if GetClip(Clip) and (Clip.WarpMode = WarpModeDrag) then
+  begin
+    if FDragZoneIndex < 0 then
+    begin
+      if HitTestDragZone(Clip, X) >= 0 then
+        Cursor := crSizeWE
+      else
+        Cursor := crDefault;
+      Exit;
+    end;
+    DragZoneMouseMove(Clip, X, Shift);
+    Exit;
+  end;
 
   if FDragMarkerIndex < 0 then
   begin
@@ -537,6 +863,7 @@ procedure TWarpEditor.MouseUp(Button: TMouseButton; Shift: TShiftState;
 begin
   inherited MouseUp(Button, Shift, X, Y);
   FDragMarkerIndex := -1;
+  FDragZoneIndex := -1;
   Invalidate;
 end;
 
@@ -552,6 +879,12 @@ begin
 
   if not GetClip(Clip) then
     Exit;
+
+  if Clip.WarpMode = WarpModeDrag then
+  begin
+    CreateDragZoneAtFrame(Clip, XToFrame(FLastMouseX));
+    Exit;
+  end;
 
   HitIndex := HitTestMarker(Clip, FLastMouseX);
   if HitIndex >= 0 then

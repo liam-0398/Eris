@@ -409,12 +409,19 @@ const
   ClipDelim = '|';
   MarkerDelim = ';';
   MarkerFieldDelim = ':';
+  { separates the marker section from the drag-zone section within a clip's
+    field list, so UnpackClips knows where the (WarpModeDrag-only) marker
+    run-to-end-of-clip loop below should actually stop. Older saves never
+    contain this character, so they parse exactly as before with zero zones. }
+  DragZoneSectionDelim = '#';
+  DragZoneDelim = ';';
+  DragZoneFieldDelim = ':';
 
 function PackClip(const AClip: TClip): string;
 var
   FS: TFormatSettings;
   m: Integer;
-  MarkerPart: string;
+  MarkerPart, DragZonePart: string;
 begin
   FS := PortableFloatSettings;
   MarkerPart := '';
@@ -425,9 +432,19 @@ begin
     MarkerPart := MarkerPart + IntToStr(AClip.WarpMarkers[m].SourceFrame) +
       MarkerFieldDelim + IntToStr(AClip.WarpMarkers[m].TimelineFrame);
   end;
-  Result := Format('%d,%d,%d,%d,%s,%s,%d,%s', [AClip.SampleID, AClip.Offset,
+  DragZonePart := '';
+  for m := 0 to High(AClip.DragZones) do
+  begin
+    if m > 0 then
+      DragZonePart := DragZonePart + DragZoneDelim;
+    DragZonePart := DragZonePart + IntToStr(AClip.DragZones[m].SourceStart) +
+      DragZoneFieldDelim + IntToStr(AClip.DragZones[m].SourceEnd) +
+      DragZoneFieldDelim + IntToStr(AClip.DragZones[m].Shift);
+  end;
+  Result := Format('%d,%d,%d,%d,%s,%s,%d,%s%s%s', [AClip.SampleID, AClip.Offset,
     AClip.Length, AClip.Position, FloatToStr(AClip.PitchSemitones, FS),
-    FloatToStr(AClip.Gain, FS), AClip.WarpMode, MarkerPart]);
+    FloatToStr(AClip.Gain, FS), AClip.WarpMode, MarkerPart,
+    DragZoneSectionDelim, DragZonePart]);
 end;
 
 { Packs a whole track's clip list (including every clip's warp markers) into
@@ -488,9 +505,10 @@ end;
   ever damage itself and never consume the clips after it. }
 procedure UnpackClips(const S: string; ATrackID: Integer; out AClips: TClipArray);
 var
-  L, P, ClipCount, i, MarkerCount, FieldStart: Integer;
+  L, P, ClipCount, i, MarkerCount, DragZoneCount, FieldStart: Integer;
   FS: TFormatSettings;
   Markers: TWarpMarkerArray;
+  DragZones: TDragZoneArray;
 
   { integer field: reads the digits at P and leaves P on whatever stopped it }
   function ScanInt: Int64;
@@ -524,6 +542,7 @@ var
 
 begin
   Markers := nil;
+  DragZones := nil;
   L := Length(S);
   if L = 0 then
   begin
@@ -566,11 +585,12 @@ begin
 
     AClips[i].WarpMode := ScanInt; NextField;
 
-    { markers run to the end of this clip; collected into one buffer that is
-      reused across clips and copied out at its final size, so the marker
-      count never has to be counted in a separate scan }
+    { markers run to the end of this clip, or to the drag-zone section
+      delimiter if one is present; collected into one buffer that is reused
+      across clips and copied out at its final size, so the marker count
+      never has to be counted in a separate scan }
     MarkerCount := 0;
-    while (P <= L) and (S[P] <> ClipDelim) do
+    while (P <= L) and (S[P] <> ClipDelim) and (S[P] <> DragZoneSectionDelim) do
     begin
       if MarkerCount >= Length(Markers) then
         SetLength(Markers, MarkerCount * 2 + 16);
@@ -579,13 +599,41 @@ begin
         Inc(P);
       Markers[MarkerCount].TimelineFrame := ScanInt;
       Inc(MarkerCount);
-      while (P <= L) and (S[P] <> MarkerDelim) and (S[P] <> ClipDelim) do
+      while (P <= L) and (S[P] <> MarkerDelim) and (S[P] <> ClipDelim) and
+        (S[P] <> DragZoneSectionDelim) do
         Inc(P);
       if (P <= L) and (S[P] = MarkerDelim) then
         Inc(P);
     end;
     if MarkerCount > 0 then
       AClips[i].WarpMarkers := Copy(Markers, 0, MarkerCount);
+
+    { older saves have no drag-zone section at all, so this is skipped and
+      DragZones stays nil - identical to a clip that was never dragged }
+    if (P <= L) and (S[P] = DragZoneSectionDelim) then
+    begin
+      Inc(P);
+      DragZoneCount := 0;
+      while (P <= L) and (S[P] <> ClipDelim) do
+      begin
+        if DragZoneCount >= Length(DragZones) then
+          SetLength(DragZones, DragZoneCount * 2 + 16);
+        DragZones[DragZoneCount].SourceStart := ScanInt;
+        if (P <= L) and (S[P] = DragZoneFieldDelim) then
+          Inc(P);
+        DragZones[DragZoneCount].SourceEnd := ScanInt;
+        if (P <= L) and (S[P] = DragZoneFieldDelim) then
+          Inc(P);
+        DragZones[DragZoneCount].Shift := ScanInt;
+        Inc(DragZoneCount);
+        while (P <= L) and (S[P] <> DragZoneDelim) and (S[P] <> ClipDelim) do
+          Inc(P);
+        if (P <= L) and (S[P] = DragZoneDelim) then
+          Inc(P);
+      end;
+      if DragZoneCount > 0 then
+        AClips[i].DragZones := Copy(DragZones, 0, DragZoneCount);
+    end;
 
     { on to the next clip }
     while (P <= L) and (S[P] <> ClipDelim) do
@@ -1646,7 +1694,7 @@ begin
                 Clip.PitchSemitones, Clip.Offset, Sample.Data, Sample.FrameCount,
                 Sample.Channels, AudioEngine.ProjectSampleRate, Clip.WarpMode, 0,
                 Clip.Length, Project.SampleTransients[Clip.SampleID],
-                Project.SamplePeriods[Clip.SampleID]) * Clip.Gain;
+                Project.SamplePeriods[Clip.SampleID], Clip.DragZones) * Clip.Gain;
               TrackBuffers[t][OutIdx] := TrackBuffers[t][OutIdx] + MonoSample;
               TrackBuffers[t][OutIdx + 1] := TrackBuffers[t][OutIdx + 1] + MonoSample;
             end
@@ -1657,13 +1705,13 @@ begin
                   Sample.Data, Sample.FrameCount, Sample.Channels,
                   AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length,
                   Project.SampleTransients[Clip.SampleID],
-                    Project.SamplePeriods[Clip.SampleID]) * Clip.Gain;
+                    Project.SamplePeriods[Clip.SampleID], Clip.DragZones) * Clip.Gain;
               TrackBuffers[t][OutIdx + 1] := TrackBuffers[t][OutIdx + 1] +
                 DetunedSample(Clip.WarpMarkers, ClipFrame, Clip.PitchSemitones, Clip.Offset,
                   Sample.Data, Sample.FrameCount, Sample.Channels,
                   AudioEngine.ProjectSampleRate, Clip.WarpMode, 1, Clip.Length,
                   Project.SampleTransients[Clip.SampleID],
-                    Project.SamplePeriods[Clip.SampleID]) * Clip.Gain;
+                    Project.SamplePeriods[Clip.SampleID], Clip.DragZones) * Clip.Gain;
             end;
 
             Inc(AbsFrame);

@@ -29,6 +29,21 @@ type
     ascending order - see Waveform.DetectTransients }
   TFrameArray = array of Int64;
 
+  { A drag zone grabs the source span [SourceStart, SourceEnd) (clip-relative,
+    same coordinate space as TWarpMarker.SourceFrame) and slides it Shift
+    frames along the timeline with no resampling - unlike TWarpMarker spans,
+    content inside a zone plays back 1:1, so no vari-speed pitch/time
+    artifacting. Rendered timeline range is
+    [SourceStart+Shift, SourceEnd+Shift). Timeline frames not covered by any
+    zone's rendered range play silence. Zones are kept non-overlapping (on
+    the timeline) by the editor at drag time - see WarpEditor - so DSP can
+    assume sorted, disjoint rendered ranges. See AudioEngine.DragClipSample. }
+  TDragZone = record
+    SourceStart, SourceEnd: Int64;
+    Shift: Int64;
+  end;
+  TDragZoneArray = array of TDragZone;
+
 const
   { The one sample rate everything in the pool is held at. The engine has no
     per-sample rate: AudioEngine plays every voice at ProjectSampleRate and
@@ -59,10 +74,19 @@ const
     the polyphonic sustained middle they both handle badly, and is the default
     because it is also the one that degrades most gracefully on anything else.
     See AudioEngine.AudioClipSample. }
+  { Drag ("D"): a blend of RePitch and Tones - grab a zone bounded by a green
+    start marker and a red end marker (dropped at a note/sample's transient
+    and tail) and slide the whole zone along the timeline, 1:1, no
+    resampling. The vacated span between where the zone's end marker now
+    sits and where it used to sit plays silence (crossfaded against the
+    zone's tail) rather than stretching to fill it, trading a little silence
+    for zero warp distortion on quantize-heavy sampled material. See
+    AudioEngine.DragClipSample. }
   WarpModeBeats = 0;
   WarpModeRePitch = 1;
   WarpModeTones = 2;
   WarpModeAudio = 3;
+  WarpModeDrag = 4;
 
 type
   TClip = record
@@ -74,6 +98,7 @@ type
     Gain: Single;
     WarpMarkers: TWarpMarkerArray;
     WarpMode: Integer;
+    DragZones: TDragZoneArray;
   end;
 
   TClipArray = array of TClip;
