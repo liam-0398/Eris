@@ -103,6 +103,10 @@ procedure VScale(ADst: PSingle; AScale: Single; ACount: PtrInt);
 procedure VScale2(ADstL, ADstR: PSingle; AScaleL, AScaleR: Single; ACount: PtrInt);
 { ADst[i] := max(abs(ASrcA[i]), abs(ASrcB[i])) }
 procedure VMaxAbs2(ADst, ASrcA, ASrcB: PSingle; ACount: PtrInt);
+{ ADst[i] := ASrcA[i] * ASrcB[i] - the STFT window multiply in
+  PhaseVocoder.pas (AU mode's analysis/synthesis windowing), elementwise and
+  bit-identical to the scalar loop for the same reason VScale is. }
+procedure VMul(ADst, ASrcA, ASrcB: PSingle; ACount: PtrInt);
 { ADst[i] := clamp(ADst[i], -1.0, +1.0) }
 procedure VClamp1(ADst: PSingle; ACount: PtrInt);
 { ADst[i] := ASrc[i] / 32768.0, ASrc being interleaved 16-bit signed PCM.
@@ -247,6 +251,14 @@ begin
     else
       ADst[i] := aB;
   end;
+end;
+
+procedure VMulPas(ADst, ASrcA, ASrcB: PSingle; ACount: PtrInt);
+var
+  i: PtrInt;
+begin
+  for i := 0 to ACount - 1 do
+    ADst[i] := ASrcA[i] * ASrcB[i];
 end;
 
 procedure VClamp1Pas(ADst: PSingle; ACount: PtrInt);
@@ -487,6 +499,39 @@ begin
 @done:
     vzeroupper
   end ['rax', 'rcx', 'rdx'];
+end;
+
+procedure VMulAvx(ADst, ASrcA, ASrcB: PSingle; ACount: PtrInt);
+begin
+  asm
+    mov  rax, ADst
+    mov  r10, ASrcA
+    mov  r11, ASrcB
+    mov  rcx, ACount
+    xor  rdx, rdx
+    sub  rcx, 8
+    jl   @tail_setup
+@loop8:
+    vmovups ymm0, [r10+rdx*4]
+    vmovups ymm1, [r11+rdx*4]
+    vmulps  ymm0, ymm0, ymm1
+    vmovups [rax+rdx*4], ymm0
+    add  rdx, 8
+    cmp  rdx, rcx
+    jle  @loop8
+@tail_setup:
+    add  rcx, 8
+@tail:
+    cmp  rdx, rcx
+    jge  @done
+    vmovss  xmm0, [r10+rdx*4]
+    vmulss  xmm0, xmm0, [r11+rdx*4]
+    vmovss  [rax+rdx*4], xmm0
+    add  rdx, 1
+    jmp  @tail
+@done:
+    vzeroupper
+  end ['rax', 'rcx', 'rdx', 'r10', 'r11'];
 end;
 
 { The one routine here that writes two buffers. Both scale factors are
@@ -960,6 +1005,20 @@ begin
   VMaxAbs2Pas(ADst, ASrcA, ASrcB, ACount);
 end;
 
+procedure VMul(ADst, ASrcA, ASrcB: PSingle; ACount: PtrInt);
+begin
+  if ACount <= 0 then
+    Exit;
+{$IFDEF CPUX86_64}
+  if VectorPathIsAVX2 then
+  begin
+    VMulAvx(ADst, ASrcA, ASrcB, ACount);
+    Exit;
+  end;
+{$ENDIF}
+  VMulPas(ADst, ASrcA, ASrcB, ACount);
+end;
+
 procedure VClamp1(ADst: PSingle; ACount: PtrInt);
 begin
   if ACount <= 0 then
@@ -1118,6 +1177,11 @@ begin
   Reset;
   VClamp1Pas(@RefBuf[0], N);
   VClamp1Avx(@TstBuf[0], N);
+  if not Same then Exit;
+
+  Reset;
+  VMulPas(@RefBuf[0], @Src[0], @SrcB[0], N);
+  VMulAvx(@TstBuf[0], @Src[0], @SrcB[0], N);
   if not Same then Exit;
 
   { s16 source of its own, since this is the one routine that does not take

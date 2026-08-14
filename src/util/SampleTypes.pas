@@ -88,6 +88,16 @@ const
   WarpModeAudio = 3;
   WarpModeDrag = 4;
 
+  { AU mode's STFT grain size (must be a power of two - see
+    PhaseVocoder.SnapFFTSize, which enforces that regardless of what is
+    stored here). 4096 frames is ~93ms at 44.1kHz: enough frequency
+    resolution to phase-lock a chord or a played instrument's harmonic stack
+    cleanly, while still being short enough that instrument/vocal chops
+    (relatively fast-moving, percussive-onset material within the sustain)
+    don't smear across a whole grain. The clip-level FFT size slider in
+    MainForm ranges 512..8192 around this default. }
+  AUFFTSizeDefault = 4096;
+
 type
   TClip = record
     SampleID: Integer;
@@ -99,6 +109,7 @@ type
     WarpMarkers: TWarpMarkerArray;
     WarpMode: Integer;
     DragZones: TDragZoneArray;
+    AUFFTSize: Integer; { WarpModeAudio only - see PhaseVocoder.GetAUAudio }
   end;
 
   TClipArray = array of TClip;

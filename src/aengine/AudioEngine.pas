@@ -49,6 +49,10 @@ type
     DragZoneSourceStart: array[0..MaxClipDragZones - 1] of Int64;
     DragZoneSourceEnd: array[0..MaxClipDragZones - 1] of Int64;
     DragZoneShift: array[0..MaxClipDragZones - 1] of Int64;
+    AUData: PSingle; { precomputed phase-vocoder stretch for WarpMode 3, owned
+      by PhaseVocoder's cache (same lifetime pattern as Data/Transients - see
+      PushTrackToEngine and AudioClipSample below); nil if not built/applicable }
+    AUFrameCount: Integer;
   end;
   PPlaybackClip = ^TPlaybackClip;
 
@@ -1741,345 +1745,31 @@ begin
   Result := Acc;
 end;
 
-const
-  { declick across an anchor handover, where one region's read ends and the
-    next one begins. It lands in the pre-attack gap by construction, since
-    DetectTransients already backs every boundary off into the quietest block
-    before the attack, so it never softens the attack itself. }
-  AudioAnchorFadeFrames = 64;
-
-{ ---------------------------------------------------------------------------
-  Audio warp ("AU"): sparse period splicing, for sustained material that is
-  neither drums nor monophonic bass - pads, played instruments, chopped
-  sample-and-hold recordings, the recorded output of a sampler.
-
-  Beats cannot serve this material and no setting makes it. A stretched Beats
-  slice fills its surplus timeline by ping-ponging over its own back half, so
-  the audio plays BACKWARDS for a fifth of every slice at the ratios a quantise
-  produces, on a fixed cycle - that periodicity is the warble. Beats is right
-  for drums, where the slices are whole hits and the fill lands in a decay
-  nobody tracks pitch through. LF is right for monophonic sub. AU covers the
-  middle, and buys its time by repeating or dropping whole waveform PERIODS
-  rather than reversing anything.
-
-  The thing to understand about this design is where the artifacts are allowed
-  to live. Between splices the read is a plain 1:1 walk through the source -
-  not a blend, not a resample, bit-identical to the original audio. ALL of the
-  stretch is paid for at discrete splice points, spaced
-
-    Step = P * SegTimelineLen / |SegTimelineLen - SegSourceLen|
-
-  timeline frames apart, where the read jumps back by exactly one period (to
-  stretch) or forward by one (to compress), crossfaded over a window of about
-  a period. So the fraction of output that is a crossfade at all is roughly
-  Fade/Step, which at the ratios a quantise produces is small and at ratio 1
-  is zero.
-
-  That fraction is the entire quality story, and it is why this replaced a
-  50%-overlap OLA that snapped its grain starts to the period lattice. That
-  version was correct about phase - the two overlapping grains really did
-  differ by a whole number of periods - but it was ALWAYS crossfading, so
-  whenever that whole number was not zero the output combed continuously, and
-  it alternated between combing and transparent at the hop rate. Around 35Hz,
-  heard as a fast tearing roughness rather than a wobble. Being right about
-  phase does not help if the material's phase is not what the period says it
-  is, which brings us to:
-
-  Perfect period alignment is NOT assumed, because on the real material it is
-  not available. An orchestral chop, a chord, anything with strings, brass,
-  room or reverb in it is substantially INHARMONIC - its partials are not
-  multiples of whatever DetectFundamentalPeriod settled on, so shifting by P
-  does not bring them back into phase and a crossfade across that shift combs
-  them. There is no period that fixes that. What there is instead is the
-  option to spend as little time as possible inside a crossfade, which is what
-  this does: the harmonic part of the signal splices cleanly because P suits
-  it, the inharmonic part combs for Fade frames every Step frames, and the
-  rest of the time nothing is happening to the audio at all.
-
-  This is also why TonesClipSample's header rejects period snapping and is
-  right to. Its objections were that the snap sawtooths, and that where two
-  grains land anti-phase they cancel while in phase they sum to +6dB. Both are
-  properties of a continuous overlap, and neither survives here: outside a
-  splice there is only one read, so there is nothing to cancel against and
-  nothing to sum. Its third objection - that a single P for a whole sample is
-  a fiction on gliding material - stands, and is why LF still exists for 808s.
-
-  Two properties worth keeping true when editing this:
-
-  * Ratio 1 is bit-transparent, and so is every frame outside a splice at any
-    ratio. SegTimelineLen = SegSourceLen makes Step infinite, the splice
-    machinery drops out entirely and the read is AnchorSrc + u.
-
-  * Transients are never spliced across. The read restarts at every detected
-    onset, exactly on the onset, and the first splice cannot occur until
-    Step/2 frames after it - so an attack and the audio immediately behind it
-    are reproduced untouched rather than repeated or crossfaded. This is
-    always on; there is nothing to configure.
-  --------------------------------------------------------------------------- }
+{ Audio warp ("AU"): phase-locked phase vocoder with spectral-flux onset
+  detection, hand-rolled Cooley-Tukey FFT - see PhaseVocoder.pas for the full
+  algorithm. Unlike Beats/Tones/RePitch/Drag this is not evaluable one output
+  frame at a time from source data alone (an STFT grain depends on its
+  neighbours through the phase accumulator), so the actual DSP runs once per
+  clip, off the audio thread, in PushTrackToEngine - what runs here is a
+  bounds-checked read of that precomputed, already timeline-shaped buffer,
+  exactly the same shape as the plain 1:1 read every other renderer falls
+  back to when it has nothing to warp. }
 function AudioClipSample(Clip: PPlaybackClip; AClipRelativeFrame: Int64;
   AChannel: Integer; AHintK: PInteger): Single;
-var
-  k: Integer;
-  SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen, SegEnd: Int64;
-  FirstTrans, TransInSeg: Integer;
-  P, NominalSrc: Int64;
-  CurIdx, CurSrc, CurTL, PrevSrc, t: Int64;
-  CurVal, PrevVal, w: Double;
-  HavePrev: Boolean;
-
-  function SafeInterp(APos: Double): Single;
-  var
-    AbsPos: Double;
-  begin
-    AbsPos := Clip^.Offset + APos;
-    if (AbsPos < 0) or (AbsPos >= Clip^.FrameCount) then
-      Result := 0
-    else
-      Result := LinearInterpolate(Clip^.Data, Clip^.FrameCount, Clip^.Channels,
-        AChannel, AbsPos);
-  end;
-
-  function TransAt(AIndex: Integer): Int64;
-  begin
-    Result := (Clip^.Transients + AIndex)^ - Clip^.Offset;
-  end;
-
-  { same segment/transient-range setup as BeatsClipSample - see there, and
-    see there too for why every comparison carries -Clip^.Offset }
-  procedure LoadSegment(AK: Integer);
-  var
-    lo, hi, mid: Integer;
-  begin
-    SegStartTimeline := Clip^.MarkerTimeline[AK];
-    SegStartSource := Clip^.MarkerSource[AK];
-    SegTimelineLen := Clip^.MarkerTimeline[AK + 1] - SegStartTimeline;
-    SegSourceLen := Clip^.MarkerSource[AK + 1] - SegStartSource;
-    SegEnd := SegStartSource + SegSourceLen;
-
-    FirstTrans := 0;
-    TransInSeg := 0;
-    if (SegTimelineLen <= 0) or (SegSourceLen <= 0) then
-      Exit;
-    if (Clip^.Transients = nil) or (Clip^.TransientCount <= 0) then
-      Exit;
-
-    lo := 0;
-    hi := Clip^.TransientCount;
-    while lo < hi do
-    begin
-      mid := lo + (hi - lo) div 2;
-      if TransAt(mid) <= SegStartSource then
-        lo := mid + 1
-      else
-        hi := mid;
-    end;
-    FirstTrans := lo;
-
-    hi := Clip^.TransientCount;
-    while lo < hi do
-    begin
-      mid := lo + (hi - lo) div 2;
-      if TransAt(mid) < SegEnd then
-        lo := mid + 1
-      else
-        hi := mid;
-    end;
-    TransInSeg := lo - FirstTrans;
-  end;
-
-  function TimelineOf(ASource: Int64): Int64;
-  begin
-    Result := SegStartTimeline +
-      ((ASource - SegStartSource) * SegTimelineLen) div SegSourceLen;
-  end;
-
-  { Anchor AIndex of the loaded segment: 0 is the segment's own start, and
-    1..TransInSeg are its transients. Each anchor starts a fresh grain
-    lattice, which is what keeps attacks intact. }
-  function AnchorLo(AIndex: Int64): Int64;
-  begin
-    if (AIndex <= 0) or (TransInSeg <= 0) then
-      Exit(SegStartSource);
-    if AIndex > TransInSeg then
-      AIndex := TransInSeg;
-    Result := TransAt(FirstTrans + AIndex - 1);
-  end;
-
-  { the anchor owning AClipRelativeFrame: seeded from the nominal source
-    position, then corrected against the real timeline bounds so the seed's
-    integer rounding can never disagree with the bounds used below. Both
-    correction loops run at most once in practice - same shape as
-    BeatsClipSample.FindSlice. }
-  function FindAnchor: Int64;
-  var
-    lo, hi, mid: Int64;
-  begin
-    if TransInSeg <= 0 then
-      Exit(0);
-
-    lo := 0;
-    hi := TransInSeg;
-    while lo < hi do
-    begin
-      mid := lo + (hi - lo + 1) div 2;
-      if AnchorLo(mid) <= NominalSrc then
-        lo := mid
-      else
-        hi := mid - 1;
-    end;
-    Result := lo;
-
-    while (Result > 0) and (AClipRelativeFrame < TimelineOf(AnchorLo(Result))) do
-      Dec(Result);
-    while (Result < TransInSeg) and
-      (AClipRelativeFrame >= TimelineOf(AnchorLo(Result + 1))) do
-      Inc(Result);
-  end;
-
-  { One anchor region's output at this frame: a 1:1 read displaced by whole
-    periods, crossfaded only in the immediate neighbourhood of a splice.
-    Derivable from the frame number alone - no running state, so this stays a
-    pure function of the timeline frame like every other renderer here.
-
-    Reading past the region's own end (which the anchor crossfade below asks
-    for) is deliberate and safe: that is contiguous real source audio, the
-    literal continuation of what the region was already playing. }
-  function RegionSample(AAnchorSrc, AAnchorTL: Int64): Single;
-  var
-    u, Num, k0, kNb: Int64;
-    StepSigned, Step, z, zf, dLow, dHigh, dNear, Fade, w: Double;
-  begin
-    u := AClipRelativeFrame - AAnchorTL;
-    if u < 0 then
-      u := 0;
-
-    { how much timeline this segment owes over its own source length. Zero
-      means nothing to pay for and the whole splice mechanism drops out - see
-      the header's transparency note. }
-    Num := SegTimelineLen - SegSourceLen;
-    if Num = 0 then
-      Exit(SafeInterp(AAnchorSrc + u));
-
-    { timeline frames per one-period displacement, signed: positive when the
-      segment is stretched (the read falls behind and periods get repeated),
-      negative when compressed (the read runs ahead and periods get dropped) }
-    StepSigned := (Double(SegTimelineLen) * P) / Num;
-    Step := Abs(StepSigned);
-    if Step < 1 then
-      Exit(SafeInterp(AAnchorSrc + u));
-
-    { which displacement this frame is under. Splices sit on the half-integer
-      boundaries of z, so the nearest one is whichever of the two bracketing
-      boundaries is closer in TIME - computed in u rather than z so the sign
-      of StepSigned needs no special-casing. }
-    z := u / StepSigned;
-    zf := z + 0.5;
-    k0 := Trunc(zf);
-    if (zf < 0) and (zf <> k0) then
-      Dec(k0);
-
-    dLow := Abs(u - (k0 - 0.5) * StepSigned);
-    dHigh := Abs(u - (k0 + 0.5) * StepSigned);
-    if dLow <= dHigh then
-    begin
-      dNear := dLow;
-      kNb := k0 - 1;
-    end
-    else
-    begin
-      dNear := dHigh;
-      kNb := k0 + 1;
-    end;
-
-    { about a period: the shortest crossfade that does not chop a cycle in
-      half. Clamped so two splices can never overlap - past that point there
-      would be a third branch to sum and this would stop being two reads. }
-    Fade := P;
-    if Fade > Step * 0.5 then
-      Fade := Step * 0.5;
-    if Fade < 1 then
-      Fade := 1;
-
-    if dNear >= Fade * 0.5 then
-      { the common case by a wide margin: untouched 1:1 source audio }
-      Exit(SafeInterp(AAnchorSrc + u - k0 * P));
-
-    { inside a splice. Amplitude-complementary (w and 1 - w), never power-
-      complementary: the two branches are the same audio one period apart and
-      so are correlated, and power-complementary summing of correlated content
-      is exactly the +6dB TonesClipSample's header warns about. Smoothstep for
-      the curve - zero slope at both ends like a raised cosine, without a cos()
-      on the realtime thread. }
-    w := 0.5 + dNear / Fade;
-    w := w * w * (3 - 2 * w);
-    Result := SafeInterp(AAnchorSrc + u - k0 * P) * w +
-      SafeInterp(AAnchorSrc + u - kNb * P) * (1 - w);
-  end;
-
 begin
-  if Clip^.MarkerCount < 2 then
-    Exit(SafeInterp(AClipRelativeFrame));
-
-  P := Clip^.PeriodFrames;
-  if P < 1 then
-    { no usable fundamental was found, so there is no lattice to synchronise
-      to and granulating on an arbitrary period would comb. Hand off to the
-      general-purpose pitch-preserving warp rather than guess. }
-    Exit(BeatsClipSample(Clip, AClipRelativeFrame, AChannel, AHintK));
-
-  k := FindWarpSegment(Clip, AClipRelativeFrame, AHintK);
-
-  LoadSegment(k);
-  if (SegTimelineLen <= 0) or (SegSourceLen <= 0) then
-    Exit(SafeInterp(SegStartSource));
-
-  NominalSrc := SegStartSource +
-    ((AClipRelativeFrame - SegStartTimeline) * SegSourceLen) div SegTimelineLen;
-
-  CurIdx := FindAnchor;
-  CurSrc := AnchorLo(CurIdx);
-  CurTL := TimelineOf(CurSrc);
-  t := AClipRelativeFrame - CurTL;
-
-  HavePrev := False;
-  PrevVal := 0;
-  if (t >= 0) and (t < AudioAnchorFadeFrames) then
+  if (Clip^.AUData = nil) or (AClipRelativeFrame < 0) or
+    (AClipRelativeFrame >= Clip^.AUFrameCount) then
   begin
-    { just after a handover, so the outgoing lattice is still needed to fade
-      across. Without this the splice jumps read position by up to the snap's
-      own P/2, which on held harmonic material is a phase jump. }
-    if CurIdx > 0 then
-    begin
-      PrevSrc := AnchorLo(CurIdx - 1);
-      PrevVal := RegionSample(PrevSrc, TimelineOf(PrevSrc));
-      HavePrev := True;
-    end
-    else if k > 0 then
-    begin
-      { the handover is at a marker, so the outgoing lattice belongs to the
-        previous segment and has to be evaluated under THAT segment's ratio -
-        load it, sample it, then restore the one this frame belongs to }
-      LoadSegment(k - 1);
-      if (SegTimelineLen > 0) and (SegSourceLen > 0) then
-      begin
-        PrevSrc := AnchorLo(TransInSeg);
-        PrevVal := RegionSample(PrevSrc, TimelineOf(PrevSrc));
-        HavePrev := True;
-      end;
-      LoadSegment(k);
-    end;
+    if Clip^.AUData = nil then
+      { no precomputed stretch (build failed, or hasn't run yet) - fall back
+        to the general-purpose pitch-preserving warp rather than play silence }
+      Exit(BeatsClipSample(Clip, AClipRelativeFrame, AChannel, AHintK));
+    Exit(0);
   end;
-
-  CurVal := RegionSample(CurSrc, CurTL);
-
-  if HavePrev then
-  begin
-    w := t / AudioAnchorFadeFrames;
-    Result := PrevVal * (1 - w) + CurVal * w;
-  end
-  else
-    Result := CurVal;
+  Result := LinearInterpolate(Clip^.AUData, Clip^.AUFrameCount, Clip^.Channels,
+    AChannel, AClipRelativeFrame);
 end;
+
 
 { True if AFrame falls inside some zone's HOME span (DragZoneSourceStart[z]
   .. DragZoneSourceEnd[z], i.e. where it would render if Shift were 0) while
