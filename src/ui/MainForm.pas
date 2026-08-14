@@ -82,6 +82,12 @@ type
     FClipGainValueLabel: TLabel;
     FClipDetuneSlider: TTrackBar;
     FClipDetuneValueLabel: TLabel;
+    { AU mode only - see UpdateWarpModeButtons/UpdateClipControls. Position is
+      log2(FFT size), not the size itself, so the slider's integer steps land
+      exactly on powers of two - see ClipFFTSizeSliderChange. }
+    FClipFFTSizeSlider: TTrackBar;
+    FClipFFTSizeValueLabel: TLabel;
+    FClipFFTSizeLbl: TLabel;
     FInstrumentEditorWidget: TPanel;
     FInstrumentEditor: TInstrumentEditor;
     FInstrumentGridButton: TButton;
@@ -174,6 +180,7 @@ type
     procedure UpdateWindowTitle;
     function WaitForEngineIdle: Boolean;
     procedure ClipDetuneSliderChange(Sender: TObject);
+    procedure ClipFFTSizeSliderChange(Sender: TObject);
     procedure UpdateClipControls;
     procedure MetronomeToggleClick(Sender: TObject);
     procedure UpdateMetronomeToggleLook;
@@ -906,7 +913,7 @@ begin
   ClipControlsPanel.Parent := FWarpWidget;
   ClipControlsPanel.Left := WarpZoomPanel.Width + WarpButtonsPanel.Width;
   ClipControlsPanel.Top := 0;
-  ClipControlsPanel.Width := Px(80);
+  ClipControlsPanel.Width := Px(118);
   ClipControlsPanel.Height := Px(WidgetHeight);
   ClipControlsPanel.BevelOuter := bvNone;
 
@@ -967,6 +974,38 @@ begin
   FClipDetuneValueLabel.Left := Px(42);
   FClipDetuneValueLabel.Top := Px(154);
   FClipDetuneValueLabel.Caption := '0 st';
+
+  { AU mode's STFT grain size - only ever visible while a clip is in AU mode,
+    see UpdateWarpModeButtons. Position is log2(size): Min=9 -> 512,
+    Max=13 -> 8192, matching warp.md's asked-for range. }
+  FClipFFTSizeLbl := TLabel.Create(Self);
+  FClipFFTSizeLbl.Parent := ClipControlsPanel;
+  FClipFFTSizeLbl.Left := Px(80);
+  FClipFFTSizeLbl.Top := Px(4);
+  FClipFFTSizeLbl.Caption := 'FFT';
+
+  FClipFFTSizeSlider := TTrackBar.Create(Self);
+  FClipFFTSizeSlider.Parent := ClipControlsPanel;
+  FClipFFTSizeSlider.Orientation := trVertical;
+  FClipFFTSizeSlider.Left := Px(80);
+  FClipFFTSizeSlider.Top := Px(20);
+  FClipFFTSizeSlider.Width := Px(32);
+  FClipFFTSizeSlider.Height := Px(130);
+  FClipFFTSizeSlider.Reversed := True; { up = higher resolution, same convention as gain/detune }
+  FClipFFTSizeSlider.Min := 9;
+  FClipFFTSizeSlider.Max := 13;
+  FClipFFTSizeSlider.Position := 12;
+  FClipFFTSizeSlider.ShowHint := True;
+  FClipFFTSizeSlider.Hint :=
+    'AU mode FFT/grain size - higher resolves chords and sustained pads ' +
+    'more cleanly, lower tracks fast instrument/vocal chops more tightly';
+  FClipFFTSizeSlider.OnChange := @ClipFFTSizeSliderChange;
+
+  FClipFFTSizeValueLabel := TLabel.Create(Self);
+  FClipFFTSizeValueLabel.Parent := ClipControlsPanel;
+  FClipFFTSizeValueLabel.Left := Px(80);
+  FClipFFTSizeValueLabel.Top := Px(154);
+  FClipFFTSizeValueLabel.Caption := '4096';
 
   { "R" (Render): its own vertical bar on the right edge, same style/size as
     the D/AU/LF/RP/BT column on the left - see warp.md "D (drag) mode".
@@ -1813,6 +1852,7 @@ begin
   Clip.PitchSemitones := 0;
   Clip.Gain := 1.0;
   Clip.WarpMode := SampleTypes.WarpModeAudio;
+  Clip.AUFFTSize := SampleTypes.AUFFTSizeDefault;
 
   Project.PushUndoSnapshot(FRecordTrackIndex);
   Project.CommitClipToTrack(FRecordTrackIndex, Clip);
@@ -1925,6 +1965,7 @@ begin
   Clip.PitchSemitones := 0;
   Clip.Gain := 1.0;
   Clip.WarpMode := SampleTypes.WarpModeAudio;
+  Clip.AUFFTSize := SampleTypes.AUFFTSizeDefault;
 
   Project.PushUndoSnapshot(FPendingImportTrack);
   Project.CommitClipToTrack(FPendingImportTrack, Clip);
@@ -2085,6 +2126,9 @@ begin
     at all - a fresh clip just plays normally until the user double-clicks a
     start/end pair to carve out its first zone. }
   Project.Tracks[Track].Clips[ClipIdx].WarpMode := AMode;
+  if (AMode = SampleTypes.WarpModeAudio) and
+    (Project.Tracks[Track].Clips[ClipIdx].AUFFTSize = 0) then
+    Project.Tracks[Track].Clips[ClipIdx].AUFFTSize := SampleTypes.AUFFTSizeDefault;
 
   { Project.Tracks holds the UI/offline copy of the clip. The realtime
     audio thread plays from its OWN fixed-size TPlaybackClip copy (see
@@ -2241,7 +2285,13 @@ begin
     FWarpAudioButton.Font.Color := clWindowText;
   end;
   FWarpAudioButton.Hint :=
-    'Warp mode: Audio/AU (period-synchronous - for pads, instruments, sampler output)';
+    'Warp mode: Audio/AU (phase-locked phase vocoder - for pads, instruments, sampler output)';
+
+  { FFT resolution slider only makes sense in AU mode - see the unit header
+    on PhaseVocoder.pas }
+  FClipFFTSizeSlider.Visible := FWarpAudioButton.Down;
+  FClipFFTSizeValueLabel.Visible := FWarpAudioButton.Down;
+  FClipFFTSizeLbl.Visible := FWarpAudioButton.Down;
 
   if FWarpDragButton.Down then
   begin
@@ -2300,6 +2350,26 @@ begin
   FArrangementView.RefreshTrack(Track);
 end;
 
+procedure TForm1.ClipFFTSizeSliderChange(Sender: TObject);
+var
+  Track, ClipIdx, Size: Integer;
+begin
+  Track := FArrangementView.SelectedTrack;
+  ClipIdx := FArrangementView.SelectedClipIndex;
+  if (Track < 0) or (ClipIdx < 0) or (ClipIdx > High(Project.Tracks[Track].Clips)) then
+    Exit;
+  Size := 1 shl FClipFFTSizeSlider.Position;
+  Project.Tracks[Track].Clips[ClipIdx].AUFFTSize := Size;
+  FClipFFTSizeValueLabel.Caption := IntToStr(Size);
+  { unlike gain/detune this changes the actual DSP, not just a multiplier
+    applied at read time - the clip's cached phase-vocoder stretch has to be
+    rebuilt, which PushTrackToEngine does (GetAUAudio's cache key includes
+    AFFTSize, so this lands as a fresh cache entry rather than reusing the
+    stale one) }
+  FArrangementView.PushTrackToEngine(Track);
+  FArrangementView.RefreshTrack(Track);
+end;
+
 procedure TForm1.UpdateClipControls;
 var
   Track, ClipIdx, GainDb: Integer;
@@ -2317,6 +2387,13 @@ begin
 
   FClipDetuneSlider.Position := Round(Project.Tracks[Track].Clips[ClipIdx].PitchSemitones);
   FClipDetuneValueLabel.Caption := Format('%d st', [FClipDetuneSlider.Position]);
+
+  if Project.Tracks[Track].Clips[ClipIdx].AUFFTSize < 512 then
+    FClipFFTSizeSlider.Position := 12
+  else
+    FClipFFTSizeSlider.Position :=
+      Round(Log2(Project.Tracks[Track].Clips[ClipIdx].AUFFTSize));
+  FClipFFTSizeValueLabel.Caption := IntToStr(1 shl FClipFFTSizeSlider.Position);
 end;
 
 procedure TForm1.WarpZoomInClick(Sender: TObject);

@@ -416,6 +416,11 @@ const
   DragZoneSectionDelim = '#';
   DragZoneDelim = ';';
   DragZoneFieldDelim = ':';
+  { AU mode's per-clip FFT size, appended after the drag-zone section - see
+    PackClip/UnpackClips. Older saves never contain this character either, so
+    they parse exactly as before and default AUFFTSize the same way an old
+    save with no DragZoneSectionDelim defaults to zero zones. }
+  AUSectionDelim = '@';
 
 function PackClip(const AClip: TClip): string;
 var
@@ -441,10 +446,10 @@ begin
       DragZoneFieldDelim + IntToStr(AClip.DragZones[m].SourceEnd) +
       DragZoneFieldDelim + IntToStr(AClip.DragZones[m].Shift);
   end;
-  Result := Format('%d,%d,%d,%d,%s,%s,%d,%s%s%s', [AClip.SampleID, AClip.Offset,
+  Result := Format('%d,%d,%d,%d,%s,%s,%d,%s%s%s%s%d', [AClip.SampleID, AClip.Offset,
     AClip.Length, AClip.Position, FloatToStr(AClip.PitchSemitones, FS),
     FloatToStr(AClip.Gain, FS), AClip.WarpMode, MarkerPart,
-    DragZoneSectionDelim, DragZonePart]);
+    DragZoneSectionDelim, DragZonePart, AUSectionDelim, AClip.AUFFTSize]);
 end;
 
 { Packs a whole track's clip list (including every clip's warp markers) into
@@ -584,6 +589,7 @@ begin
       Inc(P);
 
     AClips[i].WarpMode := ScanInt; NextField;
+    AClips[i].AUFFTSize := SampleTypes.AUFFTSizeDefault;
 
     { markers run to the end of this clip, or to the drag-zone section
       delimiter if one is present; collected into one buffer that is reused
@@ -614,7 +620,7 @@ begin
     begin
       Inc(P);
       DragZoneCount := 0;
-      while (P <= L) and (S[P] <> ClipDelim) do
+      while (P <= L) and (S[P] <> ClipDelim) and (S[P] <> AUSectionDelim) do
       begin
         if DragZoneCount >= Length(DragZones) then
           SetLength(DragZones, DragZoneCount * 2 + 16);
@@ -626,13 +632,25 @@ begin
           Inc(P);
         DragZones[DragZoneCount].Shift := ScanInt;
         Inc(DragZoneCount);
-        while (P <= L) and (S[P] <> DragZoneDelim) and (S[P] <> ClipDelim) do
+        while (P <= L) and (S[P] <> DragZoneDelim) and (S[P] <> ClipDelim) and
+          (S[P] <> AUSectionDelim) do
           Inc(P);
         if (P <= L) and (S[P] = DragZoneDelim) then
           Inc(P);
       end;
       if DragZoneCount > 0 then
         AClips[i].DragZones := Copy(DragZones, 0, DragZoneCount);
+    end;
+
+    { older saves have no AU-FFT-size section at all, so AUFFTSize keeps the
+      default set above - same backward-compatibility idiom as the drag-zone
+      section just above }
+    if (P <= L) and (S[P] = AUSectionDelim) then
+    begin
+      Inc(P);
+      AClips[i].AUFFTSize := ScanInt;
+      if AClips[i].AUFFTSize <= 0 then
+        AClips[i].AUFFTSize := SampleTypes.AUFFTSizeDefault;
     end;
 
     { on to the next clip }
@@ -1399,6 +1417,7 @@ begin
             were authored and listened to as Beats and must keep sounding
             that way. Only clips created from now on start out as Audio. }
           Clip.WarpMode := Ini.ReadInteger(Section, Prefix + 'WarpMode', SampleTypes.WarpModeBeats);
+          Clip.AUFFTSize := Ini.ReadInteger(Section, Prefix + 'AUFFTSize', SampleTypes.AUFFTSizeDefault);
 
           MarkerCount := Ini.ReadInteger(Section, Prefix + 'MarkerCount', 0);
           SetLength(Clip.WarpMarkers, MarkerCount);
@@ -1694,7 +1713,7 @@ begin
                 Clip.PitchSemitones, Clip.Offset, Sample.Data, Sample.FrameCount,
                 Sample.Channels, AudioEngine.ProjectSampleRate, Clip.WarpMode, 0,
                 Clip.Length, Project.SampleTransients[Clip.SampleID],
-                Project.SamplePeriods[Clip.SampleID], Clip.DragZones) * Clip.Gain;
+                Project.SamplePeriods[Clip.SampleID], Clip.DragZones, Clip.AUFFTSize) * Clip.Gain;
               TrackBuffers[t][OutIdx] := TrackBuffers[t][OutIdx] + MonoSample;
               TrackBuffers[t][OutIdx + 1] := TrackBuffers[t][OutIdx + 1] + MonoSample;
             end
@@ -1705,13 +1724,13 @@ begin
                   Sample.Data, Sample.FrameCount, Sample.Channels,
                   AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length,
                   Project.SampleTransients[Clip.SampleID],
-                    Project.SamplePeriods[Clip.SampleID], Clip.DragZones) * Clip.Gain;
+                    Project.SamplePeriods[Clip.SampleID], Clip.DragZones, Clip.AUFFTSize) * Clip.Gain;
               TrackBuffers[t][OutIdx + 1] := TrackBuffers[t][OutIdx + 1] +
                 DetunedSample(Clip.WarpMarkers, ClipFrame, Clip.PitchSemitones, Clip.Offset,
                   Sample.Data, Sample.FrameCount, Sample.Channels,
                   AudioEngine.ProjectSampleRate, Clip.WarpMode, 1, Clip.Length,
                   Project.SampleTransients[Clip.SampleID],
-                    Project.SamplePeriods[Clip.SampleID], Clip.DragZones) * Clip.Gain;
+                    Project.SamplePeriods[Clip.SampleID], Clip.DragZones, Clip.AUFFTSize) * Clip.Gain;
             end;
 
             Inc(AbsFrame);

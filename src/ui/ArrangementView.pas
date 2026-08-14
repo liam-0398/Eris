@@ -7,7 +7,7 @@ interface
 uses
   Classes, SysUtils, Math, Types, Forms, Controls, Graphics, LCLType, LCLIntf,
   Buttons, StdCtrls, FileBrowser, SampleTypes, Project, AudioEngine, Waveform,
-  WaveformDraw, ThemeScrollBar,
+  WaveformDraw, ThemeScrollBar, PhaseVocoder,
   { last on purpose - Theme shadows Graphics' clBtnFace/clWindow/... with the
     themed palette, and only wins if it is resolved after Graphics }
   ClipOverwrite, Theme;
@@ -1195,6 +1195,22 @@ begin
     begin
       Items[i].MarkerSource[j] := Clip.WarpMarkers[j].SourceFrame;
       Items[i].MarkerTimeline[j] := Clip.WarpMarkers[j].TimelineFrame;
+    end;
+
+    { AU mode's phase-vocoder stretch is expensive (a whole-clip FFT pass),
+      so it is built here - off the audio thread, only when a clip's warp
+      state actually changed enough to push a fresh snapshot - and cached by
+      PhaseVocoder itself (content-hash keyed), not rebuilt per push. The
+      audio thread only ever reads the returned buffer - see
+      AudioEngine.AudioClipSample. }
+    if (Clip.WarpMode = SampleTypes.WarpModeAudio) and (MarkerCount >= 2) then
+      Items[i].AUData := PhaseVocoder.GetAUAudio(Sample.Data, Sample.FrameCount,
+        Sample.Channels, AudioEngine.ProjectSampleRate, Clip.Offset, Clip.Length,
+        Clip.WarpMarkers, Clip.AUFFTSize, Items[i].AUFrameCount)
+    else
+    begin
+      Items[i].AUData := nil;
+      Items[i].AUFrameCount := 0;
     end;
 
     DragZoneCount := Length(Clip.DragZones);
@@ -3168,13 +3184,15 @@ begin
             Sample.Data, Sample.FrameCount, Sample.Channels,
             AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length,
             Project.SampleTransients[Clip.SampleID],
-            Project.SamplePeriods[Clip.SampleID], Clip.DragZones) * Clip.Gain;
+            Project.SamplePeriods[Clip.SampleID], Clip.DragZones,
+            Clip.AUFFTSize) * Clip.Gain;
         Buffer[OutIdx + 1] := Buffer[OutIdx + 1] +
           DetunedSample(Clip.WarpMarkers, ClipRelFrame, Clip.PitchSemitones, Clip.Offset,
             Sample.Data, Sample.FrameCount, Sample.Channels,
             AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length,
             Project.SampleTransients[Clip.SampleID],
-            Project.SamplePeriods[Clip.SampleID], Clip.DragZones) * Clip.Gain;
+            Project.SamplePeriods[Clip.SampleID], Clip.DragZones,
+            Clip.AUFFTSize) * Clip.Gain;
       end
       else
       begin
@@ -3183,13 +3201,15 @@ begin
             Sample.Data, Sample.FrameCount, Sample.Channels,
             AudioEngine.ProjectSampleRate, Clip.WarpMode, 0, Clip.Length,
             Project.SampleTransients[Clip.SampleID],
-            Project.SamplePeriods[Clip.SampleID], Clip.DragZones) * Clip.Gain;
+            Project.SamplePeriods[Clip.SampleID], Clip.DragZones,
+            Clip.AUFFTSize) * Clip.Gain;
         Buffer[OutIdx + 1] := Buffer[OutIdx + 1] +
           DetunedSample(Clip.WarpMarkers, ClipRelFrame, Clip.PitchSemitones, Clip.Offset,
             Sample.Data, Sample.FrameCount, Sample.Channels,
             AudioEngine.ProjectSampleRate, Clip.WarpMode, 1, Clip.Length,
             Project.SampleTransients[Clip.SampleID],
-            Project.SamplePeriods[Clip.SampleID], Clip.DragZones) * Clip.Gain;
+            Project.SamplePeriods[Clip.SampleID], Clip.DragZones,
+            Clip.AUFFTSize) * Clip.Gain;
       end;
     end;
   end;
@@ -3212,6 +3232,7 @@ begin
   NewClip.PitchSemitones := 0;
   NewClip.Gain := 1.0;
   NewClip.WarpMode := SampleTypes.WarpModeAudio;
+  NewClip.AUFFTSize := SampleTypes.AUFFTSizeDefault;
 
   Project.PushUndoSnapshot(t);
   { CommitClipToTrack already punches every existing clip inside

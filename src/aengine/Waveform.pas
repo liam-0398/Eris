@@ -5,7 +5,7 @@ unit Waveform;
 interface
 
 uses
-  SampleTypes, Resample, AVector;
+  SampleTypes, Resample, AVector, PhaseVocoder;
 
 const
   MaxWaveformBins = 4096;
@@ -98,7 +98,8 @@ function WarpedSourceSample(const AMarkers: TWarpMarkerArray;
   AFrameCount: Integer; AChannels: Integer; ASampleRate: Integer;
   AWarpMode: Integer; AChannel: Integer;
   const ATransients: TFrameArray = nil; APeriodFrames: Integer = 0;
-  const AZones: TDragZoneArray = nil): Single;
+  const AZones: TDragZoneArray = nil;
+  AAUFFTSize: Integer = SampleTypes.AUFFTSizeDefault): Single;
 
 { Offline/shared copy of AudioEngine.DragClipSample - same zone lookup, same
   short fade of a zone's tail into the silence that follows it, so a bounce
@@ -181,7 +182,8 @@ function DetunedSample(const AMarkers: TWarpMarkerArray; ATimelineFrame: Int64;
   ADetuneSemitones: Single; AOffset: Int64; AData: PSingle;
   AFrameCount, AChannels, ASampleRate: Integer; AWarpMode, AChannel: Integer;
   AClipLength: Int64 = -1; const ATransients: TFrameArray = nil;
-  APeriodFrames: Integer = 0; const AZones: TDragZoneArray = nil): Single;
+  APeriodFrames: Integer = 0; const AZones: TDragZoneArray = nil;
+  AAUFFTSize: Integer = SampleTypes.AUFFTSizeDefault): Single;
 
 { DrawWaveform moved to src/ui/WaveformDraw.pas - it was the sole reason this
   unit depended on Graphics, and src/ui is unreachable from Dysnomia's build
@@ -932,242 +934,26 @@ begin
   Result := Acc;
 end;
 
-const
-  { see AudioEngine.AudioAnchorFadeFrames }
-  AudioAnchorFadeFrames = 64;
 
-{ Audio ("AU") renderer - the offline/shared copy of
-  AudioEngine.AudioClipSample. See that function's header for why the stretch
-  is paid for at sparse splices rather than by a continuous overlap, and why
-  that is what separates this from the period snapping TonesClipSample's
-  header rejects. }
+{ Audio ("AU") renderer - the offline/shared copy of the phase-locked phase
+  vocoder used by AudioEngine.AudioClipSample. Both read the exact same
+  PhaseVocoder-cached buffer (see PhaseVocoder.GetAUAudio), which is what
+  keeps a bounce byte-identical to what was heard live - the DSP itself only
+  runs once, off whichever thread first asks for this clip's stretch. }
 function AudioSourceSample(const AMarkers: TWarpMarkerArray;
   ATimelineFrame: Int64; AClipLength: Int64; AOffset: Int64; AData: PSingle;
   AFrameCount: Integer; AChannels: Integer; ASampleRate: Integer;
   AChannel: Integer; const ATransients: TFrameArray;
-  APeriodFrames: Integer): Single;
+  APeriodFrames: Integer; AAUFFTSize: Integer): Single;
 var
-  k: Integer;
-  SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen, SegEnd: Int64;
-  FirstTrans, TransInSeg: Integer;
-  P, NominalSrc: Int64;
-  CurIdx, CurSrc, CurTL, PrevSrc, t: Int64;
-  CurVal, PrevVal, w: Double;
-  HavePrev: Boolean;
-
-  function SafeInterp(APos: Double): Single;
-  var
-    AbsPos: Double;
-  begin
-    AbsPos := AOffset + APos;
-    if (AbsPos < 0) or (AbsPos >= AFrameCount) then
-      Result := 0
-    else
-      Result := LinearInterpolate(AData, AFrameCount, AChannels, AChannel, AbsPos);
-  end;
-
-  function TransAt(AIndex: Integer): Int64;
-  begin
-    Result := ATransients[AIndex] - AOffset;
-  end;
-
-  { same segment/transient-range setup as TonesSourceSample - see there }
-  procedure LoadSegment(AK: Integer);
-  var
-    lo, hi, mid: Integer;
-  begin
-    SegStartTimeline := AMarkers[AK].TimelineFrame;
-    SegStartSource := AMarkers[AK].SourceFrame;
-    SegTimelineLen := AMarkers[AK + 1].TimelineFrame - SegStartTimeline;
-    SegSourceLen := AMarkers[AK + 1].SourceFrame - SegStartSource;
-    SegEnd := SegStartSource + SegSourceLen;
-
-    FirstTrans := 0;
-    TransInSeg := 0;
-    if (SegTimelineLen <= 0) or (SegSourceLen <= 0) then
-      Exit;
-    if Length(ATransients) = 0 then
-      Exit;
-
-    lo := 0;
-    hi := Length(ATransients);
-    while lo < hi do
-    begin
-      mid := lo + (hi - lo) div 2;
-      if TransAt(mid) <= SegStartSource then
-        lo := mid + 1
-      else
-        hi := mid;
-    end;
-    FirstTrans := lo;
-
-    hi := Length(ATransients);
-    while lo < hi do
-    begin
-      mid := lo + (hi - lo) div 2;
-      if TransAt(mid) < SegEnd then
-        lo := mid + 1
-      else
-        hi := mid;
-    end;
-    TransInSeg := lo - FirstTrans;
-  end;
-
-  function TimelineOf(ASource: Int64): Int64;
-  begin
-    Result := SegStartTimeline +
-      ((ASource - SegStartSource) * SegTimelineLen) div SegSourceLen;
-  end;
-
-  function AnchorLo(AIndex: Int64): Int64;
-  begin
-    if (AIndex <= 0) or (TransInSeg <= 0) then
-      Exit(SegStartSource);
-    if AIndex > TransInSeg then
-      AIndex := TransInSeg;
-    Result := TransAt(FirstTrans + AIndex - 1);
-  end;
-
-  function FindAnchor: Int64;
-  var
-    lo, hi, mid: Int64;
-  begin
-    if TransInSeg <= 0 then
-      Exit(0);
-
-    lo := 0;
-    hi := TransInSeg;
-    while lo < hi do
-    begin
-      mid := lo + (hi - lo + 1) div 2;
-      if AnchorLo(mid) <= NominalSrc then
-        lo := mid
-      else
-        hi := mid - 1;
-    end;
-    Result := lo;
-
-    while (Result > 0) and (ATimelineFrame < TimelineOf(AnchorLo(Result))) do
-      Dec(Result);
-    while (Result < TransInSeg) and
-      (ATimelineFrame >= TimelineOf(AnchorLo(Result + 1))) do
-      Inc(Result);
-  end;
-
-  function RegionSample(AAnchorSrc, AAnchorTL: Int64): Single;
-  var
-    u, Num, k0, kNb: Int64;
-    StepSigned, Step, z, zf, dLow, dHigh, dNear, Fade, w: Double;
-  begin
-    u := ATimelineFrame - AAnchorTL;
-    if u < 0 then
-      u := 0;
-
-    Num := SegTimelineLen - SegSourceLen;
-    if Num = 0 then
-      Exit(SafeInterp(AAnchorSrc + u));
-
-    StepSigned := (Double(SegTimelineLen) * P) / Num;
-    Step := Abs(StepSigned);
-    if Step < 1 then
-      Exit(SafeInterp(AAnchorSrc + u));
-
-    z := u / StepSigned;
-    zf := z + 0.5;
-    k0 := Trunc(zf);
-    if (zf < 0) and (zf <> k0) then
-      Dec(k0);
-
-    dLow := Abs(u - (k0 - 0.5) * StepSigned);
-    dHigh := Abs(u - (k0 + 0.5) * StepSigned);
-    if dLow <= dHigh then
-    begin
-      dNear := dLow;
-      kNb := k0 - 1;
-    end
-    else
-    begin
-      dNear := dHigh;
-      kNb := k0 + 1;
-    end;
-
-    Fade := P;
-    if Fade > Step * 0.5 then
-      Fade := Step * 0.5;
-    if Fade < 1 then
-      Fade := 1;
-
-    if dNear >= Fade * 0.5 then
-      Exit(SafeInterp(AAnchorSrc + u - k0 * P));
-
-    w := 0.5 + dNear / Fade;
-    w := w * w * (3 - 2 * w);
-    Result := SafeInterp(AAnchorSrc + u - k0 * P) * w +
-      SafeInterp(AAnchorSrc + u - kNb * P) * (1 - w);
-  end;
-
+  Buf: PSingle;
+  BufLen: Integer;
 begin
-  if Length(AMarkers) < 2 then
-    Exit(SafeInterp(ATimelineFrame));
-
-  P := APeriodFrames;
-  if P < 1 then
-    { no usable fundamental - hand off to Beats rather than granulate on a
-      guessed period. Passing WarpModeBeats explicitly, not AWarpMode, or
-      this recurses. }
-    Exit(WarpedSourceSample(AMarkers, ATimelineFrame, AClipLength, AOffset,
-      AData, AFrameCount, AChannels, ASampleRate, WarpModeBeats, AChannel,
-      ATransients, APeriodFrames));
-
-  k := 0;
-  while (k < Length(AMarkers) - 2) and
-    (ATimelineFrame >= AMarkers[k + 1].TimelineFrame) do
-    Inc(k);
-
-  LoadSegment(k);
-  if (SegTimelineLen <= 0) or (SegSourceLen <= 0) then
-    Exit(SafeInterp(SegStartSource));
-
-  NominalSrc := SegStartSource +
-    ((ATimelineFrame - SegStartTimeline) * SegSourceLen) div SegTimelineLen;
-
-  CurIdx := FindAnchor;
-  CurSrc := AnchorLo(CurIdx);
-  CurTL := TimelineOf(CurSrc);
-  t := ATimelineFrame - CurTL;
-
-  HavePrev := False;
-  PrevVal := 0;
-  if (t >= 0) and (t < AudioAnchorFadeFrames) then
-  begin
-    if CurIdx > 0 then
-    begin
-      PrevSrc := AnchorLo(CurIdx - 1);
-      PrevVal := RegionSample(PrevSrc, TimelineOf(PrevSrc));
-      HavePrev := True;
-    end
-    else if k > 0 then
-    begin
-      LoadSegment(k - 1);
-      if (SegTimelineLen > 0) and (SegSourceLen > 0) then
-      begin
-        PrevSrc := AnchorLo(TransInSeg);
-        PrevVal := RegionSample(PrevSrc, TimelineOf(PrevSrc));
-        HavePrev := True;
-      end;
-      LoadSegment(k);
-    end;
-  end;
-
-  CurVal := RegionSample(CurSrc, CurTL);
-
-  if HavePrev then
-  begin
-    w := t / AudioAnchorFadeFrames;
-    Result := PrevVal * (1 - w) + CurVal * w;
-  end
-  else
-    Result := CurVal;
+  Buf := PhaseVocoder.GetAUAudio(AData, AFrameCount, AChannels, ASampleRate,
+    AOffset, AClipLength, AMarkers, AAUFFTSize, BufLen);
+  if (Buf = nil) or (ATimelineFrame < 0) or (ATimelineFrame >= BufLen) then
+    Exit(0);
+  Result := LinearInterpolate(Buf, BufLen, AChannels, AChannel, ATimelineFrame);
 end;
 
 function WarpedSourceSample(const AMarkers: TWarpMarkerArray;
@@ -1175,7 +961,7 @@ function WarpedSourceSample(const AMarkers: TWarpMarkerArray;
   AFrameCount: Integer; AChannels: Integer; ASampleRate: Integer;
   AWarpMode: Integer; AChannel: Integer;
   const ATransients: TFrameArray; APeriodFrames: Integer;
-  const AZones: TDragZoneArray): Single;
+  const AZones: TDragZoneArray; AAUFFTSize: Integer): Single;
 var
   k: Integer;
   SegStartTimeline, SegStartSource, SegTimelineLen, SegSourceLen: Int64;
@@ -1417,7 +1203,8 @@ begin
 
   if AWarpMode = WarpModeAudio then
     Exit(AudioSourceSample(AMarkers, ATimelineFrame, AClipLength, AOffset, AData,
-      AFrameCount, AChannels, ASampleRate, AChannel, ATransients, APeriodFrames));
+      AFrameCount, AChannels, ASampleRate, AChannel, ATransients, APeriodFrames,
+      AAUFFTSize));
 
   if AWarpMode = WarpModeTones then
     Exit(TonesSourceSample(AMarkers, ATimelineFrame, AOffset, AData, AFrameCount,
@@ -1482,7 +1269,8 @@ function DetunedSample(const AMarkers: TWarpMarkerArray; ATimelineFrame: Int64;
   ADetuneSemitones: Single; AOffset: Int64; AData: PSingle;
   AFrameCount, AChannels, ASampleRate: Integer; AWarpMode, AChannel: Integer;
   AClipLength: Int64; const ATransients: TFrameArray;
-  APeriodFrames: Integer; const AZones: TDragZoneArray): Single;
+  APeriodFrames: Integer; const AZones: TDragZoneArray;
+  AAUFFTSize: Integer): Single;
 const
   DetuneGrainMs = 25;
 var
@@ -1505,7 +1293,7 @@ begin
   if ADetuneSemitones = 0 then
     Exit(WarpedSourceSample(AMarkers, ATimelineFrame, AClipLength, AOffset,
       AData, AFrameCount, AChannels, ASampleRate, AWarpMode, AChannel,
-      ATransients, APeriodFrames, AZones));
+      ATransients, APeriodFrames, AZones, AAUFFTSize));
 
   Rate := Exp((ADetuneSemitones / 12) * Ln(2));
   GrainFrames := (DetuneGrainMs * ASampleRate) div 1000;
