@@ -266,6 +266,12 @@ function DysCopyWaveformSelection: Boolean;
 function DysGetWaveClipboard(out ASampleID: Integer;
   out AOffset, ALength: Int64): Boolean;
 
+{ Made public for DysTrackerApp's own effects pane - a second legitimate
+  caller now exists (the Tracker's "add effect" popup wants the exact same
+  categorized menu the DAW's own effects rack shows, see tui.md's Tracker
+  section), so this needs to be reachable outside this unit. }
+function BuildAddEffectMenu: PMenu;
+
 { Set once, by TDysEffectsContent.Init - there is exactly one effects
   content view in this single-window app, same "global points at the one
   instance" pattern ActiveTrackPane/ActiveToolBar already use. TDysEffectBox
