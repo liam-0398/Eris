@@ -512,7 +512,7 @@ procedure TForm1.BuildLayout;
   end;
 
 var
-  WarpButtonsPanel, ClipControlsPanel, RightButtonsPanel: TPanel;
+  WarpZoomPanel, WarpButtonsPanel, ClipControlsPanel, RightButtonsPanel: TPanel;
   GainLbl, DetuneLbl, InstGainLbl: TLabel;
 begin
   Width := 1280;
@@ -788,8 +788,17 @@ begin
   FWarpWidget.Visible := False;
   FWarpWidget.Caption := '';
 
-  WarpButtonsPanel := AddZoomButtons(FWarpWidget, @WarpZoomInClick, @WarpZoomOutClick);
+  { Zoom +/- get their own leftmost column now, separate from the mode
+    buttons - five mode buttons plus the zoom pair no longer fit stacked
+    in one Px(180)-tall column (188px needed vs 180 available), which was
+    hiding the D button. Two columns instead of shrinking buttons further. }
+  WarpZoomPanel := AddZoomButtons(FWarpWidget, @WarpZoomInClick, @WarpZoomOutClick);
+
+  WarpButtonsPanel := TPanel.Create(Self);
+  WarpButtonsPanel.Parent := FWarpWidget;
+  WarpButtonsPanel.Align := alLeft;
   WarpButtonsPanel.Width := Px(34); { a bit wider than the plain zoom column, so the toggle isn't tiny }
+  WarpButtonsPanel.BevelOuter := bvNone;
 
   { Warp mode - two dedicated buttons instead of one toggle that renamed
     itself, since a single relabeling button read as ambiguous (couldn't
@@ -804,7 +813,7 @@ begin
   FWarpBeatsButton.Parent := WarpButtonsPanel;
   FWarpBeatsButton.Caption := 'BT';
   FWarpBeatsButton.Align := alBottom;
-  FWarpBeatsButton.Height := Px(24);
+  FWarpBeatsButton.Height := Px(28);
   FWarpBeatsButton.Font.Style := [fsBold];
   FWarpBeatsButton.GroupIndex := 1;
   FWarpBeatsButton.AllowAllUp := False;
@@ -821,7 +830,7 @@ begin
   FWarpAudioButton.Parent := WarpButtonsPanel;
   FWarpAudioButton.Caption := 'AU';
   FWarpAudioButton.Align := alBottom;
-  FWarpAudioButton.Height := Px(24);
+  FWarpAudioButton.Height := Px(28);
   FWarpAudioButton.Font.Style := [fsBold];
   FWarpAudioButton.GroupIndex := 1;
   FWarpAudioButton.AllowAllUp := False;
@@ -835,7 +844,7 @@ begin
   FWarpTonesButton.Parent := WarpButtonsPanel;
   FWarpTonesButton.Caption := 'LF';
   FWarpTonesButton.Align := alBottom;
-  FWarpTonesButton.Height := Px(24);
+  FWarpTonesButton.Height := Px(28);
   FWarpTonesButton.Font.Style := [fsBold];
   FWarpTonesButton.GroupIndex := 1;
   FWarpTonesButton.AllowAllUp := False;
@@ -846,7 +855,7 @@ begin
   FWarpRepitchButton.Parent := WarpButtonsPanel;
   FWarpRepitchButton.Caption := 'RP';
   FWarpRepitchButton.Align := alBottom;
-  FWarpRepitchButton.Height := Px(24);
+  FWarpRepitchButton.Height := Px(28);
   FWarpRepitchButton.Font.Style := [fsBold];
   FWarpRepitchButton.GroupIndex := 1;
   FWarpRepitchButton.AllowAllUp := False;
@@ -863,7 +872,7 @@ begin
   FWarpDragButton.Parent := WarpButtonsPanel;
   FWarpDragButton.Caption := 'D';
   FWarpDragButton.Align := alBottom;
-  FWarpDragButton.Height := Px(24);
+  FWarpDragButton.Height := Px(28);
   FWarpDragButton.Font.Style := [fsBold];
   FWarpDragButton.GroupIndex := 1;
   FWarpDragButton.AllowAllUp := False;
@@ -876,7 +885,7 @@ begin
     independent pitch nudge, not a re-warp. }
   ClipControlsPanel := TPanel.Create(Self);
   ClipControlsPanel.Parent := FWarpWidget;
-  ClipControlsPanel.Left := WarpButtonsPanel.Width;
+  ClipControlsPanel.Left := WarpZoomPanel.Width + WarpButtonsPanel.Width;
   ClipControlsPanel.Top := 0;
   ClipControlsPanel.Width := Px(80);
   ClipControlsPanel.Height := Px(WidgetHeight);
@@ -968,7 +977,7 @@ begin
     isn't itself Align-managed, so alClient's sibling-avoidance wouldn't have
     known to leave room for it. Right-anchoring still keeps this filling the
     rest of FWarpWidget's width as RefreshWarpWidgetSize resizes it. }
-  FWarpEditor.Left := WarpButtonsPanel.Width + ClipControlsPanel.Width;
+  FWarpEditor.Left := WarpZoomPanel.Width + WarpButtonsPanel.Width + ClipControlsPanel.Width;
   FWarpEditor.Top := 0;
   FWarpEditor.Width := FWarpWidget.Width - FWarpEditor.Left - RightButtonsPanel.Width;
   FWarpEditor.Height := Px(WidgetHeight);
