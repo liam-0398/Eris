@@ -67,7 +67,7 @@ var
   w0, alpha, cosw0, a0: Double;
 begin
   w0 := 2 * Pi * AFc / AFs;
-  alpha := Sin(w0) / (2 * AQ);
+  alpha := Sin(w0) / (2 * Max(AQ, 0.05));
   cosw0 := Cos(w0);
   a0 := 1 + alpha;
   ACoeffs.B0 := alpha / a0;

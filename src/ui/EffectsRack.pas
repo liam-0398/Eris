@@ -1976,6 +1976,8 @@ var
   Q: Single;
 begin
   Q := FBPQSlider.Position / 20;
+  if Q < 0.05 then
+    Q := 0.05;
   EffectPtr^.BandpassQ := Q;
   FBPQValueLabel.Caption := Format('%.2f', [Q]);
 end;

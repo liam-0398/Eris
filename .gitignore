@@ -6,6 +6,7 @@ lib/
 backup/
 *.lps
 eris.res
+*.res
 eris.exe
 windbg.txt
 bugs.md
@@ -19,3 +20,4 @@ tui.md
 dysnomia-bin/
 dysnomia-units/
 k
+technical-docs/
