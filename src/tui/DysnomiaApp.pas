@@ -14,7 +14,7 @@ interface
 uses
   SysUtils, Objects, Drivers, Views, Menus, Dialogs, App, Keyboard,
   DysGeometry, DysWidgets, DysEffectsRack, DysFilePane, DysTrackPane, DysTimeline,
-  DysPreferences, DysFileDialog, Project, Config, ProjectFile;
+  DysPreferences, DysFileDialog, DysRemoteServer, Project, Config, ProjectFile;
 
 const
   cmAbout = 1000;
@@ -161,6 +161,10 @@ begin
     AudioEngineInit. Nothing Dysnomia-specific here. }
   AudioEngineInit;
   EnsureDysTrackCount(DysStartTrackCount);
+  { Tracker/Control Station socket link (tui.md) - a bind failure (another
+    DAW instance already holds the socket) leaves DysRemoteServerRunning
+    False and never raises, so the DAW still runs standalone either way. }
+  DysRemoteServerStart;
 
   inherited Init;
   { `packages/rtl-console/src/unix/keyboard.pp`'s SysInitKeyboard (run
@@ -203,6 +207,7 @@ end;
   nothing else still touches it). }
 destructor TDysnomiaApp.Done;
 begin
+  DysRemoteServerStop;
   AudioEngineShutdown;
   ConfigSave;
   inherited Done;
@@ -593,6 +598,11 @@ begin
     PollRecordState). }
   if ActiveToolBar <> nil then
     ActiveToolBar^.PollRecordState;
+  { Applies anything a Tracker/Control Station client queued since the
+    last tick (notes, effect add/remove, render) - main thread only, see
+    DysRemoteServer's own doc comment for why this can't happen on the
+    socket thread directly. }
+  DysRemoteDrainQueue;
   { TPlaybackThread.Execute now catches exceptions instead of letting them
     silently kill the whole playback thread (FPC's TThread.ThreadProc
     swallows a thread's uncaught exception into FFatalException and just

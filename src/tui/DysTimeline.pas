@@ -221,6 +221,13 @@ var
 procedure DysStartRecording;
 procedure DysFinalizeRecording;
 
+{ Made public for DysRemoteServer's RENDER handler - a second legitimate
+  caller now exists (committing a Tracker-synthesized clip needs the same
+  engine resync a captured recording does), unlike when the comment above
+  first decided against exposing it for DysStartRecording/
+  DysFinalizeRecording's sake alone. }
+procedure PushTrackToEngine(ATrackIndex: Integer);
+
 { Ctrl+D/Ctrl+V on the waveform pane's own selection/paste-cursor - called
   from DysnomiaApp.pas's cmEditDuplicate/cmEditPaste, same routing as
   DysChopMarkedClipRegion (ChopWaveformSelectionProc) for Delete. See
