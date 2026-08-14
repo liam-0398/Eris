@@ -393,7 +393,7 @@ begin
   ClipLength := 0;
   ClipGain := 1.0;
   ClipDetune := 0;
-  ClipWarpMode := SampleTypes.WarpModeAudio;
+  ClipWarpMode := SampleTypes.WarpModeBeats;
   SelActive := False;
   SelStartFrame := 0;
   SelEndFrame := 0;

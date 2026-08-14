@@ -3231,7 +3231,7 @@ begin
   NewClip.TrackID := t;
   NewClip.PitchSemitones := 0;
   NewClip.Gain := 1.0;
-  NewClip.WarpMode := SampleTypes.WarpModeAudio;
+  NewClip.WarpMode := SampleTypes.WarpModeBeats;
   NewClip.AUFFTSize := SampleTypes.AUFFTSizeDefault;
 
   Project.PushUndoSnapshot(t);

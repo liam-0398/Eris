@@ -126,7 +126,7 @@ begin
       ProjectFile has to work around with PortableFloatSettings. Widening it
       later costs a format bump and nothing else. }
     Cfg.InputGainDb := Ini.ReadInteger(SecAudio, 'input_gain_db', 0);
-    Cfg.Theme := ConfigThemeFromName(Ini.ReadString(SecUI, 'theme', 'system'));
+    Cfg.Theme := ConfigThemeFromName(Ini.ReadString(SecUI, 'theme', 'light'));
     Cfg.Custom1Dir := Ini.ReadString(SecBrowser, 'custom1_dir', '');
     Cfg.Custom2Dir := Ini.ReadString(SecBrowser, 'custom2_dir', '');
   finally

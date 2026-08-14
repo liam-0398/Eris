@@ -1851,7 +1851,7 @@ begin
   Clip.TrackID := FRecordTrackIndex;
   Clip.PitchSemitones := 0;
   Clip.Gain := 1.0;
-  Clip.WarpMode := SampleTypes.WarpModeAudio;
+  Clip.WarpMode := SampleTypes.WarpModeBeats;
   Clip.AUFFTSize := SampleTypes.AUFFTSizeDefault;
 
   Project.PushUndoSnapshot(FRecordTrackIndex);
@@ -1964,7 +1964,7 @@ begin
   Clip.TrackID := FPendingImportTrack;
   Clip.PitchSemitones := 0;
   Clip.Gain := 1.0;
-  Clip.WarpMode := SampleTypes.WarpModeAudio;
+  Clip.WarpMode := SampleTypes.WarpModeBeats;
   Clip.AUFFTSize := SampleTypes.AUFFTSizeDefault;
 
   Project.PushUndoSnapshot(FPendingImportTrack);

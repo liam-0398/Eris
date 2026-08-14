@@ -528,7 +528,7 @@ begin
   NewClip.TrackID := RecordTrackIndex;
   NewClip.Gain := 1.0;
   NewClip.PitchSemitones := 0;
-  NewClip.WarpMode := WarpModeAudio;
+  NewClip.WarpMode := WarpModeBeats;
 
   Project.PushUndoSnapshot(RecordTrackIndex);
   Project.CommitClipToTrack(RecordTrackIndex, NewClip);
