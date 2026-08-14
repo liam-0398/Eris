@@ -804,7 +804,7 @@ begin
   FWarpBeatsButton.Parent := WarpButtonsPanel;
   FWarpBeatsButton.Caption := 'BT';
   FWarpBeatsButton.Align := alBottom;
-  FWarpBeatsButton.Height := Px(28);
+  FWarpBeatsButton.Height := Px(24);
   FWarpBeatsButton.Font.Style := [fsBold];
   FWarpBeatsButton.GroupIndex := 1;
   FWarpBeatsButton.AllowAllUp := False;
@@ -821,7 +821,7 @@ begin
   FWarpAudioButton.Parent := WarpButtonsPanel;
   FWarpAudioButton.Caption := 'AU';
   FWarpAudioButton.Align := alBottom;
-  FWarpAudioButton.Height := Px(28);
+  FWarpAudioButton.Height := Px(24);
   FWarpAudioButton.Font.Style := [fsBold];
   FWarpAudioButton.GroupIndex := 1;
   FWarpAudioButton.AllowAllUp := False;
@@ -835,7 +835,7 @@ begin
   FWarpTonesButton.Parent := WarpButtonsPanel;
   FWarpTonesButton.Caption := 'LF';
   FWarpTonesButton.Align := alBottom;
-  FWarpTonesButton.Height := Px(28);
+  FWarpTonesButton.Height := Px(24);
   FWarpTonesButton.Font.Style := [fsBold];
   FWarpTonesButton.GroupIndex := 1;
   FWarpTonesButton.AllowAllUp := False;
@@ -846,7 +846,7 @@ begin
   FWarpRepitchButton.Parent := WarpButtonsPanel;
   FWarpRepitchButton.Caption := 'RP';
   FWarpRepitchButton.Align := alBottom;
-  FWarpRepitchButton.Height := Px(28);
+  FWarpRepitchButton.Height := Px(24);
   FWarpRepitchButton.Font.Style := [fsBold];
   FWarpRepitchButton.GroupIndex := 1;
   FWarpRepitchButton.AllowAllUp := False;
@@ -863,7 +863,7 @@ begin
   FWarpDragButton.Parent := WarpButtonsPanel;
   FWarpDragButton.Caption := 'D';
   FWarpDragButton.Align := alBottom;
-  FWarpDragButton.Height := Px(28);
+  FWarpDragButton.Height := Px(24);
   FWarpDragButton.Font.Style := [fsBold];
   FWarpDragButton.GroupIndex := 1;
   FWarpDragButton.AllowAllUp := False;
