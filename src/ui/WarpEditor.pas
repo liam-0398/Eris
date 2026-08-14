@@ -35,6 +35,14 @@ type
         on, so it should be easy to catch }
       EdgeGrabPixels = 10;
       MinMarkerGapFrames = 100;
+      { a zone-drag doesn't actually move anything until the mouse has
+        travelled this many pixels from where it grabbed the zone - without
+        this, the plain MouseDown->MouseMove->MouseUp that happens as part of
+        every double-click (placing a start/end marker) could nudge whatever
+        zone sits under the second click by a pixel of jitter, which
+        SnapToDragGrid then rounds up to a full grid step - a visible jump
+        for what should have been a static double-click. }
+      DragZoneMoveThresholdPixels = 3;
       { see WarpEditor.md / warp.md "D (drag) mode": the gap ResolveZoneOverlaps
         leaves between a trimmed zone's new edge and whichever zone won the
         overlap, so the loser's tail/head fades cleanly into silence (see
@@ -67,6 +75,7 @@ type
     function HitTestMarker(const AClip: TClip; X: Integer): Integer;
     function RightEdgeX(const AClip: TClip): Integer;
     function SnapToBeat(AFrame: Int64): Int64;
+    function SnapToDragGrid(AFrame: Int64): Int64;
     procedure DeleteMarker(const AClip: TClip; AIndex: Integer);
     procedure DrawRulerStrip(const AClip: TClip);
     procedure DrawGrid;
@@ -244,6 +253,29 @@ begin
   Rem := AFrame mod BF;
   if Rem * 2 >= BF then
     Result := AFrame - Rem + BF
+  else
+    Result := AFrame - Rem;
+end;
+
+{ Zone dragging (D mode) snaps to a much finer grid than the other modes'
+  end-marker/beat-grid drags - a whole beat is too coarse to land a dragged
+  zone precisely against a neighbour, so this snaps to 1/32 notes instead
+  (1/8 of a beat) while still keeping SOME grid by default so zones tend to
+  land in time; Alt still bypasses it for a fully free placement, same as
+  every other snap in this editor. }
+function TWarpEditor.SnapToDragGrid(AFrame: Int64): Int64;
+var
+  GF, Rem: Int64;
+begin
+  Result := AFrame;
+  GF := BeatFrames div 8;
+  if GF <= 0 then
+    Exit;
+  Rem := AFrame mod GF;
+  if Rem < 0 then
+    Rem := Rem + GF; { AFrame can be negative (shifted left of the clip) }
+  if Rem * 2 >= GF then
+    Result := AFrame - Rem + GF
   else
     Result := AFrame - Rem;
 end;
@@ -695,6 +727,8 @@ var
 begin
   if FDragZoneIndex < 0 then
     Exit;
+  if Abs(X - FZoneDragStartX) < DragZoneMoveThresholdPixels then
+    Exit; { see DragZoneMoveThresholdPixels - swallow double-click jitter }
 
   Clip := AClip;
   NewZones := Copy(Clip.DragZones, 0, Length(Clip.DragZones));
@@ -704,7 +738,7 @@ begin
 
   if not (ssAlt in Shift) then
   begin
-    NewRStart := SnapToBeat(NewZones[FDragZoneIndex].SourceStart + NewShift);
+    NewRStart := SnapToDragGrid(NewZones[FDragZoneIndex].SourceStart + NewShift);
     NewShift := NewRStart - NewZones[FDragZoneIndex].SourceStart;
   end;
 
