@@ -258,7 +258,7 @@ end;
 
 procedure MRenderDiff(var State: TMRenderState; var Output: TMByteBuf);
 var
-  X, Y: Integer;
+  X, Y, GlyphWidth: Integer;
   Cur, Prev: TCell;
   Changed: Boolean;
 begin
@@ -268,6 +268,17 @@ begin
     for X := 0 to State.Back.Width - 1 do
     begin
       Cur := MGetCell(State.Back, X, Y);
+
+      { A wide glyph's right-half continuation cell is never drawn on
+        its own - writing the left half already advances the terminal's
+        cursor by 2 columns (see the Inc(State.CursorCol, GlyphWidth)
+        below), so an independent write here would misplace whatever
+        comes after it. This must be checked before the ForceFullRedraw
+        short-circuit, not just the normal diff path, or a forced full
+        redraw would emit a spurious extra glyph over the wide
+        character's second column. }
+      if MIsWideContinuation(Cur) then
+        Continue;
 
       if State.ForceFullRedraw then
         Changed := True
@@ -292,14 +303,18 @@ begin
 
       MEncodeUtf8(Cur.CodePoint, Output);
 
-      { A write advances the terminal's own cursor by one column. Track
-        that so the next changed cell on the same row, immediately after
-        this one, needs no CUP at all. Right-edge auto-wrap is not relied
-        on here: if the next write actually needs column 0 of the next
-        row, the CursorRow/CursorCol mismatch check above still forces a
-        fresh CUP - the only cost of not modeling wrap is one possibly
+      { A write advances the terminal's own cursor by its glyph's actual
+        column width (1 normally, 2 for an East-Asian-Wide codepoint -
+        see MptiCell.MCodepointWidth), not always 1. Track that so the
+        next changed cell on the same row, immediately after this one,
+        needs no CUP at all. Right-edge auto-wrap is not relied on here:
+        if the next write actually needs column 0 of the next row, the
+        CursorRow/CursorCol mismatch check above still forces a fresh
+        CUP - the only cost of not modeling wrap is one possibly
         redundant (but always correct) CUP at the row boundary. }
-      Inc(State.CursorCol);
+      GlyphWidth := MCodepointWidth(Cur.CodePoint);
+      if GlyphWidth < 1 then GlyphWidth := 1;
+      Inc(State.CursorCol, GlyphWidth);
     end;
 
   { Front must end up holding an independent copy of Back's cells, not a

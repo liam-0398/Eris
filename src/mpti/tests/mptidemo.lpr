@@ -42,6 +42,11 @@ var
   ResolvedAction: TMUInt32;
   Layout: TMLayoutState;
   RectA, RectTaken, RectRemainder: TMRect;
+  WideBuf: TCellBuffer;
+  GlyphW: Integer;
+  HR: TMHitRegistry;
+  HitID, HitPane: TMWidgetID;
+  MEv: TMMouseEvent;
   Timers: TMTimerSet;
   TH1, TH2: TMTimerHandle;
   Deferred: TMDeferredQueue;
@@ -641,6 +646,102 @@ begin
   Check(MQueuePop(EQ, QMsg) and (QMsg.Kind = MQueueKindResize)
     and (QMsg.Param1 = 120) and (QMsg.Param2 = 40),
     'layout: MLayoutOnResize posts a resize message through the event queue');
+
+  { MptiCell: Unicode column width - best-effort common-case coverage }
+  Check(MCodepointWidth(Ord('A')) = 1, 'width: plain ASCII is 1 column');
+  Check(MCodepointWidth($0301) = 0, 'width: a combining acute accent is 0 columns');
+  Check(MCodepointWidth($4E2D) = 2, 'width: a CJK ideograph (U+4E2D) is 2 columns');
+  Check(MCodepointWidth($AC00) = 2, 'width: a Hangul syllable is 2 columns');
+
+  { MptiCell: MPutCodepoint writes a wide glyph plus its continuation cell }
+  MInitCellBuffer(WideBuf, 4, 1);
+  MClearCellBuffer(WideBuf, MBlankCell);
+  GlyphW := MPutCodepoint(WideBuf, 0, 0, $4E2D, MDefaultFg, MDefaultBg, []);
+  Check(GlyphW = 2, 'wide glyph: MPutCodepoint reports width 2 for a CJK ideograph');
+  Check(MGetCell(WideBuf, 0, 0).CodePoint = $4E2D, 'wide glyph: left half holds the actual codepoint');
+  Check(MIsWideContinuation(MGetCell(WideBuf, 1, 0)), 'wide glyph: right half is the continuation sentinel');
+  GlyphW := MPutCodepoint(WideBuf, 2, 0, Ord('X'), MDefaultFg, MDefaultBg, []);
+  Check(GlyphW = 1, 'wide glyph: a normal ASCII char still reports width 1');
+
+  { MptiCell: MPutCodepoint at the buffer's last column doesn't overrun }
+  MInitCellBuffer(WideBuf, 3, 1);
+  GlyphW := MPutCodepoint(WideBuf, 2, 0, $4E2D, MDefaultFg, MDefaultBg, []);
+  Check(GlyphW = 2, 'wide glyph at edge: still reports full width');
+  Check(MGetCell(WideBuf, 2, 0).CodePoint = $4E2D, 'wide glyph at edge: left half written safely with no continuation cell to write');
+
+  { MptiCell: clipped writes respect the caller's rect, not just buffer bounds }
+  MInitCellBuffer(WideBuf, 10, 5);
+  MClearCellBuffer(WideBuf, MBlankCell);
+  Cell := MBlankCell;
+  Cell.CodePoint := Ord('Z');
+  Check(MSetCellClipped(WideBuf, 2, 2, 3, 3, 2, 2, Cell), 'clip: cell inside the clip rect is written');
+  Check(MGetCell(WideBuf, 2, 2).CodePoint = Ord('Z'), 'clip: written content is actually there');
+  Check(not MSetCellClipped(WideBuf, 2, 2, 3, 3, 6, 2, Cell),
+    'clip: cell within buffer bounds but outside the clip rect is rejected');
+  Check(MGetCell(WideBuf, 6, 2).CodePoint = MBlankCell.CodePoint, 'clip: a rejected write leaves the cell unchanged');
+
+  { MptiCell: MPutCodepointClipped reports full glyph width even when its
+    continuation cell falls outside the clip rect }
+  GlyphW := MPutCodepointClipped(WideBuf, 2, 2, 3, 3, 4, 2, $4E2D, MDefaultFg, MDefaultBg, []);
+  Check(GlyphW = 2, 'clip: MPutCodepointClipped still reports width 2 when partially clipped');
+  Check(MGetCell(WideBuf, 4, 2).CodePoint = $4E2D, 'clip: left half written since it is inside the clip rect');
+  Check(not MIsWideContinuation(MGetCell(WideBuf, 5, 2)),
+    'clip: continuation cell not written since it falls outside the clip rect');
+
+  { MptiRender: a wide glyph advances the diff's tracked cursor by 2, so
+    an immediately-following changed cell needs no extra CUP }
+  Caps := MCapsFromEnv('xterm-256color', 'truecolor');
+  MInitRenderState(RState, Caps, 3, 1); { exactly wide-glyph + adjacent char, no trailing cell }
+  MPutCodepoint(RState.Back, 0, 0, $4E2D, MDefaultFg, MDefaultBg, []);
+  MPutCodepoint(RState.Back, 2, 0, Ord('X'), MDefaultFg, MDefaultBg, []);
+  MRenderDiff(RState, Out1);
+  OutStr := MByteBufToString(Out1);
+  Check(Pos(#27'[1;1H', OutStr) = 1, 'wide glyph render: frame starts with CUP at the origin');
+  Check(Pos(#27'[1;3H', OutStr) = 0,
+    'wide glyph render: no CUP needed before the adjacent char (cursor already advanced 2 cols)');
+  Check(OutStr[Length(OutStr)] = 'X', 'wide glyph render: the adjacent normal char is still emitted correctly');
+  Check(MGetCell(RState.Front, 0, 0).CodePoint = $4E2D, 'wide glyph render: front buffer records the glyph');
+  Check(MIsWideContinuation(MGetCell(RState.Front, 1, 0)),
+    'wide glyph render: front buffer records the continuation cell');
+
+  { MptiCore: hit-test registry resolves overlapping widgets topmost-first }
+  MBeginHitRegistry(HR);
+  Check(HR.Count = 0, 'hit: registry starts empty after MBeginHitRegistry');
+  MRegisterHitRect(HR, MWidgetID('base/pane'), MWidgetID('pane/base'), MMakeRect(0, 0, 50, 20));
+  MRegisterHitRect(HR, MWidgetID('popup/menu'), MWidgetID('pane/popup'), MMakeRect(10, 5, 10, 5));
+  Check(MHitTest(HR, 5, 5, HitID, HitPane) and (HitID = MWidgetID('base/pane')),
+    'hit: point outside the popup resolves to the base pane');
+  Check(MHitTest(HR, 12, 6, HitID, HitPane) and (HitID = MWidgetID('popup/menu')),
+    'hit: overlapping point resolves to the topmost (last-registered) widget');
+  Check(not MHitTest(HR, 100, 100, HitID, HitPane), 'hit: point outside everything resolves to nothing');
+
+  { MptiCore: MDispatchMouse resolves the hit and applies click-to-focus
+    only on a press, never on hover/move (FV gap #7's default) }
+  MInitCore(Core);
+  MEv.X := 12; MEv.Y := 6; MEv.Button := mbLeft; MEv.Action := maPress; MEv.Mods := [];
+  Check(MDispatchMouse(Core, HR, MEv, HitID, HitPane) and (HitID = MWidgetID('popup/menu')),
+    'dispatch: press on the popup resolves the hit widget');
+  Check(MIsFocused(Core, MWidgetID('popup/menu')), 'dispatch: a press also sets focus');
+
+  MClearFocus(Core);
+  MEv.Action := maMove;
+  Check(MDispatchMouse(Core, HR, MEv, HitID, HitPane), 'dispatch: hover/move still resolves the hit widget');
+  Check(not MIsFocused(Core, HitID), 'dispatch: hover/move does not change focus');
+
+  { MptiCore: MBeginFrame is the canonical per-iteration ordering of the
+    Phase 5 primitives }
+  MInitCore(Core);
+  MInitTimers(Timers);
+  MInitDeferred(Deferred);
+  TimerFireCount := 0;
+  MScheduleTimer(Timers, 0, 100, 0, @TimerCallback, @TimerFireCount);
+  DeferredLog := '';
+  MDeferCall(Deferred, @DeferredCallbackA, nil);
+  Check(Core.FrameCounter = 0, 'glue: frame counter starts at 0');
+  MBeginFrame(Core, Timers, Deferred, 100);
+  Check(Core.FrameCounter = 1, 'glue: MBeginFrame advances the core frame counter');
+  Check(TimerFireCount = 1, 'glue: MBeginFrame pumps due timers');
+  Check(DeferredLog = 'A', 'glue: MBeginFrame runs deferred calls queued before this iteration');
 
   { MptiDriver: only ever probes, never mutates terminal state unless a
     real interactive tty is confirmed present - safe to run in CI/headless. }

@@ -40,6 +40,16 @@
   (timeline pane: duplicate clip; track pane: duplicate track). MPTI
   itself never interprets the Action tag - that's entirely the app's
   domain, exactly like TMQueueMsg.Kind in MptiQueue.
+
+  Phase 6.5 additions (identified during the Phase 6 review as gaps in
+  the substrate, not things a widget library alone would cover):
+  TMHitRegistry/MRegisterHitRect/MHitTest/MDispatchMouse is the mouse
+  counterpart to the keymap table above - "what claims this click,"
+  resolved against whatever rects were registered while this frame was
+  drawn (immediate-mode, so never stale). MBeginFrame is the canonical
+  per-iteration ordering of the Phase 5 primitives (timers, deferred
+  calls, frame-touch tracking) that nothing had written down before -
+  see its own doc comment for the exact order and why it matters.
 }
 unit MptiCore;
 
@@ -48,7 +58,7 @@ unit MptiCore;
 interface
 
 uses
-  MptiTypes, MptiInput;
+  MptiTypes, MptiInput, MptiLayout, MptiQueue;
 
 type
   TMWidgetID = TMUInt64;
@@ -160,6 +170,83 @@ procedure MBindKey(var KT: TMKeymapTable; PaneID: TMWidgetID; Key: TMKeyCode;
   within it. }
 function MResolveKey(const KT: TMKeymapTable; PaneID: TMWidgetID; Key: TMKeyCode;
   Mods: TMKeyModSet; out Action: TMUInt32): Boolean;
+
+const
+  MHitCapacity = 512;
+
+type
+  { Input-to-widget hit-test router (Phase 6.5, gap #2): given a mouse
+    event and the rects each widget registered while drawing itself,
+    which widget did it land on? Immediate-mode, so this registry only
+    ever reflects the CURRENT frame's draw calls - MBeginHitRegistry
+    clears it, so there is never a stale hit region left over from a
+    widget that stopped drawing.
+
+    Two supported usage patterns, both valid, pick per widget:
+    - Self-check (same-frame, most common): a widget calls
+      MRegisterHitRect for its own rect, then immediately checks
+      MRectContains against that same rect for this iteration's already-
+      decoded input events. Zero latency between click and reaction.
+    - Centralized (MHitTest/MDispatchMouse): call once the frame's draw
+      pass has fully populated the registry, to resolve a single event
+      against every widget registered so far, topmost (last-registered,
+      i.e. drawn last/on top) wins. Needed wherever z-order actually
+      matters and self-check isn't enough on its own - a popup menu or
+      dialog drawn over a base pane, where the base pane's own widgets
+      must not react to a click that a floating widget on top of them
+      already claimed. }
+  TMHitEntry = record
+    ID, PaneID: TMWidgetID;
+    Rect: TMRect;
+  end;
+
+  TMHitRegistry = record
+    Entries: array[0..MHitCapacity - 1] of TMHitEntry;
+    Count: Integer;
+  end;
+
+{ Call once per frame, before drawing - clears prior registrations. }
+procedure MBeginHitRegistry(var HR: TMHitRegistry);
+
+{ Called by a widget's own draw function as it draws itself. Silently
+  drops the registration past MHitCapacity rather than growing
+  unbounded or raising - a screen has a hard ceiling on how many
+  simultaneously-visible widgets fit in it at all, so MHitCapacity is
+  sized generously above any realistic single-frame widget count rather
+  than being a real limit callers need to plan around. }
+procedure MRegisterHitRect(var HR: TMHitRegistry; ID, PaneID: TMWidgetID; const R: TMRect);
+
+{ Topmost (last-registered) entry containing (X, Y), if any. }
+function MHitTest(const HR: TMHitRegistry; X, Y: Integer; out ID, PaneID: TMWidgetID): Boolean;
+
+{ Convenience wrapper: resolves Ev against HR, and - for a press action
+  only - calls MSetFocus on the hit widget (FV gap #7's click-to-focus-
+  also-acts default, already documented at the top of this unit, applied
+  here centrally so callers using the centralized dispatch pattern get
+  it for free rather than re-implementing it per widget). Does nothing
+  to focus for hover/drag/release/wheel actions. Returns False (Core's
+  focus unchanged) if Ev didn't land on anything registered. }
+function MDispatchMouse(var Core: TMCoreState; const HR: TMHitRegistry;
+  const Ev: TMMouseEvent; out ID, PaneID: TMWidgetID): Boolean;
+
+{ Phase 6.5 gap #3: the canonical per-iteration bookkeeping order for the
+  Phase 5 primitives, in one place instead of every app re-deriving it.
+  Call once per main-loop iteration, AFTER MRunOnce/MHeadlessFeedInput
+  has produced this iteration's input events (MResolveKey/MDispatchMouse
+  consume those separately - this only handles what doesn't depend on
+  them) and BEFORE the app draws its frame:
+    1. MBeginCoreFrame - starts this frame's widget-touch tracking.
+    2. MPumpTimers - fires anything due; a timer callback may itself
+       call MDeferCall or MQueuePush, both safe to do from here.
+    3. MRunDeferred - runs whatever was deferred by the PREVIOUS
+       iteration's handlers (never the current one - MRunDeferred's own
+       contract guarantees that).
+  Draining Queue itself is deliberately NOT done here: a TMQueueMsg's
+  meaning is entirely app-defined (see MptiQueue's doc comment), so
+  there is no generic handling to provide - call MQueuePop in a loop
+  right after this returns. }
+procedure MBeginFrame(var Core: TMCoreState; var Timers: TMTimerSet;
+  var Deferred: TMDeferredQueue; NowMs: TMInt64);
 
 implementation
 
@@ -400,6 +487,54 @@ begin
       Exit(True);
     end;
   Result := False;
+end;
+
+procedure MBeginHitRegistry(var HR: TMHitRegistry);
+begin
+  HR.Count := 0;
+end;
+
+procedure MRegisterHitRect(var HR: TMHitRegistry; ID, PaneID: TMWidgetID; const R: TMRect);
+begin
+  if HR.Count >= MHitCapacity then
+    Exit; { see interface doc comment: silently dropped, not an error }
+  HR.Entries[HR.Count].ID := ID;
+  HR.Entries[HR.Count].PaneID := PaneID;
+  HR.Entries[HR.Count].Rect := R;
+  Inc(HR.Count);
+end;
+
+function MHitTest(const HR: TMHitRegistry; X, Y: Integer; out ID, PaneID: TMWidgetID): Boolean;
+var
+  I: Integer;
+begin
+  { Scan from the most-recently-registered entry backwards: later draws
+    are drawn on top in immediate mode, so the last registration whose
+    rect contains (X, Y) is the topmost, correct hit. }
+  for I := HR.Count - 1 downto 0 do
+    if MRectContains(HR.Entries[I].Rect, X, Y) then
+    begin
+      ID := HR.Entries[I].ID;
+      PaneID := HR.Entries[I].PaneID;
+      Exit(True);
+    end;
+  Result := False;
+end;
+
+function MDispatchMouse(var Core: TMCoreState; const HR: TMHitRegistry;
+  const Ev: TMMouseEvent; out ID, PaneID: TMWidgetID): Boolean;
+begin
+  Result := MHitTest(HR, Ev.X, Ev.Y, ID, PaneID);
+  if Result and (Ev.Action = maPress) then
+    MSetFocus(Core, ID, PaneID);
+end;
+
+procedure MBeginFrame(var Core: TMCoreState; var Timers: TMTimerSet;
+  var Deferred: TMDeferredQueue; NowMs: TMInt64);
+begin
+  MBeginCoreFrame(Core);
+  MPumpTimers(Timers, NowMs);
+  MRunDeferred(Deferred);
 end;
 
 end.
