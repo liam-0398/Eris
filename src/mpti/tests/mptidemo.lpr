@@ -26,6 +26,7 @@ function Bytes(const S: string): TMByteArray;
 var
   I: Integer;
 begin
+  Result := nil;
   SetLength(Result, Length(S));
   for I := 1 to Length(S) do
     Result[I - 1] := Byte(S[I]);
