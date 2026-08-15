@@ -10,7 +10,7 @@ program mptidemo;
 
 uses
   SysUtils, MptiTypes, MptiCell, MptiCaps, MptiInput, MptiDriver, MptiRender,
-  MptiHeadless, MptiQueue;
+  MptiHeadless, MptiQueue, MptiCore, MptiLayout;
 
 type
   PMDeferredQueue = ^TMDeferredQueue;
@@ -34,6 +34,14 @@ var
   HScreen: TCellBuffer;
   EQ: TMEventQueue;
   QMsg: TMQueueMsg;
+  Core: TMCoreState;
+  WS: PMWidgetState;
+  IDa, IDb: TMWidgetID;
+  PaneTimeline, PaneTrack: TMWidgetID;
+  KT: TMKeymapTable;
+  ResolvedAction: TMUInt32;
+  Layout: TMLayoutState;
+  RectA, RectTaken, RectRemainder: TMRect;
   Timers: TMTimerSet;
   TH1, TH2: TMTimerHandle;
   Deferred: TMDeferredQueue;
@@ -509,6 +517,130 @@ begin
   PumpCallCount := 0;
   Check(not MBoundedWait(@FakeConditionNever, nil, @FakePump, @PumpCallCount,
     @FakeClock, 5, 0), 'bounded wait: returns False once the timeout elapses');
+
+  { MptiCore: widget ID hashing is stable and distinguishes distinct names }
+  Check(MWidgetID('track_pane/track_3/mute_btn') = MWidgetID('track_pane/track_3/mute_btn'),
+    'core: MWidgetID is stable for the same name');
+  Check(MWidgetID('track_pane/track_3/mute_btn') <> MWidgetID('track_pane/track_3/solo_btn'),
+    'core: MWidgetID distinguishes different names');
+  Check(MWidgetID('') <> 0, 'core: MWidgetID never returns the empty-slot sentinel');
+
+  { IDa/IDb from here on are two genuinely distinct widget IDs, reused
+    across the rest of the MptiCore checks below. }
+  IDa := MWidgetID('widget/a');
+  IDb := MWidgetID('widget/b');
+
+  { MptiCore: get-or-create state table, persistence across frames }
+  MInitCore(Core, 4); { tiny initial capacity to exercise growth below }
+  MBeginCoreFrame(Core);
+  WS := MGetWidgetState(Core, IDa);
+  WS^.ScrollY := 7;
+  WS := MGetWidgetState(Core, IDa);
+  Check(WS^.ScrollY = 7, 'core: state persists across MGetWidgetState calls for the same ID');
+  Check(WS^.SelectStart = -1, 'core: a freshly-created slot defaults SelectStart to -1 (no selection)');
+
+  { MptiCore: table grows past its initial capacity without losing data }
+  for I2 := 0 to 49 do
+  begin
+    WS := MGetWidgetState(Core, MWidgetID('widget_' + IntToStr(I2)));
+    WS^.CursorPos := I2;
+  end;
+  Check(Core.Capacity > 4, 'core: table grew past its tiny initial capacity');
+  WS := MGetWidgetState(Core, IDa);
+  Check(WS^.ScrollY = 7, 'core: original entry survives a grow/rehash');
+  WS := MGetWidgetState(Core, MWidgetID('widget_37'));
+  Check(WS^.CursorPos = 37, 'core: entry added before growth survives with correct data');
+
+  { MptiCore: sweep reaps only what has not been touched recently }
+  MInitCore(Core);
+  MBeginCoreFrame(Core); { frame 1 }
+  MGetWidgetState(Core, IDa)^.ScrollY := 1;
+  MBeginCoreFrame(Core); { frame 2 }
+  MGetWidgetState(Core, IDb)^.ScrollY := 2; { IDb touched again, IDa not }
+  MSweepStaleWidgets(Core, 0); { reap anything not touched THIS frame }
+  Check(Core.UsedCount = 1, 'core: sweep reaps the untouched entry, keeps the touched one');
+
+  { MptiCore: explicit forget removes exactly the named entry }
+  MInitCore(Core);
+  MBeginCoreFrame(Core);
+  MGetWidgetState(Core, IDa)^.ScrollY := 1;
+  MGetWidgetState(Core, IDb)^.ScrollY := 2;
+  MForgetWidget(Core, IDa);
+  Check(Core.UsedCount = 1, 'core: MForgetWidget removes exactly one entry');
+  WS := MGetWidgetState(Core, IDb);
+  Check(WS^.ScrollY = 2, 'core: MForgetWidget leaves unrelated entries intact');
+
+  { MptiCore: focus }
+  PaneTimeline := MWidgetID('pane/timeline');
+  PaneTrack := MWidgetID('pane/track');
+  MInitCore(Core);
+  Check(not MIsFocused(Core, IDa), 'core: nothing focused initially');
+  MSetFocus(Core, IDa, PaneTimeline);
+  Check(MIsFocused(Core, IDa), 'core: MSetFocus makes MIsFocused true for that ID');
+  Check(not MIsFocused(Core, IDb), 'core: MIsFocused false for an unrelated ID');
+  MClearFocus(Core);
+  Check(not MIsFocused(Core, IDa), 'core: MClearFocus clears focus');
+
+  { MptiCore: per-pane keymap - hard requirement 12, the same chord means
+    something different (or nothing) depending which pane owns focus }
+  PaneTimeline := MWidgetID('pane/timeline');
+  PaneTrack := MWidgetID('pane/track');
+  MInitKeymapTable(KT);
+  MBindKey(KT, PaneTimeline, mkChar, [kmCtrl], 1001); { duplicate clip }
+  MBindKey(KT, PaneTrack, mkChar, [kmCtrl], 2001);     { duplicate track }
+  Check(MResolveKey(KT, PaneTimeline, mkChar, [kmCtrl], ResolvedAction)
+    and (ResolvedAction = 1001), 'core: Ctrl+D in timeline pane resolves to its own action');
+  Check(MResolveKey(KT, PaneTrack, mkChar, [kmCtrl], ResolvedAction)
+    and (ResolvedAction = 2001), 'core: Ctrl+D in track pane resolves to a different action');
+  Check(not MResolveKey(KT, MWidgetID('pane/unbound'), mkChar, [kmCtrl], ResolvedAction),
+    'core: unbound pane resolves nothing');
+  Check(not MResolveKey(KT, PaneTimeline, mkChar, [kmAlt], ResolvedAction),
+    'core: same key, different mods, resolves nothing if unbound');
+
+  { MptiCore: rebinding the same chord in the same pane overwrites, not duplicates }
+  MBindKey(KT, PaneTimeline, mkChar, [kmCtrl], 9999);
+  Check(MResolveKey(KT, PaneTimeline, mkChar, [kmCtrl], ResolvedAction)
+    and (ResolvedAction = 9999), 'core: rebinding the same chord overwrites the previous action');
+  Check(Length(KT.Panes[0].Bindings) = 1, 'core: rebinding does not create a duplicate binding entry');
+
+  { MptiLayout: rect helpers }
+  RectA := MMakeRect(0, 0, 100, 40);
+  Check(not MRectEmpty(RectA), 'layout: a normal rect is not empty');
+  Check(MRectEmpty(MMakeRect(0, 0, 0, 5)), 'layout: zero width is empty');
+  Check(MRectFits(RectA, 100, 40), 'layout: rect fits its own exact size');
+  Check(not MRectFits(RectA, 101, 40), 'layout: rect does not fit something 1 wider than itself');
+  Check(MRectContains(RectA, 0, 0), 'layout: contains its own origin');
+  Check(MRectContains(RectA, 99, 39), 'layout: contains its bottom-right-most cell');
+  Check(not MRectContains(RectA, 100, 39), 'layout: does not contain one past its right edge');
+
+  { MptiLayout: split primitives - generalizes DysGeometry's inline carving }
+  MSplitTop(RectA, 3, RectTaken, RectRemainder);
+  Check((RectTaken.X = 0) and (RectTaken.Y = 0) and (RectTaken.W = 100) and (RectTaken.H = 3),
+    'layout: MSplitTop takes a 3-row strip off the top');
+  Check((RectRemainder.X = 0) and (RectRemainder.Y = 3) and (RectRemainder.W = 100) and (RectRemainder.H = 37),
+    'layout: MSplitTop remainder starts below the taken strip');
+
+  MSplitLeft(RectRemainder, 24, RectTaken, RectRemainder);
+  Check((RectTaken.W = 24) and (RectTaken.H = 37), 'layout: MSplitLeft takes a 24-col strip');
+  Check(RectRemainder.X = 24, 'layout: MSplitLeft remainder starts after the taken strip');
+
+  { MptiLayout: split amount is clamped, never yields a negative-size remainder }
+  MSplitLeft(MMakeRect(0, 0, 10, 5), 999, RectTaken, RectRemainder);
+  Check((RectTaken.W = 10) and (RectRemainder.W = 0), 'layout: oversized split clamps to the rect''s own extent');
+
+  { MptiLayout: resize updates the tracked extent, sets Dirty, and posts
+    through the Phase 5 event queue rather than a resize-only side channel }
+  MInitLayout(Layout, 80, 24);
+  Check(Layout.Dirty, 'layout: freshly initialized layout starts Dirty (first frame needs a pass)');
+  MLayoutClearDirty(Layout);
+  Check(not Layout.Dirty, 'layout: MLayoutClearDirty clears it');
+  MInitQueue(EQ);
+  MLayoutOnResize(Layout, EQ, 120, 40);
+  Check((Layout.Extent.W = 120) and (Layout.Extent.H = 40), 'layout: MLayoutOnResize updates the extent');
+  Check(Layout.Dirty, 'layout: MLayoutOnResize sets Dirty');
+  Check(MQueuePop(EQ, QMsg) and (QMsg.Kind = MQueueKindResize)
+    and (QMsg.Param1 = 120) and (QMsg.Param2 = 40),
+    'layout: MLayoutOnResize posts a resize message through the event queue');
 
   { MptiDriver: only ever probes, never mutates terminal state unless a
     real interactive tty is confirmed present - safe to run in CI/headless. }
