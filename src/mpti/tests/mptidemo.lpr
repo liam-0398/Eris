@@ -10,7 +10,10 @@ program mptidemo;
 
 uses
   SysUtils, MptiTypes, MptiCell, MptiCaps, MptiInput, MptiDriver, MptiRender,
-  MptiHeadless;
+  MptiHeadless, MptiQueue;
+
+type
+  PMDeferredQueue = ^TMDeferredQueue;
 
 var
   Buf: array[0..7] of Byte;
@@ -29,6 +32,61 @@ var
   UB: TMByteBuf;
   HD: TMHeadlessState;
   HScreen: TCellBuffer;
+  EQ: TMEventQueue;
+  QMsg: TMQueueMsg;
+  Timers: TMTimerSet;
+  TH1, TH2: TMTimerHandle;
+  Deferred: TMDeferredQueue;
+  FakeClockValue: TMInt64;
+  PumpCallCount: Integer;
+
+function FakeClock: TMInt64;
+begin
+  Result := FakeClockValue;
+end;
+
+procedure FakePump(UserData: Pointer);
+begin
+  Inc(PInteger(UserData)^);
+  Inc(FakeClockValue);
+end;
+
+function FakeConditionAt3(UserData: Pointer): Boolean;
+begin
+  Result := PInteger(UserData)^ >= 3;
+end;
+
+function FakeConditionNever(UserData: Pointer): Boolean;
+begin
+  Result := False;
+end;
+
+var
+  TimerFireCount: Integer;
+
+procedure TimerCallback(UserData: Pointer);
+begin
+  Inc(PInteger(UserData)^);
+end;
+
+var
+  DeferredLog: string;
+
+procedure DeferredCallbackA(UserData: Pointer);
+begin
+  DeferredLog := DeferredLog + 'A';
+end;
+
+procedure DeferredCallbackC(UserData: Pointer);
+begin
+  DeferredLog := DeferredLog + 'C';
+end;
+
+procedure DeferredCallbackB(UserData: Pointer);
+begin
+  DeferredLog := DeferredLog + 'B';
+  MDeferCall(PMDeferredQueue(UserData)^, @DeferredCallbackC, nil);
+end;
 
 function Bytes(const S: string): TMByteArray;
 var
@@ -373,6 +431,84 @@ begin
   HScreen := MHeadlessScreen(HD);
   Check(MCellsEqual(MGetCell(HScreen, 2, 1), Cell), 'headless: drawn cell visible in MHeadlessScreen after render');
   Check(Pos('K', MByteBufToString(Out1)) > 0, 'headless: drawn cell reflected in emitted ANSI');
+
+  { MptiQueue: SPSC event queue FIFO ordering }
+  MInitQueue(EQ);
+  QMsg.Kind := 1; QMsg.Param1 := 111; QMsg.Param2 := 0; QMsg.Data := nil;
+  Check(MQueuePush(EQ, QMsg), 'queue: push 1 succeeds');
+  QMsg.Kind := 2; QMsg.Param1 := 222;
+  Check(MQueuePush(EQ, QMsg), 'queue: push 2 succeeds');
+  Check(MQueuePop(EQ, QMsg) and (QMsg.Kind = 1) and (QMsg.Param1 = 111), 'queue: pop 1 is FIFO-first');
+  Check(MQueuePop(EQ, QMsg) and (QMsg.Kind = 2) and (QMsg.Param1 = 222), 'queue: pop 2 is FIFO-second');
+  Check(not MQueuePop(EQ, QMsg), 'queue: pop on empty queue fails');
+
+  { MptiQueue: full queue drops rather than blocks (mirrors PushNoteEvent) }
+  MInitQueue(EQ);
+  I2 := 0;
+  while MQueuePush(EQ, QMsg) do Inc(I2);
+  Check(I2 = MQueueCapacity - 1, 'queue: capacity is Capacity-1 usable slots (one-slot-of-margin ring)');
+  Check(not MQueuePush(EQ, QMsg), 'queue: push on full queue fails (dropped, not blocked)');
+
+  { MptiQueue: timers - one-shot fires once at its due time, not before }
+  MInitTimers(Timers);
+  TimerFireCount := 0;
+  MScheduleTimer(Timers, 1000, 500, 0, @TimerCallback, @TimerFireCount);
+  MPumpTimers(Timers, 1400); { before due }
+  Check(TimerFireCount = 0, 'timer: does not fire before its due time');
+  MPumpTimers(Timers, 1500); { exactly due }
+  Check(TimerFireCount = 1, 'timer: fires once its due time is reached');
+  MPumpTimers(Timers, 2000); { one-shot: should not fire again }
+  Check(TimerFireCount = 1, 'timer: one-shot does not refire');
+
+  { MptiQueue: repeating timer reschedules itself }
+  MInitTimers(Timers);
+  TimerFireCount := 0;
+  MScheduleTimer(Timers, 0, 100, 100, @TimerCallback, @TimerFireCount);
+  MPumpTimers(Timers, 100);
+  Check(TimerFireCount = 1, 'repeating timer: first fire at due time');
+  MPumpTimers(Timers, 150);
+  Check(TimerFireCount = 1, 'repeating timer: does not fire again before next interval');
+  MPumpTimers(Timers, 200);
+  Check(TimerFireCount = 2, 'repeating timer: fires again once next interval elapses');
+
+  { MptiQueue: cancelled timer never fires }
+  MInitTimers(Timers);
+  TimerFireCount := 0;
+  TH1 := MScheduleTimer(Timers, 0, 50, 0, @TimerCallback, @TimerFireCount);
+  TH2 := MScheduleTimer(Timers, 0, 50, 0, @TimerCallback, @TimerFireCount);
+  MCancelTimer(Timers, TH1);
+  MPumpTimers(Timers, 100);
+  Check(TimerFireCount = 1, 'timer: cancelled timer does not fire, uncancelled sibling does');
+
+  { MptiQueue: deferred calls run in FIFO order, not immediately }
+  MInitDeferred(Deferred);
+  DeferredLog := '';
+  Check(MDeferCall(Deferred, @DeferredCallbackA, nil), 'deferred: MDeferCall succeeds');
+  Check(DeferredLog = '', 'deferred: call does not run until MRunDeferred');
+  MRunDeferred(Deferred);
+  Check(DeferredLog = 'A', 'deferred: call runs on MRunDeferred');
+
+  { MptiQueue: a callback that self-defers waits for the *next* MRunDeferred,
+    not the batch currently running - proves the queue can't starve the loop }
+  DeferredLog := '';
+  MDeferCall(Deferred, @DeferredCallbackB, @Deferred);
+  MRunDeferred(Deferred);
+  Check(DeferredLog = 'B', 'deferred: self-deferring call does not run its follow-up same iteration');
+  MRunDeferred(Deferred);
+  Check(DeferredLog = 'BC', 'deferred: follow-up runs on the next MRunDeferred');
+
+  { MptiQueue: bounded wait pumps until Condition is true, no real Sleep needed }
+  FakeClockValue := 0;
+  PumpCallCount := 0;
+  Check(MBoundedWait(@FakeConditionAt3, @PumpCallCount, @FakePump, @PumpCallCount,
+    @FakeClock, 1000, 0), 'bounded wait: returns True once Condition becomes true');
+  Check(PumpCallCount = 3, 'bounded wait: pumps exactly until Condition is satisfied');
+
+  { MptiQueue: bounded wait gives up at the timeout instead of hanging forever }
+  FakeClockValue := 0;
+  PumpCallCount := 0;
+  Check(not MBoundedWait(@FakeConditionNever, nil, @FakePump, @PumpCallCount,
+    @FakeClock, 5, 0), 'bounded wait: returns False once the timeout elapses');
 
   { MptiDriver: only ever probes, never mutates terminal state unless a
     real interactive tty is confirmed present - safe to run in CI/headless. }
