@@ -106,21 +106,15 @@ type
     MoveClipIndex: Integer;
     MoveLength: Int64;
     MovePosition: Int64;
-    { 'k': marks the clip under the cursor as the one whose waveform is
-      shown in the bottom pane's waveform widget (Ctrl+W toggles that pane
-      between it and the effects rack - see DysWidgets/DysEffectsRack).
-      Blinks (MarkedAttr) the same "still there, just visually flagged"
-      way Pending/ResizeActive/MoveActive's spans do, but unlike those
-      three this isn't a transient edit-in-progress state that gets
-      cleared on commit/Esc - it just sits on whatever clip was last
-      marked until something else marks a different one. -1 = nothing
-      marked. Bounds-checked against the track's current clip count on
-      every Draw rather than cleared on every edit that could invalidate
-      it (split/delete/duplicate shifting indices) - simpler, and a stale
-      mark just stops rendering rather than pointing at the wrong clip. }
-    MarkedTrack: Integer;
-    MarkedClipIndex: Integer;
-    procedure MarkClipUnderCursor;
+    { 'k'/MarkedTrack/MarkedClipIndex/MarkClipUnderCursor, and the whole
+      waveform-selection chop/insert/duplicate/paste mechanism they fed
+      (DysChopMarkedClipRegion/DysInsertIntoMarkedClip/
+      DysDuplicateWaveformSelection/DysPasteWaveformClipboard, and
+      DysEffectsRack's mouse-drag TDysWaveformContent that drove them)
+      were removed - ported to DysMptiApp.pas's own independent keyboard
+      cursor/grid/selection (DrawWaveformPane's key-dispatch block),
+      unreachable here regardless (dysnomia.lpr boots RunDysnomiaMpti, not
+      TDysnomiaApp). src/tui-freevision keeps the original. }
     constructor Init(Bounds: TRect);
     procedure Draw; virtual;
     procedure HandleEvent(var Event: TEvent); virtual;
@@ -223,13 +217,6 @@ procedure DysFinalizeRecording;
   first decided against exposing it for DysStartRecording/
   DysFinalizeRecording's sake alone. }
 procedure PushTrackToEngine(ATrackIndex: Integer);
-
-{ Ctrl+D/Ctrl+V on the waveform pane's own selection/paste-cursor - called
-  from DysnomiaApp.pas's cmEditDuplicate/cmEditPaste, same routing as
-  DysChopMarkedClipRegion (ChopWaveformSelectionProc) for Delete. See
-  either procedure's own implementation comment. }
-procedure DysDuplicateWaveformSelection;
-procedure DysPasteWaveformClipboard;
 
 implementation
 
@@ -745,8 +732,6 @@ begin
   ResizeClipIndex := -1;
   MoveActive := False;
   MoveClipIndex := -1;
-  MarkedTrack := -1;
-  MarkedClipIndex := -1;
   ActiveTimelineContent := @Self;
 end;
 
@@ -915,19 +900,6 @@ begin
       if MoveActive and (Track = MoveTrack) then
         DrawSpan(B, FramesPerCol, Size.X, MovePosition, MoveLength, PendingAttr,
           ViewStartFrame);
-
-      { 'k' - see MarkedTrack's own field comment on why this is bounds-
-        checked here rather than cleared by every edit that could move/
-        invalidate the index: a split/delete/duplicate on this track since
-        the mark was set could have shifted or removed it entirely, and
-        re-checking Length on every Draw is simpler than hunting down every
-        place that would otherwise need to fix the mark up. }
-      if (Track = MarkedTrack) and (MarkedClipIndex >= 0) and
-         (MarkedClipIndex <= High(Project.Tracks[Track].Clips)) then
-        DrawSpan(B, FramesPerCol, Size.X,
-          Project.Tracks[Track].Clips[MarkedClipIndex].Position,
-          Project.Tracks[Track].Clips[MarkedClipIndex].Length,
-          MarkedAttr, ViewStartFrame);
 
       if LoopStartCol >= 0 then
         MoveChar(B[LoopStartCol], LoopChar, LoopAttr, 1);
@@ -1189,12 +1161,6 @@ begin
           ClearEvent(Event);
           Exit;
         end;
-      'k', 'K':
-        begin
-          MarkClipUnderCursor;
-          ClearEvent(Event);
-          Exit;
-        end;
       'h', 'H':
         begin
           { Cycle the track row height 1/2/3 - same as the toolbar's H:n
@@ -1365,337 +1331,6 @@ begin
   Project.ReplaceTrackClips(CursorTrack, NewClips);
   PushTrackToEngine(CursorTrack);
   DrawView;
-end;
-
-{ 'k' - see the MarkedTrack/MarkedClipIndex field comment. Hands the
-  clip's SampleID/Offset/Length off to the bottom pane's waveform widget
-  via SetWaveformClipProc (DysWidgets.pas's own comment on why this is a
-  callback rather than a direct call) - that call also switches the
-  bottom pane onto the waveform view if it wasn't already showing it, so
-  marking a clip gives immediate visual feedback rather than silently
-  updating a widget that might be hidden behind the effects rack. }
-procedure TDysTimelineContent.MarkClipUnderCursor;
-var
-  ClipIdx: Integer;
-begin
-  ClipIdx := ClipIndexAtFrame(CursorTrack, CursorFrame);
-  if ClipIdx < 0 then
-    Exit;
-  MarkedTrack := CursorTrack;
-  MarkedClipIndex := ClipIdx;
-  DrawView;
-  if Assigned(SetWaveformClipProc) then
-    with Project.Tracks[CursorTrack].Clips[ClipIdx] do
-      SetWaveformClipProc(SampleID, Offset, Length, Gain, PitchSemitones, WarpMode,
-        CursorTrack, ClipIdx);
-end;
-
-{ Wired to DysWidgets.ChopWaveformSelectionProc - see that var's own
-  comment. AStartSource/AEndSource are absolute source-domain frame
-  positions into the underlying sample (same domain as TClip.Offset),
-  exactly what the waveform widget's own drag-selection already works in
-  (TDysWaveformContent.ColToSourceFrame). Excises that span from the
-  MARKED clip (MarkedTrack/MarkedClipIndex, set by 'k' - not necessarily
-  whatever's under the timeline cursor right now), then RIPPLES every other
-  clip on the same track that started at or after the chopped span leftward
-  by the chopped length, closing the hole rather than leaving a gap (unlike
-  DeleteClipUnderCursor above, which still leaves one for a whole-clip
-  Delete - this callback's own Delete-key path is scoped to a drag
-  selection, not a whole clip, so there's no reason to match that
-  convention here). Only supports an UNWARPED
-  clip (WarpMarkers empty/singleton, the default state for a clip fresh off
-  the file pane or a plain Ctrl+V/Ctrl+D copy - see SplitWarpMarkers's own
-  "Length(AMarkers) < 2 -> 1:1 playback" comment): the source-domain
-  selection this callback receives can only be mapped straight onto
-  timeline-domain Position/Length when source frame and timeline frame
-  advance 1:1, which a time-warped clip's own WarpMarkers deliberately
-  breaks. Chopping a warped clip needs the same piecewise-linear remap
-  SplitWarpMarkers already does, just at TWO cut points instead of one -
-  real, but not attempted here; refuses with a message instead of
-  producing a chop that would silently play back wrong. }
-procedure DysChopMarkedClipRegion(AStartSource, AEndSource: Int64);
-var
-  Track, ClipIdx: Integer;
-  Original, LeftPart, RightPart: TClip;
-  ClipStart, ClipEnd: Int64;
-  HaveLeft, HaveRight: Boolean;
-  NewClips: TClipArray;
-  i, k: Integer;
-  Delta, ShiftAfterPos: Int64;
-begin
-  if ActiveTimelineContent = nil then
-    Exit;
-  Track := ActiveTimelineContent^.MarkedTrack;
-  ClipIdx := ActiveTimelineContent^.MarkedClipIndex;
-  if (Track < 0) or (Track > High(Project.Tracks)) then
-    Exit;
-  if (ClipIdx < 0) or (ClipIdx > High(Project.Tracks[Track].Clips)) then
-    Exit;
-  Original := Project.Tracks[Track].Clips[ClipIdx];
-  if Length(Original.WarpMarkers) >= 2 then
-  begin
-    MessageBox('Chopping a time-warped clip (after ''w''/Shift+W) is not ' +
-      'supported yet - only a plain, unwarped clip can be chopped.', nil,
-      mfError or mfOKButton);
-    Exit;
-  end;
-
-  ClipStart := Original.Offset;
-  ClipEnd := Original.Offset + Original.Length;
-  if AStartSource < ClipStart then
-    AStartSource := ClipStart;
-  if AEndSource > ClipEnd then
-    AEndSource := ClipEnd;
-  if AEndSource <= AStartSource then
-    Exit;
-
-  HaveLeft := AStartSource > ClipStart;
-  HaveRight := AEndSource < ClipEnd;
-
-  { Ripple, not a gap (per the user's own ask): everything at or after the
-    chopped span's own END - in TIMELINE terms, ShiftAfterPos below - slides
-    left by Delta frames once the excised span is gone, same "close the
-    hole" behaviour a DAW's ripple-delete gives. Unwarped (guarded above),
-    so source and timeline frames advance 1:1 and Delta/ShiftAfterPos both
-    carry straight over from source domain without any remap. }
-  Delta := AEndSource - AStartSource;
-  ShiftAfterPos := Original.Position + (AEndSource - ClipStart);
-
-  if HaveLeft then
-  begin
-    LeftPart := Original;
-    LeftPart.Length := AStartSource - ClipStart;
-  end;
-  if HaveRight then
-  begin
-    RightPart := Original;
-    RightPart.Offset := AEndSource;
-    RightPart.Length := ClipEnd - AEndSource;
-    { Placed directly after LeftPart's own end (ShiftAfterPos - Delta,
-      i.e. Original.Position + (AStartSource - ClipStart)) rather than at
-      the old gap-leaving ShiftAfterPos - this is already its FINAL,
-      post-ripple position, which is also why the ripple loop below (keyed
-      on Position >= ShiftAfterPos) never touches it again. }
-    RightPart.Position := ShiftAfterPos - Delta;
-  end;
-
-  if not HaveLeft and not HaveRight then
-    { Whole clip selected - same outcome as Delete. }
-    Project.RemoveClipAt(Track, ClipIdx)
-  else
-  begin
-    SetLength(NewClips, Length(Project.Tracks[Track].Clips) -
-      1 + Ord(HaveLeft) + Ord(HaveRight));
-    k := 0;
-    for i := 0 to High(Project.Tracks[Track].Clips) do
-    begin
-      if i = ClipIdx then
-      begin
-        if HaveLeft then
-        begin
-          NewClips[k] := LeftPart;
-          Inc(k);
-        end;
-        if HaveRight then
-        begin
-          NewClips[k] := RightPart;
-          Inc(k);
-        end;
-      end
-      else
-      begin
-        NewClips[k] := Project.Tracks[Track].Clips[i];
-        Inc(k);
-      end;
-    end;
-    Project.ReplaceTrackClips(Track, NewClips);
-  end;
-
-  { Second pass, after whichever of RemoveClipAt/ReplaceTrackClips above
-    actually ran: every OTHER clip on this same track whose own Position was
-    at or past the chopped span's end shifts left by Delta too, closing the
-    hole left behind. RightPart (if any) is already at its final position
-    (see its own comment above) and sits BELOW ShiftAfterPos, so this loop
-    skips it - nothing here double-shifts it. }
-  for i := 0 to High(Project.Tracks[Track].Clips) do
-    if Project.Tracks[Track].Clips[i].Position >= ShiftAfterPos then
-      Dec(Project.Tracks[Track].Clips[i].Position, Delta);
-
-  PushTrackToEngine(Track);
-
-  { The chopped span is gone from view either way - clear the waveform
-    widget rather than guessing which remaining piece (if any) to re-show;
-    press 'k' again on whichever piece to inspect it. }
-  ActiveTimelineContent^.MarkedTrack := -1;
-  ActiveTimelineContent^.MarkedClipIndex := -1;
-  if Assigned(SetWaveformClipProc) then
-    SetWaveformClipProc(-1, 0, 0, 0, 0, 0, -1, -1);
-  ActiveTimelineContent^.DrawView;
-end;
-
-{ Inverse of DysChopMarkedClipRegion's own left-ripple: splits the
-  CURRENTLY MARKED clip at AAtSourceFrame (absolute source-domain, same
-  convention as that function's AStartSource/AEndSource) and inserts a
-  brand new clip [ASampleID,AOffset,ALength) between the two halves,
-  rippling every OTHER clip on the track whose Position is at or past the
-  split point rightward by ALength to make room. Shared by Ctrl+D
-  (DysDuplicateWaveformSelection - duplicates the waveform pane's current
-  selection immediately after itself) and Ctrl+V
-  (DysPasteWaveformClipboard - pastes at the pane's click-set insertion
-  cursor). Same "only a plain unwarped clip" restriction as the chop, for
-  the same reason: source and timeline frames need to advance 1:1 for
-  AAtSourceFrame to translate into a timeline position at all. }
-procedure DysInsertIntoMarkedClip(AAtSourceFrame: Int64; ASampleID: Integer;
-  AOffset, ALength: Int64);
-var
-  Track, ClipIdx: Integer;
-  Original, LeftPart, MiddlePart, RightPart: TClip;
-  ClipStart, ClipEnd, SplitPos: Int64;
-  HaveLeft, HaveRight: Boolean;
-  NewClips: TClipArray;
-  i, k: Integer;
-begin
-  if (ActiveTimelineContent = nil) or (ALength <= 0) then
-    Exit;
-  Track := ActiveTimelineContent^.MarkedTrack;
-  ClipIdx := ActiveTimelineContent^.MarkedClipIndex;
-  if (Track < 0) or (Track > High(Project.Tracks)) then
-    Exit;
-  if (ClipIdx < 0) or (ClipIdx > High(Project.Tracks[Track].Clips)) then
-    Exit;
-  Original := Project.Tracks[Track].Clips[ClipIdx];
-  if Length(Original.WarpMarkers) >= 2 then
-  begin
-    MessageBox('Editing a time-warped clip''s waveform this way is not ' +
-      'supported yet - only a plain, unwarped clip can be chopped.', nil,
-      mfError or mfOKButton);
-    Exit;
-  end;
-
-  ClipStart := Original.Offset;
-  ClipEnd := Original.Offset + Original.Length;
-  if AAtSourceFrame < ClipStart then
-    AAtSourceFrame := ClipStart;
-  if AAtSourceFrame > ClipEnd then
-    AAtSourceFrame := ClipEnd;
-
-  HaveLeft := AAtSourceFrame > ClipStart;
-  HaveRight := AAtSourceFrame < ClipEnd;
-  SplitPos := Original.Position + (AAtSourceFrame - ClipStart);
-
-  if HaveLeft then
-  begin
-    LeftPart := Original;
-    LeftPart.Length := AAtSourceFrame - ClipStart;
-  end;
-
-  FillChar(MiddlePart, SizeOf(MiddlePart), 0);
-  MiddlePart.SampleID := ASampleID;
-  MiddlePart.Offset := AOffset;
-  MiddlePart.Length := ALength;
-  MiddlePart.Position := SplitPos;
-  MiddlePart.TrackID := Track;
-  MiddlePart.Gain := 1.0;
-  MiddlePart.PitchSemitones := 0;
-  MiddlePart.WarpMode := WarpModeBeats;
-
-  if HaveRight then
-  begin
-    RightPart := Original;
-    RightPart.Offset := AAtSourceFrame;
-    RightPart.Length := ClipEnd - AAtSourceFrame;
-    RightPart.Position := SplitPos + ALength;
-  end;
-
-  SetLength(NewClips, Length(Project.Tracks[Track].Clips) +
-    1 + Ord(HaveLeft) + Ord(HaveRight) - 1);
-  k := 0;
-  for i := 0 to High(Project.Tracks[Track].Clips) do
-  begin
-    if i = ClipIdx then
-    begin
-      if HaveLeft then
-      begin
-        NewClips[k] := LeftPart;
-        Inc(k);
-      end;
-      NewClips[k] := MiddlePart;
-      Inc(k);
-      if HaveRight then
-      begin
-        NewClips[k] := RightPart;
-        Inc(k);
-      end;
-    end
-    else
-    begin
-      { An unrelated clip on the same track: ripple it right if it started
-        at or past the split point - RightPart (above) is already at its
-        final post-insert position and is handled in the `if i = ClipIdx`
-        branch instead, so it's never seen here and can't be double-shifted. }
-      NewClips[k] := Project.Tracks[Track].Clips[i];
-      if NewClips[k].Position >= SplitPos then
-        Inc(NewClips[k].Position, ALength);
-      Inc(k);
-    end;
-  end;
-  Project.ReplaceTrackClips(Track, NewClips);
-  PushTrackToEngine(Track);
-
-  { Same "clear the mark, press 'k' again" convention as the chop - the
-    marked clip just became two or three different clips, none of which is
-    unambiguously "the same one" to keep showing. }
-  ActiveTimelineContent^.MarkedTrack := -1;
-  ActiveTimelineContent^.MarkedClipIndex := -1;
-  if Assigned(SetWaveformClipProc) then
-    SetWaveformClipProc(-1, 0, 0, 0, 0, 0, -1, -1);
-  ActiveTimelineContent^.DrawView;
-end;
-
-{ Ctrl+D on the waveform pane - see tui.md's Bindings and
-  DysCopyWaveformSelection's own comment on why this lives here rather
-  than in DysEffectsRack. Duplicates the CURRENT SELECTION (not the
-  clipboard - same "act on what's selected, not what was last copied"
-  distinction the timeline's own Ctrl+D already draws) immediately after
-  itself, Ableton-style, same as DuplicateClipUnderCursor. }
-procedure DysDuplicateWaveformSelection;
-var
-  SelStart, SelEnd: Int64;
-  SelSampleID: Integer;
-begin
-  if (ActiveBottomPane = nil) or (ActiveBottomPane^.WaveformView = nil) then
-    Exit;
-  with ActiveBottomPane^.WaveformView^ do
-  begin
-    if (not SelActive) or (SampleID < 0) then
-      Exit;
-    SelStart := SelStartFrame;
-    SelEnd := SelEndFrame;
-    SelSampleID := SampleID;
-  end;
-  DysInsertIntoMarkedClip(SelEnd, SelSampleID, SelStart, SelEnd - SelStart);
-end;
-
-{ Ctrl+V on the waveform pane - pastes DysCopyWaveformSelection's clipboard
-  at the pane's own click-set insertion cursor (CursorActive/CursorFrame -
-  see that field's comment). Does nothing (rather than guessing a
-  position) if either is missing. }
-procedure DysPasteWaveformClipboard;
-var
-  AtFrame, ClipOffset, ClipLength: Int64;
-  ClipSampleID: Integer;
-begin
-  if (ActiveBottomPane = nil) or (ActiveBottomPane^.WaveformView = nil) then
-    Exit;
-  if not DysGetWaveClipboard(ClipSampleID, ClipOffset, ClipLength) then
-    Exit;
-  with ActiveBottomPane^.WaveformView^ do
-  begin
-    if not CursorActive then
-      Exit;
-    AtFrame := CursorFrame;
-  end;
-  DysInsertIntoMarkedClip(AtFrame, ClipSampleID, ClipOffset, ClipLength);
 end;
 
 procedure TDysTimelineContent.SolidifyResize;
@@ -1905,7 +1540,6 @@ initialization
   StartRecordingProc := @DysStartRecording;
   FinalizeRecordingProc := @DysFinalizeRecording;
   SeekPlaybackToCursorProc := @DysSeekPlaybackToCursor;
-  ChopWaveformSelectionProc := @DysChopMarkedClipRegion;
   CycleTrackHeightProc := @DysCycleTrackHeight;
 
 end.

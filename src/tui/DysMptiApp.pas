@@ -68,7 +68,7 @@ const
   DefaultBrowseDir = '/NFS/Music/Production';
 
   DefaultPixelsPerSecond = 10;
-  TimelineLabelWidth = 4;
+  TimelineLabelWidth = 0;
   BlockChar = $2588; { solid full block }
 
 type
@@ -261,6 +261,37 @@ begin
   while Project.TrackCount < ACount do
     if not Project.AddTrack then
       Break;
+end;
+
+{ Bug fix: clicking a menu-bar label (MMenuBar) and the dropdown it opens
+  (MDropdownList) both scan the SAME unconsumed Events array in the SAME
+  frame (immediate mode, no FV-style ClearEvent). MDropdownList treats any
+  left-press outside its own rect as "click outside, cancel" - which
+  includes the very click on the label (row MenuBarRow) that just opened
+  it, since the dropdown body starts a row below. Net effect: the menu
+  opens and immediately closes again on the same frame, so clicking File/
+  Edit/Help visibly does nothing (only F10, a key event MDropdownList
+  never treats as "outside", actually opens it). Fix at the call site
+  rather than in MDropdownList itself (src/mpti, read-only reference):
+  strip the menu-bar row's own press event before handing Events to the
+  dropdown, since that row is exclusively MMenuBar's own open/close
+  toggle and never a legitimate dropdown-body click anyway. }
+function FilterOutMenuBarClick(const Events: TMInputEventArray;
+  AMenuBarRow: Integer): TMInputEventArray;
+var
+  I, Count: Integer;
+begin
+  SetLength(Result, Length(Events));
+  Count := 0;
+  for I := 0 to High(Events) do
+  begin
+    if (Events[I].Kind = mekMouse) and (Events[I].Mouse.Action = maPress) and
+       (Events[I].Mouse.Y = AMenuBarRow) then
+      Continue; { belongs to MMenuBar's own toggle, not the dropdown body }
+    Result[Count] := Events[I];
+    Inc(Count);
+  end;
+  SetLength(Result, Count);
 end;
 
 procedure DrawText(var Buf: TCellBuffer; X, Y: Integer; const S: string;
@@ -1585,24 +1616,6 @@ begin
     Row := 2 + T;
     if Row >= CH then
       Break;
-
-    Label_ := 'T' + IntToStr(T + 1);
-    if T = State.CursorTrack then
-    begin
-      LblFg := MDefaultBg;
-      LblBg := MDefaultFg;
-      LblStyle := [];
-    end
-    else
-    begin
-      LblFg := MDefaultFg;
-      LblBg := MDefaultBg;
-      LblStyle := [];
-    end;
-    for I := 0 to TimelineLabelWidth - 1 do
-      MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, R.X + 1 + I, CY0 + Row, 32,
-        LblFg, LblBg, LblStyle);
-    DrawText(Buf, R.X + 1, CY0 + Row, Label_, LblFg, LblBg, LblStyle);
 
     { Empty-track baseline (dashes) plus the same grid ticks as the ruler,
       overlaid on top - drawn before clips so a clip cleanly overwrites
@@ -3203,7 +3216,8 @@ begin
           if ShowFileDrop then
           begin
             FileDropSel := MDropdownList(Core, HR, RState.Back, 'dysnomia/filemenu',
-              MenuPaneID, 0, MenuBarRow + 1, FileMenuItems, Events);
+              MenuPaneID, 0, MenuBarRow + 1, FileMenuItems,
+              FilterOutMenuBarClick(Events, MenuBarRow));
             case FileDropSel of
               FiNew: begin DoFileNew(State); ShowFileDrop := False; MMenuBarClose(Core, 'dysnomia/menubar'); end;
               FiOpen: begin DoFileOpenBegin(State); ShowFileDrop := False; MMenuBarClose(Core, 'dysnomia/menubar'); end;
@@ -3219,7 +3233,8 @@ begin
           if ShowEditDrop then
           begin
             EditDropSel := MDropdownList(Core, HR, RState.Back, 'dysnomia/editmenu',
-              MenuPaneID, 6, MenuBarRow + 1, EditMenuItems, Events);
+              MenuPaneID, 6, MenuBarRow + 1, EditMenuItems,
+              FilterOutMenuBarClick(Events, MenuBarRow));
             if EditDropSel = 0 then
             begin
               DoShowPreferences(State);
@@ -3236,7 +3251,8 @@ begin
           if ShowHelpDrop then
           begin
             HelpDropSel := MDropdownList(Core, HR, RState.Back, 'dysnomia/helpmenu',
-              MenuPaneID, 12, MenuBarRow + 1, HelpMenuItems, Events);
+              MenuPaneID, 12, MenuBarRow + 1, HelpMenuItems,
+              FilterOutMenuBarClick(Events, MenuBarRow));
             if HelpDropSel <> -1 then
             begin
               ShowHelpDrop := False;
