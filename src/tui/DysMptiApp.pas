@@ -43,7 +43,7 @@ uses
   MptiTypes, MptiCell, MptiCaps, MptiInput, MptiDriver, MptiRender,
   MptiCore, MptiLayout, MptiWidgets,
   Config, AudioEngine, Project, SampleTypes, WavDecoder, ProjectFile, DysRemoteServer,
-  Effects, Quadraverb, BBE422A, Alesis3630, BossFZ2, Waveform, Math;
+  Effects, Quadraverb, BBE422A, Alesis3630, BossFZ2, Waveform, Math, ClipOverwrite;
 
 const
   { Same numbers as DysGeometry's constants (src/tui/DysGeometry.pas) -
@@ -88,6 +88,9 @@ type
     needs, done by hand since MPTI has no TDialog/ExecView of its own. }
   TDysModalKind = (dmNone, dmFileDialog, dmPreferences, dmTrackOptions);
   TDysFileDialogMode = (dfmOpen, dfmSaveAs);
+  { Waveform pane's 2-stage selection marker - see the WaveSelState field
+    comment below. }
+  TDysWaveSelState = (wsNone, wsStartSet, wsComplete);
 
   TDysAppState = record
     { Shared cursor: which track a dropped clip lands on, and which
@@ -194,6 +197,28 @@ type
       lookup to compute it. }
     WaveCacheTrack, WaveCacheClipIdx, WaveCacheSampleID: Integer;
     WavePeaks: Waveform.TWaveformPeaks;
+
+    { Waveform pane keyboard cursor/selection (Part 2 of the timeline/
+      waveform editing port) - all TIMELINE-domain absolute frames, not
+      source/sample-domain, so the Ctrl+C/V/D/Delete commands below can
+      hand them straight to the ported ExtractClipInRange/reused
+      ClipOverwrite.OverwriteClips with no source<->timeline conversion -
+      those two already do all WarpMarker/DragZone remapping correctly
+      (see this file's header note on Eris's own src/project/
+      ClipOverwrite.pas + src/ui/ArrangementView.pas, read-only
+      reference). Reset (WaveCursorFrame to the clip's own Position,
+      WaveSelState to wsNone) whenever the active clip's identity changes -
+      same trigger as the WaveCache* invalidation above, see
+      DrawWaveformPane. }
+    WaveCursorFrame: Int64;
+    WaveSelState: TDysWaveSelState;
+    WaveSelStart, WaveSelEnd: Int64;
+    { Independent of the timeline's own State.IntervalIdx (4 steps, no
+      1/2 step) - 'g'/'G' on the waveform pane cycles this 5-step grid
+      instead: 1/16, 1/8, 1/4, 1/2, 1 bar (WaveGridStepFrames/
+      WaveGridStepNames). Explicitly set to 1 (1/8) at startup, below -
+      FillChar's zero would otherwise default to 1/16. }
+    WaveGridIdx: Integer;
   end;
 
 function ComputeDysMptiLayout(Cols, Rows: Integer): TDysMptiLayout;
@@ -519,6 +544,170 @@ begin
     Exit;
   Project.RemoveClipAt(State.CursorTrack, ClipIdx);
   PushTrackToEngineSimple(State.CursorTrack);
+end;
+
+{ Ported straight from src/ui/ArrangementView.pas's private
+  ExtractClipInRange (Eris, read-only reference - the "bible" for
+  anything save/load-format-shaped, per the project's own convention:
+  Eris's project files must stay loadable by both apps, so warp-aware
+  clip math needs to match exactly what Eris already does). Pulls the
+  portion of AClip overlapping the TIMELINE-domain range
+  [ARangeStart, ARangeEnd) into its own standalone TClip, correctly
+  rebasing Offset/Position and splitting EITHER WarpMarkers (via
+  Waveform.SplitWarpMarkers) or DragZones (via Waveform.SplitDragZones,
+  for WarpModeDrag clips - Eris's other warp representation, which a
+  shared project file can contain even though Dysnomia itself never
+  creates one). This is what lets the waveform-selection commands below
+  work on warped/drag-zone clips with no new warp math of their own. }
+function ExtractClipInRange(const AClip: TClip; ARangeStart, ARangeEnd: Int64;
+  out AResult: TClip): Boolean;
+var
+  ClipEnd, NewStart, NewEnd, SplitRel, SplitSource: Int64;
+  DiscardMarkers, KeptMarkers: TWarpMarkerArray;
+  DiscardZones, KeptZones: TDragZoneArray;
+begin
+  ClipEnd := AClip.Position + AClip.Length;
+  if (ClipEnd <= ARangeStart) or (AClip.Position >= ARangeEnd) then
+    Exit(False);
+
+  AResult := AClip;
+  NewStart := Max(AClip.Position, ARangeStart);
+  NewEnd := Min(ClipEnd, ARangeEnd);
+
+  if NewStart > AClip.Position then
+  begin
+    { Offset is SOURCE-domain - advance by the source-side cut, not the
+      timeline one (see SplitWarpMarkers' ASplitSourceOut comment). }
+    if AClip.WarpMode = SampleTypes.WarpModeDrag then
+    begin
+      SplitRel := SplitDragZones(AClip.DragZones, NewStart - AClip.Position,
+        DiscardZones, KeptZones, @SplitSource);
+      AResult.DragZones := KeptZones;
+    end
+    else
+    begin
+      SplitRel := SplitWarpMarkers(AClip.WarpMarkers, NewStart - AClip.Position,
+        DiscardMarkers, KeptMarkers, AClip.WarpMode,
+        AudioEngine.ProjectSampleRate, @SplitSource);
+      AResult.WarpMarkers := KeptMarkers;
+    end;
+    AResult.Offset := AClip.Offset + SplitSource;
+    AResult.Position := AClip.Position + SplitRel;
+  end;
+
+  if NewEnd < ClipEnd then
+  begin
+    if AClip.WarpMode = SampleTypes.WarpModeDrag then
+    begin
+      SplitRel := SplitDragZones(AResult.DragZones, NewEnd - AResult.Position,
+        KeptZones, DiscardZones);
+      AResult.DragZones := KeptZones;
+    end
+    else
+    begin
+      SplitRel := SplitWarpMarkers(AResult.WarpMarkers, NewEnd - AResult.Position,
+        KeptMarkers, DiscardMarkers, AClip.WarpMode);
+      AResult.WarpMarkers := KeptMarkers;
+    end;
+    AResult.Length := SplitRel;
+  end
+  else
+    AResult.Length := ClipEnd - AResult.Position;
+
+  Result := True;
+end;
+
+{ Waveform pane selection commands - Ctrl+C/V/D and Delete on
+  State.WaveSelStart/WaveSelEnd (the 2-stage Enter/Enter marker, see
+  RunDysnomiaMpti's waveform key-dispatch block). Reuse the SAME
+  ClipboardClip/ClipboardHasItem as the timeline's own commands above -
+  one clipboard, one TClip shape, matching Eris's own clip clipboard. }
+procedure CopyWaveformSelection(var State: TDysAppState);
+var
+  Track, ClipIdx: Integer;
+  Extracted: TClip;
+begin
+  if State.WaveSelState <> wsComplete then
+    Exit;
+  Track := State.CursorTrack;
+  ClipIdx := ClipIndexAtFrame(Track, State.CursorFrame);
+  if ClipIdx < 0 then
+    Exit;
+  if not ExtractClipInRange(Project.Tracks[Track].Clips[ClipIdx],
+    State.WaveSelStart, State.WaveSelEnd, Extracted) then
+    Exit;
+  Extracted.Position := Extracted.Position - State.WaveSelStart;
+  ClipboardClip := Extracted;
+  ClipboardHasItem := True;
+end;
+
+{ Pastes the clip clipboard at WaveCursorFrame - works regardless of
+  WaveSelState (selection, if any, is left untouched), which is how "the
+  cursor remains and that is how you can paste clips while still having a
+  selection" works. }
+procedure PasteWaveformClipboardAtCursor(var State: TDysAppState);
+var
+  Track: Integer;
+  NewClip: TClip;
+begin
+  if not ClipboardHasItem then
+    Exit;
+  Track := State.CursorTrack;
+  NewClip := ClipboardClip;
+  NewClip.Position := State.WaveCursorFrame + NewClip.Position;
+  NewClip.TrackID := Track;
+  Project.CommitClipToTrack(Track, NewClip);
+  PushTrackToEngineSimple(Track);
+end;
+
+{ Ableton-style, same convention as DuplicateClipUnderCursor/Eris's own
+  DuplicateSelection: places the duplicate immediately after the
+  selection and moves the selection/cursor onto the new copy, so
+  repeated Ctrl+D stacks copies rightward. }
+procedure DuplicateWaveformSelection(var State: TDysAppState);
+var
+  Track, ClipIdx: Integer;
+  Extracted: TClip;
+  Span: Int64;
+begin
+  if State.WaveSelState <> wsComplete then
+    Exit;
+  Track := State.CursorTrack;
+  ClipIdx := ClipIndexAtFrame(Track, State.CursorFrame);
+  if ClipIdx < 0 then
+    Exit;
+  if not ExtractClipInRange(Project.Tracks[Track].Clips[ClipIdx],
+    State.WaveSelStart, State.WaveSelEnd, Extracted) then
+    Exit;
+  Span := State.WaveSelEnd - State.WaveSelStart;
+  Extracted.Position := Extracted.Position + Span;
+  Project.CommitClipToTrack(Track, Extracted);
+  PushTrackToEngineSimple(Track);
+  State.WaveSelStart := State.WaveSelStart + Span;
+  State.WaveSelEnd := State.WaveSelEnd + Span;
+  State.WaveCursorFrame := State.WaveSelEnd;
+end;
+
+{ Punches [WaveSelStart, WaveSelEnd) out of the track via the same
+  ClipOverwrite.OverwriteClips Eris's own DeleteSelection/
+  CommitClipToTrack collision-handling already use - correctly
+  trims/splits WarpMarkers or DragZones on both cut edges, whatever the
+  clip's WarpMode. Leaves a gap rather than rippling later clips,
+  matching Eris's own DeleteSelection convention (see this file's header
+  comment on why the old FV DysChopMarkedClipRegion's ripple-shift isn't
+  carried over). }
+procedure DeleteWaveformSelection(var State: TDysAppState);
+var
+  Track: Integer;
+begin
+  if State.WaveSelState <> wsComplete then
+    Exit;
+  Track := State.CursorTrack;
+  Project.ReplaceTrackClips(Track, ClipOverwrite.OverwriteClips(
+    Project.Tracks[Track].Clips, State.WaveSelStart,
+    State.WaveSelEnd - State.WaveSelStart));
+  PushTrackToEngineSimple(Track);
+  State.WaveSelState := wsNone;
 end;
 
 { Plain insertion sort, case-insensitive - same shape as DysFilePane's own
@@ -2167,6 +2356,111 @@ end;
   run), falling back to the plain full-block glyph DysWidgets.
   WaveRowGlyph used otherwise - never a hard build-time choice between
   two binaries. }
+
+const
+  WaveGridStepNames: array[0..4] of string = ('1/16', '1/8', '1/4', '1/2', '1 bar');
+  WaveSelBgColor: array[0..2] of Byte = (40, 40, 90);
+  WaveCursorColor: array[0..2] of Byte = (255, 255, 0);
+
+{ 'g'/'G' on the waveform pane cycles this 5-step grid - independent of
+  the timeline's own State.IntervalIdx (4 steps, no 1/2 - see
+  GridStepFrames above). Same BarFrames (tempo-derived) this file's
+  timeline grid already uses. }
+function WaveGridStepFrames(AGridIdx: Integer): Int64;
+var
+  Frames: Int64;
+begin
+  Frames := BarFrames;
+  if Frames <= 0 then
+  begin
+    Result := 1;
+    Exit;
+  end;
+  case AGridIdx of
+    0: Result := Frames div 16; { 1/16 }
+    1: Result := Frames div 8;  { 1/8 }
+    2: Result := Frames div 4;  { 1/4 }
+    3: Result := Frames div 2;  { 1/2 }
+    4: Result := Frames;        { 1 bar }
+  else
+    Result := Frames div 8;
+  end;
+  if Result <= 0 then
+    Result := 1;
+end;
+
+{ Maps a TIMELINE-domain absolute frame to a column within the waveform
+  pane's own [0, CW) content width, given the active clip's own
+  Position/Length span - clamped to the visible range rather than
+  returning -1, since both callers (the selection wash and the cursor
+  glyph) only ever pass frames already clamped to the clip's own span by
+  the key-dispatch code in RunDysnomiaMpti. }
+function WaveFrameToCol(const AClip: TClip; AFrame: Int64; CW: Integer): Integer;
+var
+  FramesPerCol: Int64;
+begin
+  if (AClip.Length <= 0) or (CW <= 0) then
+  begin
+    Result := 0;
+    Exit;
+  end;
+  FramesPerCol := AClip.Length div CW;
+  if FramesPerCol <= 0 then
+    FramesPerCol := 1;
+  Result := (AFrame - AClip.Position) div FramesPerCol;
+  if Result < 0 then Result := 0;
+  if Result > CW - 1 then Result := CW - 1;
+end;
+
+{ Ruler ticks for the waveform pane, same shape as BuildGridTicks above
+  but scoped to one clip's own [Position, Position+Length) span instead
+  of the timeline's scrolled view - ticks every WaveGridStepFrames(AGridIdx)
+  frames from the clip's own start, labelled in elapsed seconds every 4th
+  tick (Idx 0 always lands exactly on the clip start, so it's always
+  labelled "0.0" - "the waveform needs to start on a 1/8th grid with
+  ruler at 0.0 by default"). }
+function BuildWaveGridTicks(AGridIdx: Integer; AClipLen: Int64;
+  CW: Integer): TMRulerTickArray;
+var
+  Step, FramesPerCol, F: Int64;
+  Idx, LastIdx, Col, Count: Int64;
+begin
+  Result := nil;
+  if (AClipLen <= 0) or (CW <= 0) then
+    Exit;
+  Step := WaveGridStepFrames(AGridIdx);
+  if Step <= 0 then
+    Exit;
+  FramesPerCol := AClipLen div CW;
+  if FramesPerCol <= 0 then
+    FramesPerCol := 1;
+  LastIdx := AClipLen div Step;
+  Count := 0;
+  for Idx := 0 to LastIdx do
+  begin
+    F := Idx * Step;
+    if F > AClipLen then
+      Break;
+    Col := F div FramesPerCol;
+    if (Col >= 0) and (Col < CW) then
+    begin
+      SetLength(Result, Count + 1);
+      Result[Count].Col := Col;
+      if (Idx mod 4) = 0 then
+      begin
+        Result[Count].Major := True;
+        Result[Count].Label_ := FormatFloat('0.0', F / AudioEngine.ProjectSampleRate);
+      end
+      else
+      begin
+        Result[Count].Major := False;
+        Result[Count].Label_ := '';
+      end;
+      Inc(Count);
+    end;
+  end;
+end;
+
 procedure DrawWaveformBlocks(var Buf: TCellBuffer; X, Y, W, H: Integer; const Peaks: TWaveformPeaks);
 var
   Col, Row, BinCount, BinLo, BinHi, I: Integer;
@@ -2262,7 +2556,10 @@ var
   Clip: TClip;
   Windowed: TSample;
   Avail, SrcLen: Int64;
-  CX0, CY0, CW, CH, WaveRows: Integer;
+  CX0, CY0, CW, CH, WaveRows, WaveTop: Integer;
+  HasRuler: Boolean;
+  Ticks: TMRulerTickArray;
+  SelColStart, SelColEnd, CursorCol, Col, Row: Integer;
   Hdr: string;
 begin
   if (R.W < 6) or (R.H < 3) then Exit;
@@ -2284,6 +2581,7 @@ begin
   begin
     DrawText(Buf, CX0, CY0, Copy('waveform: (place cursor over a clip)', 1, CW));
     State.WaveCacheClipIdx := -1;
+    State.WaveSelState := wsNone;
     Exit;
   end;
   Clip := Project.Tracks[Track].Clips[ClipIdx];
@@ -2294,6 +2592,11 @@ begin
     State.WaveCacheTrack := Track;
     State.WaveCacheClipIdx := ClipIdx;
     State.WaveCacheSampleID := Clip.SampleID;
+    { A different clip than last frame - reset the keyboard cursor/
+      selection onto it, same invalidation trigger as the peak cache
+      just above (see the WaveCursorFrame/WaveSelState field comment). }
+    State.WaveCursorFrame := Clip.Position;
+    State.WaveSelState := wsNone;
     State.WavePeaks.Mins := nil;
     State.WavePeaks.Maxs := nil;
     if (Clip.SampleID >= 0) and (Clip.SampleID <= High(Project.SamplePool)) then
@@ -2313,16 +2616,56 @@ begin
   end;
 
   Hdr := 'waveform: sample ' + IntToStr(Clip.SampleID) + '  gain ' +
-    FormatFloat('0.00', Clip.Gain) + '  detune ' + FormatFloat('0.0', Clip.PitchSemitones) + 'st';
+    FormatFloat('0.00', Clip.Gain) + '  detune ' + FormatFloat('0.0', Clip.PitchSemitones) + 'st' +
+    '  grid=' + WaveGridStepNames[State.WaveGridIdx];
+  if State.WaveSelState = wsComplete then
+    Hdr := Hdr + '  sel=' +
+      FormatFloat('0.00', (State.WaveSelStart - Clip.Position) / AudioEngine.ProjectSampleRate) +
+      '-' + FormatFloat('0.00', (State.WaveSelEnd - Clip.Position) / AudioEngine.ProjectSampleRate) + 's'
+  else if State.WaveSelState = wsStartSet then
+    Hdr := Hdr + '  sel-start=' +
+      FormatFloat('0.00', (State.WaveSelStart - Clip.Position) / AudioEngine.ProjectSampleRate) + 's';
   DrawText(Buf, CX0, CY0, Copy(Hdr, 1, CW));
 
   WaveRows := CH - 1;
+  HasRuler := WaveRows >= 2;
+  if HasRuler then
+  begin
+    Ticks := BuildWaveGridTicks(State.WaveGridIdx, Clip.Length, CW);
+    MTimelineRuler(Buf, CX0, CY0 + 1, CW, Ticks, True);
+    Dec(WaveRows);
+    WaveTop := CY0 + 2;
+  end
+  else
+    WaveTop := CY0 + 1;
+
   if (WaveRows < 1) or (Length(State.WavePeaks.Maxs) = 0) then Exit;
 
+  { Selection wash, drawn before the peaks so a silent stretch inside the
+    selection still reads as selected once the peaks are layered on top -
+    see this procedure's own header comment on draw order. }
+  if State.WaveSelState = wsComplete then
+  begin
+    SelColStart := WaveFrameToCol(Clip, State.WaveSelStart, CW);
+    SelColEnd := WaveFrameToCol(Clip, State.WaveSelEnd, CW);
+    for Col := SelColStart to SelColEnd do
+      for Row := 0 to WaveRows - 1 do
+        MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, CX0 + Col, WaveTop + Row,
+          Ord(' '), MDefaultFg, MMakeColor(WaveSelBgColor[0], WaveSelBgColor[1], WaveSelBgColor[2]), []);
+  end;
+
   if UseBraille then
-    DrawWaveformBraille(Buf, CX0, CY0 + 1, CW, WaveRows, State.WavePeaks)
+    DrawWaveformBraille(Buf, CX0, WaveTop, CW, WaveRows, State.WavePeaks)
   else
-    DrawWaveformBlocks(Buf, CX0, CY0 + 1, CW, WaveRows, State.WavePeaks);
+    DrawWaveformBlocks(Buf, CX0, WaveTop, CW, WaveRows, State.WavePeaks);
+
+  { Cursor, topmost - a full-height vertical bar so it reads clearly
+    through both the selection wash and the waveform itself. }
+  CursorCol := WaveFrameToCol(Clip, State.WaveCursorFrame, CW);
+  for Row := 0 to WaveRows - 1 do
+    MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, CX0 + CursorCol, WaveTop + Row,
+      Ord('|'), MMakeColor(WaveCursorColor[0], WaveCursorColor[1], WaveCursorColor[2]),
+      MDefaultBg, [csBold]);
 end;
 
 procedure RunDysnomiaMpti;
@@ -2358,6 +2701,9 @@ var
   PalIdx, ClipIdx: Integer;
   LoopCandidate: Int64;
   NoteOffset: Integer;
+  WaveTrack, WaveClipIdx: Integer;
+  WaveClip: TClip;
+  WaveSwap: Int64;
 begin
   ConfigLoad;
   AudioEngineInit;
@@ -2416,6 +2762,7 @@ begin
       State.WaveCacheTrack := -1;
       State.WaveCacheClipIdx := -1;
       State.WaveCacheSampleID := -1;
+      State.WaveGridIdx := 1; { 1/8 - "starts on a 1/8th grid" }
       { One random colour per track slot, all MaxTracks of them up front
         (not just Project.TrackCount's current value) so a track added
         later already has one waiting - same "Randomize once" shape
@@ -2748,6 +3095,86 @@ begin
                         end;
                     end;
                 end;
+
+          { Waveform pane - keyboard cursor/grid/selection (Part 2 of the
+            timeline/waveform editing port). Same "not a stock MPTI
+            widget, self-checked against Events" shape as the timeline
+            canvas above; runs before DrawWaveformPane below so the draw
+            reflects whatever this frame's keys just did, same input-
+            then-draw order the timeline canvas/DrawTimeline pair already
+            uses. WaveClip/WaveTrack/WaveClipIdx are re-derived fresh
+            every frame from the TIMELINE cursor (ClipIndexAtFrame),
+            exactly like DrawWaveformPane's own lookup - there is no
+            separate "mark" step here either. }
+          if MIsFocused(Core, WaveformPaneID) then
+          begin
+            WaveTrack := State.CursorTrack;
+            WaveClipIdx := ClipIndexAtFrame(WaveTrack, State.CursorFrame);
+            if WaveClipIdx >= 0 then
+            begin
+              WaveClip := Project.Tracks[WaveTrack].Clips[WaveClipIdx];
+              for I := 0 to High(Events) do
+                if Events[I].Kind = mekKey then
+                  case Events[I].Key.Code of
+                    mkLeft:
+                      begin
+                        Dec(State.WaveCursorFrame, WaveGridStepFrames(State.WaveGridIdx));
+                        if State.WaveCursorFrame < WaveClip.Position then
+                          State.WaveCursorFrame := WaveClip.Position;
+                      end;
+                    mkRight:
+                      begin
+                        Inc(State.WaveCursorFrame, WaveGridStepFrames(State.WaveGridIdx));
+                        if State.WaveCursorFrame > WaveClip.Position + WaveClip.Length then
+                          State.WaveCursorFrame := WaveClip.Position + WaveClip.Length;
+                      end;
+                    mkEnter:
+                      { 2-stage marker: none -> start set -> complete ->
+                        (a further Enter) starts a fresh selection at the
+                        cursor, clearing the old one - see the WaveSelState
+                        field comment. }
+                      case State.WaveSelState of
+                        wsNone:
+                          begin
+                            State.WaveSelStart := State.WaveCursorFrame;
+                            State.WaveSelState := wsStartSet;
+                          end;
+                        wsStartSet:
+                          begin
+                            State.WaveSelEnd := State.WaveCursorFrame;
+                            if State.WaveSelEnd < State.WaveSelStart then
+                            begin
+                              WaveSwap := State.WaveSelStart;
+                              State.WaveSelStart := State.WaveSelEnd;
+                              State.WaveSelEnd := WaveSwap;
+                            end;
+                            State.WaveSelState := wsComplete;
+                          end;
+                        wsComplete:
+                          begin
+                            State.WaveSelStart := State.WaveCursorFrame;
+                            State.WaveSelState := wsStartSet;
+                          end;
+                      end;
+                    mkEscape:
+                      State.WaveSelState := wsNone;
+                    mkDelete:
+                      DeleteWaveformSelection(State);
+                    mkChar:
+                      if (kmCtrl in Events[I].Key.Mods) and
+                         (Events[I].Key.CodePoint in [Ord('c'), Ord('C')]) then
+                        CopyWaveformSelection(State)
+                      else if (kmCtrl in Events[I].Key.Mods) and
+                         (Events[I].Key.CodePoint in [Ord('v'), Ord('V')]) then
+                        PasteWaveformClipboardAtCursor(State)
+                      else if (kmCtrl in Events[I].Key.Mods) and
+                         (Events[I].Key.CodePoint in [Ord('d'), Ord('D')]) then
+                        DuplicateWaveformSelection(State)
+                      else if Events[I].Key.CodePoint in [Ord('g'), Ord('G')] then
+                        State.WaveGridIdx := (State.WaveGridIdx + 1) mod 5;
+                  end;
+            end;
+          end;
 
           { Effects rack / waveform panes - both self-checked against
             Events/HR, same "not a stock MPTI widget" pattern the timeline
