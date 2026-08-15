@@ -10,7 +10,7 @@ program mptidemo;
 
 uses
   SysUtils, MptiTypes, MptiCell, MptiCaps, MptiInput, MptiDriver, MptiRender,
-  MptiHeadless, MptiQueue, MptiCore, MptiLayout;
+  MptiHeadless, MptiQueue, MptiCore, MptiLayout, MptiWidgets;
 
 type
   PMDeferredQueue = ^TMDeferredQueue;
@@ -52,6 +52,14 @@ var
   Deferred: TMDeferredQueue;
   FakeClockValue: TMInt64;
   PumpCallCount: Integer;
+  WBuf: TCellBuffer;
+  WCore: TMCoreState;
+  WHR: TMHitRegistry;
+  WPane: TMWidgetID;
+  WBool: Boolean;
+  WSel, WScroll, WMenu, WDrop: Integer;
+  WText: string;
+  WItems: array of string;
 
 function FakeClock: TMInt64;
 begin
@@ -109,6 +117,30 @@ begin
   SetLength(Result, Length(S));
   for I := 1 to Length(S) do
     Result[I - 1] := Byte(S[I]);
+end;
+
+function MakeKeyEv(Code: TMKeyCode; CodePoint: TMUInt32; Mods: TMKeyModSet): TMInputEvent;
+begin
+  Result.Kind := mekKey;
+  Result.Key.Code := Code;
+  Result.Key.CodePoint := CodePoint;
+  Result.Key.Mods := Mods;
+end;
+
+function MakeMouseEv(X, Y: Integer; Button: TMMouseButton; Action: TMMouseAction): TMInputEvent;
+begin
+  Result.Kind := mekMouse;
+  Result.Mouse.X := X;
+  Result.Mouse.Y := Y;
+  Result.Mouse.Button := Button;
+  Result.Mouse.Action := Action;
+  Result.Mouse.Mods := [];
+end;
+
+function OneEvent(const Ev: TMInputEvent): TMInputEventArray;
+begin
+  SetLength(Result, 1);
+  Result[0] := Ev;
 end;
 
 procedure Check(Cond: Boolean; const Msg: string);
@@ -742,6 +774,131 @@ begin
   Check(Core.FrameCounter = 1, 'glue: MBeginFrame advances the core frame counter');
   Check(TimerFireCount = 1, 'glue: MBeginFrame pumps due timers');
   Check(DeferredLog = 'A', 'glue: MBeginFrame runs deferred calls queued before this iteration');
+
+  { MptiWidgets (Phase 7): generic widget library, exercised headlessly by
+    constructing TMInputEventArrays directly (same technique as MEv above
+    for MDispatchMouse) rather than routing through a real/headless driver
+    - the widgets only ever consume already-decoded TMInputEventArray, so
+    that's a faithful, and much simpler, test surface. }
+  MInitCellBuffer(WBuf, 40, 20);
+  MInitCore(WCore);
+  WPane := MWidgetID('test/pane');
+
+  { MButton: click-to-focus-also-acts, then Enter while focused activates again }
+  MBeginHitRegistry(WHR);
+  WBool := MButton(WCore, WHR, WBuf, 'w/button', WPane, 2, 2, 'OK',
+    OneEvent(MakeMouseEv(3, 2, mbLeft, maPress)));
+  Check(WBool, 'MButton: click inside its rect activates on the same frame');
+  Check(MIsFocused(WCore, MWidgetID('w/button')), 'MButton: click also focuses (FV gap #7 default)');
+  MBeginHitRegistry(WHR);
+  WBool := MButton(WCore, WHR, WBuf, 'w/button', WPane, 2, 2, 'OK',
+    OneEvent(MakeKeyEv(mkEnter, 0, [])));
+  Check(WBool, 'MButton: Enter while focused activates without a click');
+
+  { MCheckBox: click toggles, state persists across frames }
+  MBeginHitRegistry(WHR);
+  WBool := MCheckBox(WCore, WHR, WBuf, 'w/check', WPane, 2, 3, 'Loop',
+    OneEvent(MakeMouseEv(3, 3, mbLeft, maPress)));
+  Check(WBool, 'MCheckBox: click turns it on');
+  MBeginHitRegistry(WHR);
+  WBool := MCheckBox(WCore, WHR, WBuf, 'w/check', WPane, 2, 3, 'Loop', nil);
+  Check(WBool, 'MCheckBox: stays on across a frame with no events (retained state)');
+
+  { MTextInput: typing inserts at the caret, Backspace deletes before it }
+  WText := '';
+  MBeginHitRegistry(WHR);
+  MTextInput(WCore, WHR, WBuf, 'w/text', WPane, 2, 4, 10, WText,
+    OneEvent(MakeMouseEv(2, 4, mbLeft, maPress))); { focus it }
+  Check(MIsFocused(WCore, MWidgetID('w/text')), 'MTextInput: click focuses');
+  MBeginHitRegistry(WHR);
+  MTextInput(WCore, WHR, WBuf, 'w/text', WPane, 2, 4, 10, WText, OneEvent(MakeKeyEv(mkChar, Ord('h'), [])));
+  MBeginHitRegistry(WHR);
+  MTextInput(WCore, WHR, WBuf, 'w/text', WPane, 2, 4, 10, WText, OneEvent(MakeKeyEv(mkChar, Ord('i'), [])));
+  Check(WText = 'hi', 'MTextInput: two char events append in order');
+  MBeginHitRegistry(WHR);
+  MTextInput(WCore, WHR, WBuf, 'w/text', WPane, 2, 4, 10, WText, OneEvent(MakeKeyEv(mkBackspace, 0, [])));
+  Check(WText = 'h', 'MTextInput: Backspace deletes the char before the caret');
+  MBeginHitRegistry(WHR);
+  MTextInput(WCore, WHR, WBuf, 'w/text', WPane, 2, 4, 10, WText, OneEvent(MakeKeyEv(mkHome, 0, [])));
+  MBeginHitRegistry(WHR);
+  MTextInput(WCore, WHR, WBuf, 'w/text', WPane, 2, 4, 10, WText, OneEvent(MakeKeyEv(mkChar, Ord('X'), [])));
+  Check(WText = 'Xh', 'MTextInput: Home moves the caret to 0, insert happens there');
+
+  { MListView: Down moves selection, mouse click selects a row directly }
+  SetLength(WItems, 3);
+  WItems[0] := 'alpha';
+  WItems[1] := 'beta';
+  WItems[2] := 'gamma';
+  WSel := 0;
+  WScroll := 0;
+  MBeginHitRegistry(WHR);
+  MListView(WCore, WHR, WBuf, 'w/list', WPane, 2, 6, 10, 3, WItems, WSel, WScroll,
+    OneEvent(MakeMouseEv(2, 6, mbLeft, maPress))); { focus it via row 0 click }
+  MBeginHitRegistry(WHR);
+  WBool := MListView(WCore, WHR, WBuf, 'w/list', WPane, 2, 6, 10, 3, WItems, WSel, WScroll,
+    OneEvent(MakeKeyEv(mkDown, 0, [])));
+  Check(WBool and (WSel = 1), 'MListView: Down while focused moves Selected to the next row');
+  MBeginHitRegistry(WHR);
+  WBool := MListView(WCore, WHR, WBuf, 'w/list', WPane, 2, 6, 10, 3, WItems, WSel, WScroll,
+    OneEvent(MakeMouseEv(2, 8, mbLeft, maPress))); { row 2 (y=8) of a list starting at y=6 }
+  Check(WBool and (WSel = 2), 'MListView: clicking a row selects it directly');
+
+  { MMenuBar: click opens (highlighted index returned every frame), same
+    click again closes; Escape also closes }
+  MBeginHitRegistry(WHR);
+  WMenu := MMenuBar(WCore, WHR, WBuf, 'w/menubar', WPane, 0, 0, ['File', 'Edit'],
+    OneEvent(MakeMouseEv(2, 0, mbLeft, maPress))); { inside "File"'s padded rect }
+  Check(WMenu = 0, 'MMenuBar: clicking a label opens it (returns its index)');
+  MBeginHitRegistry(WHR);
+  WMenu := MMenuBar(WCore, WHR, WBuf, 'w/menubar', WPane, 0, 0, ['File', 'Edit'], nil);
+  Check(WMenu = 0, 'MMenuBar: stays open across a frame with no events');
+  MBeginHitRegistry(WHR);
+  WMenu := MMenuBar(WCore, WHR, WBuf, 'w/menubar', WPane, 0, 0, ['File', 'Edit'],
+    OneEvent(MakeMouseEv(2, 0, mbLeft, maPress))); { same label again }
+  Check(WMenu = -1, 'MMenuBar: clicking the open label again closes it');
+
+  { MDropdownList: Down highlights, Enter selects; a click outside cancels }
+  MBeginHitRegistry(WHR);
+  WDrop := MDropdownList(WCore, WHR, WBuf, 'w/dropdown', WPane, 5, 5, ['One', 'Two', 'Three'],
+    OneEvent(MakeKeyEv(mkDown, 0, [])));
+  Check(WDrop = -1, 'MDropdownList: still open (no selection yet) after just moving the highlight');
+  MBeginHitRegistry(WHR);
+  WDrop := MDropdownList(WCore, WHR, WBuf, 'w/dropdown', WPane, 5, 5, ['One', 'Two', 'Three'],
+    OneEvent(MakeKeyEv(mkEnter, 0, [])));
+  Check(WDrop = 1, 'MDropdownList: Enter selects the highlighted row (index 1, after one Down)');
+  MBeginHitRegistry(WHR);
+  WDrop := MDropdownList(WCore, WHR, WBuf, 'w/dropdown', WPane, 5, 5, ['One', 'Two', 'Three'],
+    OneEvent(MakeMouseEv(0, 0, mbLeft, maPress))); { far outside the popup's rect }
+  Check(WDrop = -2, 'MDropdownList: a press outside the popup cancels');
+
+  { Draw-only widgets: no interaction, just verify they write the cells
+    they claim to (using MGetCell against WBuf, per MptiCell's contract). }
+  MDrawPane(WBuf, 0, 10, 6, 3, 'Hi');
+  Check(MGetCell(WBuf, 0, 10).CodePoint = Ord('+'), 'MDrawPane: top-left corner is a + glyph');
+  Check(MGetCell(WBuf, 4, 10).CodePoint = Ord('-'), 'MDrawPane: top edge is a - glyph away from the title');
+  Check(MGetCell(WBuf, 2, 10).CodePoint = Ord('H'), 'MDrawPane: title text is drawn into the top border');
+  Check(MGetCell(WBuf, 2, 11).CodePoint = 32, 'MDrawPane: interior is cleared to blank');
+
+  MIndicatorLight(WBuf, 0, 13, True);
+  Check(MGetCell(WBuf, 0, 13).CodePoint = Ord('@'), 'MIndicatorLight: on-state draws the filled glyph');
+  MIndicatorLight(WBuf, 0, 13, False);
+  Check(MGetCell(WBuf, 0, 13).CodePoint = Ord('.'), 'MIndicatorLight: off-state draws the dim glyph');
+
+  MMeterH(WBuf, 0, 14, 10, 5, 10);
+  Check(MGetCell(WBuf, 0, 14).CodePoint = Ord('#'), 'MMeterH: half-full meter lights the first half');
+  Check(MGetCell(WBuf, 9, 14).CodePoint = Ord('.'), 'MMeterH: half-full meter leaves the second half unlit');
+
+  MMeterV(WBuf, 0, 15, 4, 2, 4);
+  Check(MGetCell(WBuf, 0, 15).CodePoint = Ord('.'), 'MMeterV: half-full meter leaves the top unlit');
+  Check(MGetCell(WBuf, 0, 15 + 3).CodePoint = Ord('#'), 'MMeterV: half-full meter fills from the bottom');
+
+  MProgressBar(WBuf, 0, 16, 10, 5, 10);
+  Check(MGetCell(WBuf, 0, 16).CodePoint = Ord('['), 'MProgressBar: opens with a [ bracket');
+  Check(MGetCell(WBuf, 0, 16).CodePoint <> 0, 'MProgressBar: drew into the buffer at all');
+
+  WCore.FrameCounter := 5;
+  MBusyIndicator(WCore, WBuf, 0, 17);
+  Check(MGetCell(WBuf, 0, 17).CodePoint = Ord('/'), 'MBusyIndicator: frame 5 mod 4 = 1 -> the second glyph (''/'')');
 
   { MptiDriver: only ever probes, never mutates terminal state unless a
     real interactive tty is confirmed present - safe to run in CI/headless. }
