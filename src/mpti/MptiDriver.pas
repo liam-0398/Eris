@@ -202,8 +202,18 @@ end;
 
 procedure MEnableTerminalModes(const D: TMDriverState);
 begin
+  { Basic mouse tracking (mode 1000) is sent unconditionally - it's the
+    X10/normal-tracking baseline MptiInput's parser already decodes
+    (CSI M) regardless of SGR1006, and terminals that predate 1006 (bare
+    'xterm'/Tiger's stock build, see MptiCaps' own heuristic) still speak
+    it. Previously this whole line was gated on MouseSGR1006, which meant
+    a plain 'xterm' $TERM never got a mouse-enable sequence AT ALL -
+    clicks silently did nothing, not just falling back to the legacy
+    coordinate encoding. The SGR extension is still added only when
+    D.Caps says the terminal understands it. }
+  WriteRaw(D, #27'[?1000h');
   if D.Caps.MouseSGR1006 then
-    WriteRaw(D, #27'[?1000h'#27'[?1006h'); { basic mouse tracking + SGR extension }
+    WriteRaw(D, #27'[?1006h');
   if D.Caps.BracketedPaste then
     WriteRaw(D, #27'[?2004h');
   if D.Caps.FocusEvents then
@@ -218,7 +228,8 @@ begin
   if D.Caps.BracketedPaste then
     WriteRaw(D, #27'[?2004l');
   if D.Caps.MouseSGR1006 then
-    WriteRaw(D, #27'[?1006l'#27'[?1000l');
+    WriteRaw(D, #27'[?1006l');
+  WriteRaw(D, #27'[?1000l'); { matches the unconditional enable above }
 end;
 
 procedure MShutdownDriver(var D: TMDriverState);

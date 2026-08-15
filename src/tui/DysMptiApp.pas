@@ -204,11 +204,11 @@ begin
   DrawText(Buf, X, Y, S, MDefaultFg, MDefaultBg, []);
 end;
 
-procedure DrawPaneAt(var Buf: TCellBuffer; const R: TMRect; const Title: string);
+procedure DrawPaneAt(var Buf: TCellBuffer; const R: TMRect; const Title: string; Focused: Boolean);
 begin
   if MRectEmpty(R) then
     Exit;
-  MDrawPane(Buf, R.X, R.Y, R.W, R.H, Title);
+  MDrawPane(Buf, R.X, R.Y, R.W, R.H, Title, Focused);
 end;
 
 procedure ShowTooSmall(var Buf: TCellBuffer; Cols, Rows: Integer);
@@ -1222,13 +1222,15 @@ var
   I: Integer;
   Layout: TDysMptiLayout;
   MenuPaneID: TMWidgetID;
-  TempoID, FileListID, TrackListID, TimelineID: TMWidgetID;
+  TransportPaneID, TempoID, FileListID, TrackListID, TimelineID: TMWidgetID;
+  TempoLabel: string;
+  TempoW, TempoX: Integer;
   OpenMenu: Integer;
   FileDropSel, EditDropSel, HelpDropSel: Integer;
   ShowFileDrop, ShowEditDrop, ShowHelpDrop: Boolean;
   State: TDysAppState;
-  FocusIDs: array[0..3] of TMWidgetID;
-  FocusIdx, NewFocusIdx: Integer;
+  PaneIDs: array[0..3] of TMWidgetID;
+  FocusIdx: Integer;
   Backward: Boolean;
   TX, StopX, PlayX, IntervalX: Integer;
   R: TMRect;
@@ -1259,14 +1261,15 @@ begin
       MInitRenderState(RState, D.Caps, D.Cols, D.Rows);
       MInitCore(Core);
       MenuPaneID := MWidgetID('dysnomia/menubar');
+      TransportPaneID := MWidgetID('dysnomia/transport');
       TempoID := MWidgetID('toolbar/tempo');
       FileListID := MWidgetID('files/list');
       TrackListID := MWidgetID('tracks/list');
       TimelineID := MWidgetID('timeline/canvas');
-      FocusIDs[0] := TempoID;
-      FocusIDs[1] := FileListID;
-      FocusIDs[2] := TimelineID;
-      FocusIDs[3] := TrackListID;
+      PaneIDs[0] := TransportPaneID;
+      PaneIDs[1] := FileListID;
+      PaneIDs[2] := TimelineID;
+      PaneIDs[3] := TrackListID;
 
       FillChar(State, SizeOf(State), 0);
       State.CursorTrack := 0;
@@ -1322,54 +1325,26 @@ begin
         MBeginCoreFrame(Core);
         MBeginHitRegistry(HR);
 
-        { Tab/Shift+Tab pane cycling - global, checked before any widget
-          gets a chance to consume the key (none of them react to mkTab
-          anyway, but this keeps the precedence explicit and matches
-          Alt+X's own "global keys checked first" shape). Only while no
-          modal owns input - a modal cycles its own fields instead (see
-          DrawFileDialogFrame/DrawPreferencesFrame). }
+        { Which dock currently owns focus - read from MPTI's own
+          Core.FocusedPane (set last frame, by the Tab/Shift+Tab handling
+          below) purely to pick a border style this frame; not while a
+          modal is up, since none of the four docks are interactive then. }
         FocusIdx := -1;
         if State.ModalKind = dmNone then
-        begin
           for I := 0 to 3 do
-            if MIsFocused(Core, FocusIDs[I]) then
+            if PaneIDs[I] = Core.FocusedPane then
               FocusIdx := I;
-          for I := 0 to High(Events) do
-            if EventIsFocusPaneKey(Events[I], Backward) then
-            begin
-              if FocusIdx < 0 then
-                NewFocusIdx := 0
-              else if Backward then
-                NewFocusIdx := (FocusIdx + 3) mod 4
-              else
-                NewFocusIdx := (FocusIdx + 1) mod 4;
-              MSetFocus(Core, FocusIDs[NewFocusIdx], FocusIDs[NewFocusIdx]);
-              FocusIdx := NewFocusIdx;
-            end;
-        end;
 
         Layout := ComputeDysMptiLayout(RState.Back.Width, RState.Back.Height);
         if Layout.TooSmall then
           ShowTooSmall(RState.Back, Layout.Cols, Layout.Rows)
         else
         begin
-          if FocusIdx = 0 then
-            DrawPaneAt(RState.Back, Layout.ToolBar, '» Transport «')
-          else
-            DrawPaneAt(RState.Back, Layout.ToolBar, 'Transport');
-          if FocusIdx = 1 then
-            DrawPaneAt(RState.Back, Layout.FilePane, '» Files «')
-          else
-            DrawPaneAt(RState.Back, Layout.FilePane, 'Files');
-          if FocusIdx = 2 then
-            DrawPaneAt(RState.Back, Layout.Timeline, '» Timeline «')
-          else
-            DrawPaneAt(RState.Back, Layout.Timeline, 'Timeline');
-          if FocusIdx = 3 then
-            DrawPaneAt(RState.Back, Layout.TrackPane, '» Trk «')
-          else
-            DrawPaneAt(RState.Back, Layout.TrackPane, 'Trk');
-          DrawPaneAt(RState.Back, Layout.BottomBar, 'Effects / Waveform');
+          DrawPaneAt(RState.Back, Layout.ToolBar, 'Transport', FocusIdx = 0);
+          DrawPaneAt(RState.Back, Layout.FilePane, 'Files', FocusIdx = 1);
+          DrawPaneAt(RState.Back, Layout.Timeline, 'Timeline', FocusIdx = 2);
+          DrawPaneAt(RState.Back, Layout.TrackPane, 'Trk', FocusIdx = 3);
+          DrawPaneAt(RState.Back, Layout.BottomBar, 'Effects / Waveform', False);
 
           { The four dock panes and the menu bar only get to consume
             Events while no modal is up - a modal is the only thing
@@ -1377,38 +1352,24 @@ begin
             DrawPreferencesFrame, and the Tab-cycling gate above). }
           if State.ModalKind = dmNone then
           begin
-          { Transport: tempo field + Play/Stop. }
+          { Transport: Stop/Play/Interval first (left to right), Tempo
+            pinned to the far right - so Tab (which now walks every
+            widget in the pane, see the focus-cycling block below) reaches
+            the buttons first and the text field - the one control that
+            eats plain character keys while it holds focus - last, per
+            the user's own request. All four share TransportPaneID as
+            their PaneID, which is what groups them for that Tab cycle. }
           R := Layout.ToolBar;
           TX := R.X + 1;
-          DrawText(RState.Back, TX, R.Y + 1, 'Tempo:');
-          TX := TX + 7;
-          MTextInput(Core, HR, RState.Back, 'toolbar/tempo', TempoID,
-            TX, R.Y + 1, 6, State.TempoText, Events);
-          TX := TX + 7;
-          for I := 0 to High(Events) do
-            if (Events[I].Kind = mekKey) and (Events[I].Key.Code = mkEnter) and
-               MIsFocused(Core, TempoID) then
-            begin
-              Val(State.TempoText, TempoVal, TempoCode);
-              if TempoCode <> 0 then
-                TempoVal := Project.DefaultTempoBPM;
-              if TempoVal < 20 then
-                TempoVal := 20
-              else if TempoVal > 999 then
-                TempoVal := 999;
-              Project.TempoBPM := TempoVal;
-              State.TempoText := IntToStr(Round(TempoVal));
-            end;
-
           StopX := TX;
-          if MButton(Core, HR, RState.Back, 'toolbar/stop', TempoID, StopX, R.Y + 1,
+          if MButton(Core, HR, RState.Back, 'toolbar/stop', TransportPaneID, StopX, R.Y + 1,
             'Stop', Events) then
           begin
             AudioEngineStop;
             AudioEngineSeek(0);
           end;
           PlayX := StopX + 8;
-          if MButton(Core, HR, RState.Back, 'toolbar/play', TempoID, PlayX, R.Y + 1,
+          if MButton(Core, HR, RState.Back, 'toolbar/play', TransportPaneID, PlayX, R.Y + 1,
             'Play/Pause', Events) then
           begin
             if AudioEngineIsPlaying then
@@ -1425,9 +1386,32 @@ begin
             IntervalBtn. Drives GridStepFrames, which the timeline's own
             Left/Right (and Shift+W's resize) read every time they move. }
           IntervalX := PlayX + 13;
-          if MButton(Core, HR, RState.Back, 'toolbar/interval', TempoID, IntervalX, R.Y + 1,
+          if MButton(Core, HR, RState.Back, 'toolbar/interval', TransportPaneID, IntervalX, R.Y + 1,
             IntervalNames[State.IntervalIdx], Events) then
             State.IntervalIdx := (State.IntervalIdx + 1) mod Length(IntervalNames);
+
+          TempoLabel := 'Tempo:';
+          TempoW := Length(TempoLabel) + 1 + 6;
+          TempoX := R.X + R.W - 1 - TempoW;
+          if TempoX < IntervalX + 8 then
+            TempoX := IntervalX + 8; { narrow terminal: just follow Interval instead of overlapping it }
+          DrawText(RState.Back, TempoX, R.Y + 1, TempoLabel);
+          MTextInput(Core, HR, RState.Back, 'toolbar/tempo', TransportPaneID,
+            TempoX + Length(TempoLabel) + 1, R.Y + 1, 6, State.TempoText, Events);
+          for I := 0 to High(Events) do
+            if (Events[I].Kind = mekKey) and (Events[I].Key.Code = mkEnter) and
+               MIsFocused(Core, TempoID) then
+            begin
+              Val(State.TempoText, TempoVal, TempoCode);
+              if TempoCode <> 0 then
+                TempoVal := Project.DefaultTempoBPM;
+              if TempoVal < 20 then
+                TempoVal := 20
+              else if TempoVal > 999 then
+                TempoVal := 999;
+              Project.TempoBPM := TempoVal;
+              State.TempoText := IntToStr(Round(TempoVal));
+            end;
 
           { File browser. }
           R := Layout.FilePane;
@@ -1599,6 +1583,22 @@ begin
             if HelpDropSel <> -1 then
               ShowHelpDrop := False;
           end;
+
+          { Tab walks every widget in the currently-focused pane; Shift+Tab
+            switches which pane is focused (landing on its first widget) -
+            MPTI's own generic focus-navigation primitives (MptiCore.pas),
+            called here rather than at the top of the frame because HR only
+            reflects everything all four panes registered THIS frame once
+            they've actually drawn (see MFocusCycleInPane's own doc
+            comment). }
+          for I := 0 to High(Events) do
+            if EventIsFocusPaneKey(Events[I], Backward) then
+            begin
+              if Backward then
+                MFocusNextPane(Core, HR, PaneIDs, True)
+              else
+                MFocusCycleInPane(Core, HR, Core.FocusedPane, True);
+            end;
           end;
 
           NowMs := GetTickCount64;

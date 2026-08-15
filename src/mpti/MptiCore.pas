@@ -229,6 +229,32 @@ function MHitTest(const HR: TMHitRegistry; X, Y: Integer; out ID, PaneID: TMWidg
 function MDispatchMouse(var Core: TMCoreState; const HR: TMHitRegistry;
   const Ev: TMMouseEvent; out ID, PaneID: TMWidgetID): Boolean;
 
+{ Tab-within-a-pane focus cycling (mpti.md hard requirement 12's other
+  half: per-pane key mappings imply per-pane widget navigation too, not
+  just per-pane commands). Moves Core's focus to the next (Forward=True)
+  or previous registered widget whose PaneID is WithinPane, wrapping
+  around; if nothing in the pane currently holds focus, lands on the
+  first entry found instead. HR must already reflect every widget the
+  pane drew THIS frame - call this only after the pane's own widgets
+  have run (typically once, at the end of the frame, after every pane an
+  app might tab into has drawn - see an app's own main loop for why:
+  widgets self-register into HR as a side effect of drawing, so the full
+  per-pane list only exists once they all have). Returns True if a
+  widget in the pane now holds focus. }
+function MFocusCycleInPane(var Core: TMCoreState; const HR: TMHitRegistry;
+  WithinPane: TMWidgetID; Forward: Boolean): Boolean;
+
+{ Pane-level counterpart to MFocusCycleInPane: moves Core.FocusedPane to
+  the next/previous entry in the app's own Panes list (its docks/panels,
+  in whatever order it wants Shift+Tab-equivalent switching to follow),
+  then immediately focuses that pane's own first widget via
+  MFocusCycleInPane, so switching panes always lands on something usable
+  rather than leaving focus nowhere. Same HR-must-be-current-frame
+  requirement as MFocusCycleInPane. Returns the new FocusedPane, or 0 if
+  Panes is empty. }
+function MFocusNextPane(var Core: TMCoreState; const HR: TMHitRegistry;
+  const Panes: array of TMWidgetID; Forward: Boolean): TMWidgetID;
+
 { Phase 6.5 gap #3: the canonical per-iteration bookkeeping order for the
   Phase 5 primitives, in one place instead of every app re-deriving it.
   Call once per main-loop iteration, AFTER MRunOnce/MHeadlessFeedInput
@@ -527,6 +553,83 @@ begin
   Result := MHitTest(HR, Ev.X, Ev.Y, ID, PaneID);
   if Result and (Ev.Action = maPress) then
     MSetFocus(Core, ID, PaneID);
+end;
+
+function MFocusCycleInPane(var Core: TMCoreState; const HR: TMHitRegistry;
+  WithinPane: TMWidgetID; Forward: Boolean): Boolean;
+var
+  Ids: array[0..MHitCapacity - 1] of TMWidgetID;
+  Count, I, J, CurIdx, NewIdx: Integer;
+  Dup: Boolean;
+begin
+  Count := 0;
+  for I := 0 to HR.Count - 1 do
+    if HR.Entries[I].PaneID = WithinPane then
+    begin
+      Dup := False;
+      for J := 0 to Count - 1 do
+        if Ids[J] = HR.Entries[I].ID then
+        begin
+          Dup := True;
+          Break;
+        end;
+      if not Dup then
+      begin
+        Ids[Count] := HR.Entries[I].ID;
+        Inc(Count);
+      end;
+    end;
+
+  Result := False;
+  if Count = 0 then
+    Exit;
+
+  CurIdx := -1;
+  for I := 0 to Count - 1 do
+    if Ids[I] = Core.FocusedID then
+    begin
+      CurIdx := I;
+      Break;
+    end;
+
+  if CurIdx < 0 then
+    NewIdx := 0
+  else if Forward then
+    NewIdx := (CurIdx + 1) mod Count
+  else
+    NewIdx := (CurIdx + Count - 1) mod Count;
+
+  MSetFocus(Core, Ids[NewIdx], WithinPane);
+  Result := True;
+end;
+
+function MFocusNextPane(var Core: TMCoreState; const HR: TMHitRegistry;
+  const Panes: array of TMWidgetID; Forward: Boolean): TMWidgetID;
+var
+  CurIdx, NewIdx, I: Integer;
+begin
+  Result := 0;
+  if Length(Panes) = 0 then
+    Exit;
+
+  CurIdx := -1;
+  for I := 0 to High(Panes) do
+    if Panes[I] = Core.FocusedPane then
+    begin
+      CurIdx := I;
+      Break;
+    end;
+
+  if CurIdx < 0 then
+    NewIdx := 0
+  else if Forward then
+    NewIdx := (CurIdx + 1) mod Length(Panes)
+  else
+    NewIdx := (CurIdx + Length(Panes) - 1) mod Length(Panes);
+
+  MClearFocus(Core);
+  MFocusCycleInPane(Core, HR, Panes[NewIdx], True);
+  Result := Panes[NewIdx];
 end;
 
 procedure MBeginFrame(var Core: TMCoreState; var Timers: TMTimerSet;

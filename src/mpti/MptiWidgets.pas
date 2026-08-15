@@ -183,8 +183,14 @@ function MDropdownList(var Core: TMCoreState; var HR: TMHitRegistry; var Buf: TC
   are Unicode box-drawing (U+2500 family), MPTI's unconditional default -
   see MDrawPane's own implementation comment for why that's safe even on
   the oldest terminal MPTI targets (hard requirement 6 - Tiger's stock
-  xterm). }
-procedure MDrawPane(var Buf: TCellBuffer; X, Y, W, H: Integer; const Title: string);
+  xterm). Focused draws the border (and Title) bold - a solid, always-
+  available "this pane owns input" indicator any multi-pane MPTI app can
+  use (pair with Core.FocusedPane, MFocusNextPane's own return value, to
+  decide it), rather than every app inventing its own via title-text
+  markers or colour. Defaults off so every existing call site (a plain
+  dialog/dropdown border, mostly) is unaffected. }
+procedure MDrawPane(var Buf: TCellBuffer; X, Y, W, H: Integer; const Title: string;
+  Focused: Boolean = False);
 
 type
   { One ruler/grid tick: Col is 0-based within the caller's own Width: the
@@ -970,7 +976,8 @@ begin
   else Result := SelectedIdx;
 end;
 
-procedure MDrawPane(var Buf: TCellBuffer; X, Y, W, H: Integer; const Title: string);
+procedure MDrawPane(var Buf: TCellBuffer; X, Y, W, H: Integer; const Title: string;
+  Focused: Boolean);
 const
   { Box-drawing glyphs (U+2500 family) for a solid pane border, in place
     of plain-ASCII '+'/'-'/'|'. Every xterm-family terminal MPTI targets,
@@ -987,27 +994,30 @@ const
   GlyphBR    = $2518;
 var
   Row, Col, TX, I: Integer;
+  BorderStyle: TMCellStyle;
 begin
   if (W < 2) or (H < 2) then Exit; { too small to have both a border and interior }
+
+  if Focused then BorderStyle := [csBold] else BorderStyle := [];
 
   for Col := 0 to W - 1 do
   begin
     MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X + Col, Y, GlyphHLine,
-      MDefaultFg, MDefaultBg, []);
+      MDefaultFg, MDefaultBg, BorderStyle);
     MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X + Col, Y + H - 1, GlyphHLine,
-      MDefaultFg, MDefaultBg, []);
+      MDefaultFg, MDefaultBg, BorderStyle);
   end;
   for Row := 0 to H - 1 do
   begin
     MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X, Y + Row, GlyphVLine,
-      MDefaultFg, MDefaultBg, []);
+      MDefaultFg, MDefaultBg, BorderStyle);
     MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X + W - 1, Y + Row, GlyphVLine,
-      MDefaultFg, MDefaultBg, []);
+      MDefaultFg, MDefaultBg, BorderStyle);
   end;
-  MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X, Y, GlyphTL, MDefaultFg, MDefaultBg, []);
-  MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X + W - 1, Y, GlyphTR, MDefaultFg, MDefaultBg, []);
-  MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X, Y + H - 1, GlyphBL, MDefaultFg, MDefaultBg, []);
-  MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X + W - 1, Y + H - 1, GlyphBR, MDefaultFg, MDefaultBg, []);
+  MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X, Y, GlyphTL, MDefaultFg, MDefaultBg, BorderStyle);
+  MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X + W - 1, Y, GlyphTR, MDefaultFg, MDefaultBg, BorderStyle);
+  MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X, Y + H - 1, GlyphBL, MDefaultFg, MDefaultBg, BorderStyle);
+  MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X + W - 1, Y + H - 1, GlyphBR, MDefaultFg, MDefaultBg, BorderStyle);
 
   for Row := 1 to H - 2 do
     for Col := 1 to W - 2 do
@@ -1021,7 +1031,7 @@ begin
     begin
       if TX >= X + W - 2 then Break; { leave the closing border/corner alone }
       MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, TX, Y, Ord(Title[I]),
-        MDefaultFg, MDefaultBg, []);
+        MDefaultFg, MDefaultBg, BorderStyle);
       Inc(TX);
     end;
   end;
