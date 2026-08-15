@@ -26,6 +26,6 @@ mkdir -p "$OUTDIR" "$UNITDIR"
   -FE"$OUTDIR" -FU"$UNITDIR" \
   -Fusrc/mpti \
   -omptidemo \
-  src/mpti/mptidemo.lpr
+  src/mpti/tests/mptidemo.lpr
 
 echo "built $OUTDIR/mptidemo ($TARGET)"
