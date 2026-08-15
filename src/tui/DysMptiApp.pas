@@ -325,6 +325,17 @@ begin
     Result := Round((AudioEngine.ProjectSampleRate * 60) / Project.TempoBPM) * 4;
 end;
 
+var
+  { The clip clipboard - shared by both the timeline's own Ctrl+C/V/D
+    (whole clip under the cursor) and the waveform pane's Ctrl+C/V/D
+    (an extracted sub-range of the clip under the cursor, see Part 2) -
+    same TClip shape either way, matching Eris's own clip clipboard
+    (ArrangementView.ClipboardItems, src/ui, read-only reference). Ported
+    from DysTimeline.pas's identical module-level ClipboardClip/
+    ClipboardHasItem (src/tui, read-only reference). }
+  ClipboardClip: TClip;
+  ClipboardHasItem: Boolean = False;
+
 function GridStepFrames(const State: TDysAppState): Int64;
 var
   Frames: Int64;
@@ -447,6 +458,67 @@ begin
   Project.Tracks[ATrack].Clips[AClipIndex].WarpMarkers[1].TimelineFrame := ATargetLength;
   Project.Tracks[ATrack].Clips[AClipIndex].Length := ATargetLength;
   PushTrackToEngineSimple(ATrack);
+end;
+
+{ Timeline clip commands - Ctrl+C/V/D and Delete on "the clip under the
+  timeline cursor" (ClipIndexAtFrame at CursorTrack/CursorFrame), ported
+  from DysTimeline.pas's CopyClipUnderCursor/PasteClipAtCursor/
+  DuplicateClipUnderCursor/DeleteClipUnderCursor (src/tui, read-only
+  reference). No undo push, matching that reference exactly - neither
+  version pushes an undo snapshot for these four ops. }
+procedure CopyClipUnderCursor(var State: TDysAppState);
+var
+  ClipIdx: Integer;
+begin
+  ClipIdx := ClipIndexAtFrame(State.CursorTrack, State.CursorFrame);
+  if ClipIdx < 0 then
+    Exit;
+  ClipboardClip := Project.Tracks[State.CursorTrack].Clips[ClipIdx];
+  ClipboardClip.Position := 0;
+  ClipboardHasItem := True;
+end;
+
+procedure PasteClipAtCursor(var State: TDysAppState);
+var
+  NewClip: TClip;
+begin
+  if not ClipboardHasItem then
+    Exit;
+  NewClip := ClipboardClip;
+  NewClip.Position := State.CursorFrame + NewClip.Position;
+  NewClip.TrackID := State.CursorTrack;
+  Project.CommitClipToTrack(State.CursorTrack, NewClip);
+  PushTrackToEngineSimple(State.CursorTrack);
+end;
+
+{ Ableton-style: places the duplicate immediately after the original
+  (Position + Length), not at the cursor, and moves CursorFrame onto the
+  new copy so repeated Ctrl+D stacks copies rightward instead of
+  re-duplicating the original in place. }
+procedure DuplicateClipUnderCursor(var State: TDysAppState);
+var
+  ClipIdx: Integer;
+  NewClip: TClip;
+begin
+  ClipIdx := ClipIndexAtFrame(State.CursorTrack, State.CursorFrame);
+  if ClipIdx < 0 then
+    Exit;
+  NewClip := Project.Tracks[State.CursorTrack].Clips[ClipIdx];
+  NewClip.Position := NewClip.Position + NewClip.Length;
+  Project.CommitClipToTrack(State.CursorTrack, NewClip);
+  PushTrackToEngineSimple(State.CursorTrack);
+  State.CursorFrame := NewClip.Position;
+end;
+
+procedure DeleteClipUnderCursor(var State: TDysAppState);
+var
+  ClipIdx: Integer;
+begin
+  ClipIdx := ClipIndexAtFrame(State.CursorTrack, State.CursorFrame);
+  if ClipIdx < 0 then
+    Exit;
+  Project.RemoveClipAt(State.CursorTrack, ClipIdx);
+  PushTrackToEngineSimple(State.CursorTrack);
 end;
 
 { Plain insertion sort, case-insensitive - same shape as DysFilePane's own
@@ -2605,7 +2677,19 @@ begin
                       State.ResizeActive := False
                     else
                       CancelPending(State);
+                  mkDelete:
+                    DeleteClipUnderCursor(State);
                   mkChar:
+                    if (kmCtrl in Events[I].Key.Mods) and
+                       (Events[I].Key.CodePoint in [Ord('c'), Ord('C')]) then
+                      CopyClipUnderCursor(State)
+                    else if (kmCtrl in Events[I].Key.Mods) and
+                       (Events[I].Key.CodePoint in [Ord('v'), Ord('V')]) then
+                      PasteClipAtCursor(State)
+                    else if (kmCtrl in Events[I].Key.Mods) and
+                       (Events[I].Key.CodePoint in [Ord('d'), Ord('D')]) then
+                      DuplicateClipUnderCursor(State)
+                    else
                     case Events[I].Key.CodePoint of
                       Ord(' '):
                         { Space toggles Play/Pause with the timeline
