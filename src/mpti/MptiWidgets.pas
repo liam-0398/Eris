@@ -70,7 +70,48 @@ function MScrollBar(var Core: TMCoreState; var HR: TMHitRegistry; var Buf: TCell
   ContentSize, Visible: Integer; var Current: Integer;
   const Events: TMInputEventArray): Boolean;
 
+{ One row of mutually-exclusive "(o) Label" options stacked vertically
+  from (X, Y), one option per row. Selected is the caller-owned index
+  (clamped to [0, High(Labels)]) - like MScrollBar's Current, this widget
+  has no state of its own beyond hit rects, since which option is chosen
+  is meaningful to the caller and must survive the widget's ID being
+  swept. Each option gets its own hit rect (Name + '/' + index) so a
+  click on any row selects it directly, no separate Tab-cycling needed.
+  Returns True if Selected changed this frame. }
+function MRadioGroup(var Core: TMCoreState; var HR: TMHitRegistry; var Buf: TCellBuffer;
+  const Name: string; PaneID: TMWidgetID; X, Y: Integer; const Labels: array of string;
+  var Selected: Integer; const Events: TMInputEventArray): Boolean;
+
+{ Horizontal slider Width cells wide at (X, Y), for Value in [Min, Max].
+  Value is caller-owned and clamped in place, same rationale as
+  MScrollBar/MRadioGroup. Draws a track of '-' with a single 'o' handle
+  cell; click-anywhere-on-track jumps the handle there, dragging it
+  scrubs continuously - the Dysnomia TDysParamSlider replacement.
+  Returns True if Value changed this frame. }
+function MSlider(var Core: TMCoreState; var HR: TMHitRegistry; var Buf: TCellBuffer;
+  const Name: string; PaneID: TMWidgetID; X, Y, Width: Integer;
+  Min, Max: Integer; var Value: Integer; const Events: TMInputEventArray): Boolean;
+
 implementation
+
+{ Minimal non-negative-int-to-decimal-string, kept local so this unit
+  doesn't have to pull in SysUtils just to build a per-row widget ID
+  suffix - no other MPTI unit depends on SysUtils either (see unit doc
+  comment on dependency-freedom, hard requirement 9). }
+function DecStr(N: Integer): string;
+begin
+  if N = 0 then
+  begin
+    Result := '0';
+    Exit;
+  end;
+  Result := '';
+  while N > 0 do
+  begin
+    Result := Chr(Ord('0') + (N mod 10)) + Result;
+    N := N div 10;
+  end;
+end;
 
 function MButton(var Core: TMCoreState; var HR: TMHitRegistry; var Buf: TCellBuffer;
   const Name: string; PaneID: TMWidgetID; X, Y: Integer; const Caption: string;
@@ -266,6 +307,116 @@ begin
   end;
 
   Result := Current <> Before;
+end;
+
+function MRadioGroup(var Core: TMCoreState; var HR: TMHitRegistry; var Buf: TCellBuffer;
+  const Name: string; PaneID: TMWidgetID; X, Y: Integer; const Labels: array of string;
+  var Selected: Integer; const Events: TMInputEventArray): Boolean;
+var
+  RowID: TMWidgetID;
+  R: TMRect;
+  Before, Row, I, CX: Integer;
+  S: string;
+  Ch: Integer;
+  W: Integer;
+begin
+  if Selected < 0 then Selected := 0;
+  if Selected > High(Labels) then Selected := High(Labels);
+  Before := Selected;
+
+  for Row := 0 to High(Labels) do
+  begin
+    RowID := MWidgetID(Name + '/' + DecStr(Row));
+    R := MMakeRect(X, Y + Row, Length(Labels[Row]) + 4, 1); { "(o) " + Label }
+    MRegisterHitRect(HR, RowID, PaneID, R);
+
+    for I := 0 to High(Events) do
+      if (Events[I].Kind = mekMouse) and (Events[I].Mouse.Action = maPress)
+         and (Events[I].Mouse.Button = mbLeft)
+         and MRectContains(R, Events[I].Mouse.X, Events[I].Mouse.Y) then
+      begin
+        MSetFocus(Core, RowID, PaneID);
+        Selected := Row;
+      end;
+
+    if Row = Selected then Ch := Ord('o') else Ch := Ord(' ');
+    S := '(' + Chr(Ch) + ') ' + Labels[Row];
+    CX := X;
+    for I := 1 to Length(S) do
+    begin
+      W := MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, CX, Y + Row,
+        Ord(S[I]), MDefaultFg, MDefaultBg, []);
+      Inc(CX, W);
+    end;
+  end;
+
+  Result := Selected <> Before;
+end;
+
+function MSlider(var Core: TMCoreState; var HR: TMHitRegistry; var Buf: TCellBuffer;
+  const Name: string; PaneID: TMWidgetID; X, Y, Width: Integer;
+  Min, Max: Integer; var Value: Integer; const Events: TMInputEventArray): Boolean;
+var
+  ID: TMWidgetID;
+  R: TMRect;
+  St: PMWidgetState;
+  Before, Range, HandlePos, Col: Integer;
+  I, GX: Integer;
+  Ch: TMUInt32;
+begin
+  ID := MWidgetID(Name);
+  if Width < 1 then Width := 1;
+  R := MMakeRect(X, Y, Width, 1);
+  MRegisterHitRect(HR, ID, PaneID, R);
+  St := MGetWidgetState(Core, ID);
+
+  if Max < Min then Max := Min;
+  if Value < Min then Value := Min;
+  if Value > Max then Value := Max;
+  Range := Max - Min;
+  Before := Value;
+
+  for I := 0 to High(Events) do
+  begin
+    if Events[I].Kind <> mekMouse then Continue;
+    GX := Events[I].Mouse.X - X;
+
+    if (Events[I].Mouse.Action = maPress) and (Events[I].Mouse.Button = mbLeft)
+       and MRectContains(R, Events[I].Mouse.X, Events[I].Mouse.Y) then
+    begin
+      MSetFocus(Core, ID, PaneID);
+      St^.DragActive := True;
+      if Range > 0 then
+        Value := Min + (GX * Range + (Width - 1) div 2) div (Width - 1)
+      else
+        Value := Min;
+    end
+    else if (Events[I].Mouse.Action = maRelease) and (Events[I].Mouse.Button = mbLeft) then
+      St^.DragActive := False
+    else if (Events[I].Mouse.Action = maDrag) and St^.DragActive and (Range > 0) then
+    begin
+      if GX < 0 then GX := 0;
+      if GX > Width - 1 then GX := Width - 1;
+      Value := Min + (GX * Range + (Width - 1) div 2) div (Width - 1);
+    end;
+  end;
+
+  if Value < Min then Value := Min;
+  if Value > Max then Value := Max;
+
+  if Range > 0 then
+    HandlePos := ((Value - Min) * (Width - 1) + Range div 2) div Range
+  else
+    HandlePos := 0;
+
+  for Col := 0 to Width - 1 do
+  begin
+    if Col = HandlePos then Ch := Ord('o') else Ch := Ord('-');
+    MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X + Col, Y, Ch,
+      MDefaultFg, MDefaultBg, []);
+  end;
+
+  Result := Value <> Before;
 end;
 
 end.
