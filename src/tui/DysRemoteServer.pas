@@ -502,18 +502,42 @@ begin
 end;
 
 procedure DysRemoteServerStop;
+var
+  WakeSock: cint;
+  WakeIn: Text;
+  WakeOut: Text;
 begin
   if not Running then Exit;
   Running := False;
   if Assigned(AcceptThread) then
   begin
     AcceptThread.Terminate;
-    if ListenSock >= 0 then
-      CloseSocket(ListenSock); { unblocks the accept-loop's fpAccept }
+    { fpAccept is blocked in the accept thread - CloseSocket(ListenSock)
+      alone does not reliably unblock a concurrent blocking accept() on
+      Linux (POSIX leaves a close() racing another thread's blocking call
+      on the same fd undefined; this hung indefinitely in practice, which
+      is what made Alt+X/File>Exit look broken - the main loop had already
+      exited cleanly and was stuck here in shutdown). Waking it with a
+      throwaway self-connect is the portable fix: Execute already checks
+      Terminated immediately after fpAccept returns and breaks before ever
+      touching the connection, so this dummy client is simply dropped. }
+    WakeSock := fpsocket(AF_UNIX, SOCK_STREAM, 0);
+    if WakeSock >= 0 then
+    begin
+      if Sockets.Connect(WakeSock, RemoteSocketPath, WakeIn, WakeOut) then
+      begin
+        CloseFile(WakeIn);
+        CloseFile(WakeOut);
+      end
+      else
+        CloseSocket(WakeSock);
+    end;
     AcceptThread.WaitFor;
     AcceptThread.Free;
     AcceptThread := nil;
   end;
+  if ListenSock >= 0 then
+    CloseSocket(ListenSock);
   ListenSock := -1;
   FpUnlink(RemoteSocketPath);
   DoneCriticalSection(QueueLock);

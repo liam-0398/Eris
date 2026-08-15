@@ -67,6 +67,15 @@ procedure MEnableTerminalModes(const D: TMDriverState);
   shutdown so the terminal is left sane for whatever runs next in it. }
 procedure MDisableTerminalModes(const D: TMDriverState);
 
+{ Tears the driver down in the one correct order (terminal-mode disable
+  sequences, then the resize handler, then raw mode itself) - three calls
+  every MPTI app's own quit path has to get right and in order, so this
+  bundles them into the one function an app actually calls on the way out.
+  Safe to call even if MEnableTerminalModes/MInstallResizeHandler/
+  MEnableRawMode were never called (each of the three no-ops on state that
+  isn't active). }
+procedure MShutdownDriver(var D: TMDriverState);
+
 { Blocks (via select, up to TimeoutMs ms; -1 = forever) for the next
   chunk of input or a pending SIGWINCH. On a lone/incomplete escape
   sequence with nothing following, automatically shortens the wait to
@@ -210,6 +219,13 @@ begin
     WriteRaw(D, #27'[?2004l');
   if D.Caps.MouseSGR1006 then
     WriteRaw(D, #27'[?1006l'#27'[?1000l');
+end;
+
+procedure MShutdownDriver(var D: TMDriverState);
+begin
+  MDisableTerminalModes(D);
+  MRemoveResizeHandler(D);
+  MDisableRawMode(D);
 end;
 
 function MRunOnce(var D: TMDriverState; TimeoutMs: Integer;

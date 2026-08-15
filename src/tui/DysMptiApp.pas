@@ -1064,6 +1064,7 @@ var
   FlashOn: Boolean;
   LoopColor, GridColor: TMColor;
   Ticks: TMRulerTickArray;
+  PlayFrame: Int64;
 begin
   if (R.W < TimelineLabelWidth + 4) or (R.H < 4) then
     Exit;
@@ -1073,6 +1074,23 @@ begin
   CH := R.H - 2;
   if (CW < 1) or (CH < 3) then
     Exit;
+
+  { Autoscroll: once the playhead scrolls off the right (or left) edge of
+    the visible grid, re-anchor ViewStartFrame so it's visible again -
+    same "the timeline is what follows playback" idea as DysTimeline's own
+    UpdatePlayhead/EnsureFrameVisible (src/tui, read-only reference),
+    simplified to a single re-centre rather than a minimum nudge since
+    this stage has no manual horizontal scroll of its own to preserve. }
+  if AudioEngineIsPlaying then
+  begin
+    PlayFrame := AudioEngineGetPosition;
+    if FrameToCol(PlayFrame, State, CW) < 0 then
+    begin
+      State.ViewStartFrame := PlayFrame - (Int64(CW) * State.FramesPerCol) div 3;
+      if State.ViewStartFrame < 0 then
+        State.ViewStartFrame := 0;
+    end;
+  end;
 
   PosSec := State.CursorFrame / AudioEngine.ProjectSampleRate;
   Header := 'trk ' + IntToStr(State.CursorTrack + 1) + '  t=' +
@@ -1602,9 +1620,7 @@ begin
           FpWrite(D.OutFd, Output.Data[0], Output.Len);
       end;
     finally
-      MDisableTerminalModes(D);
-      MRemoveResizeHandler(D);
-      MDisableRawMode(D);
+      MShutdownDriver(D);
       WriteLn;
     end;
   finally
