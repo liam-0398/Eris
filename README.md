@@ -18,7 +18,7 @@ https://www.youtube.com/@slothbearslothbear
 
 **HEAVY LLM usage**: I know decent Pascal but do not know about audio engineering and decided to just go forth with having an LLM implement what I wanted instead of putting in the years to do it myself. I do plan to rewrite it bit by bit but the focus currently is having a usable DAW that does exactly what I want, written in the language I want and adhering to the constraints I want. Every idea and technical decision is my own but the implementation is brought to you by Claude. 
 
-**LLM Free Future**: I have learned TONS putting this together. I am creating my own programming language currently, rockskunk. I will eventually rewrite the entire codebase besides the GUI and TUI in rockskunk without any sort of LLM code generation and own the audio engine completely.
+**LLM Free Future**: I have learned TONS putting this together. I am creating my own programming language currently (no LLM usage), rockskunk. I will eventually rewrite the entire codebase besides the GUI and TUI in rockskunk without any sort of LLM code generation and own the audio engine completely.
 
 https://github.com/liam-0398/rockskunk
 
