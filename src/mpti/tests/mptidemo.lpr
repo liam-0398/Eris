@@ -9,7 +9,8 @@ program mptidemo;
 {$mode objfpc}{$H+}
 
 uses
-  SysUtils, MptiTypes, MptiCell, MptiCaps, MptiInput, MptiDriver, MptiRender;
+  SysUtils, MptiTypes, MptiCell, MptiCaps, MptiInput, MptiDriver, MptiRender,
+  MptiHeadless;
 
 var
   Buf: array[0..7] of Byte;
@@ -26,6 +27,8 @@ var
   Out1: TMByteBuf;
   OutStr: string;
   UB: TMByteBuf;
+  HD: TMHeadlessState;
+  HScreen: TCellBuffer;
 
 function Bytes(const S: string): TMByteArray;
 var
@@ -331,6 +334,45 @@ begin
   OutStr := MByteBufToString(Out1);
   Check(Pos(';1', OutStr) > 0, 'mono mode compensates bright color with bold');
   Check(Pos('38', OutStr) = 0, 'mono mode emits no color codes at all');
+
+  { MptiHeadless: scripted input decodes through the exact same parser
+    MptiDriver uses on a real fd - split across two feeds like a real
+    fd's short reads would. }
+  MInitHeadless(HD, MCapsFromEnv('xterm-256color', 'truecolor'), 80, 24);
+  SetLength(IEvents, 0);
+  MHeadlessFeedInput(HD, Bytes(#27'['), IEvents);
+  Check(Length(IEvents) = 0, 'headless: split CSI first half yields no event yet');
+  MHeadlessFeedInput(HD, Bytes('A'), IEvents);
+  Check((Length(IEvents) = 1) and (IEvents[0].Key.Code = mkUp),
+    'headless: split CSI completed by second feed');
+
+  { MptiHeadless: lone-ESC ambiguity flush, mirroring MptiDriver's timeout }
+  SetLength(IEvents, 0);
+  MHeadlessFeedInput(HD, Bytes(#27), IEvents);
+  Check(Length(IEvents) = 0, 'headless: lone ESC produces no event yet');
+  MHeadlessFlushPendingEscape(HD, IEvents);
+  Check((Length(IEvents) = 1) and (IEvents[0].Key.Code = mkEscape),
+    'headless: flushed lone ESC -> Escape key');
+
+  { MptiHeadless: resize invalidates the virtual screen and forces a full
+    redraw, exactly like a real terminal at a new, as-yet-unknown size. }
+  MHeadlessRenderFrame(HD, Out1); { consume the forced initial full redraw }
+  MHeadlessSetCell(HD, 0, 0, MBlankCell); { still blank: no actual change }
+  MHeadlessRenderFrame(HD, Out1);
+  Check(Out1.Len = 0, 'headless: unchanged frame after initial redraw emits nothing');
+  MHeadlessResize(HD, 40, 10);
+  Check((HD.Cols = 40) and (HD.Rows = 10), 'headless: resize updates Cols/Rows');
+  Check(HD.Render.ForceFullRedraw, 'headless: resize forces full redraw');
+
+  { MptiHeadless: full input -> draw -> render -> assert round trip with
+    no real terminal anywhere in the loop. }
+  Cell := MBlankCell;
+  Cell.CodePoint := Ord('K');
+  MHeadlessSetCell(HD, 2, 1, Cell);
+  MHeadlessRenderFrame(HD, Out1);
+  HScreen := MHeadlessScreen(HD);
+  Check(MCellsEqual(MGetCell(HScreen, 2, 1), Cell), 'headless: drawn cell visible in MHeadlessScreen after render');
+  Check(Pos('K', MByteBufToString(Out1)) > 0, 'headless: drawn cell reflected in emitted ANSI');
 
   { MptiDriver: only ever probes, never mutates terminal state unless a
     real interactive tty is confirmed present - safe to run in CI/headless. }
