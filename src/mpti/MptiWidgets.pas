@@ -939,6 +939,20 @@ begin
 end;
 
 procedure MDrawPane(var Buf: TCellBuffer; X, Y, W, H: Integer; const Title: string);
+const
+  { Box-drawing glyphs (U+2500 family) for a solid pane border, in place
+    of plain-ASCII '+'/'-'/'|'. Every xterm-family terminal MPTI targets,
+    including Tiger's stock xterm (mpti.md req. 6), has shipped these
+    since well before CP437-only hardware became irrelevant, so this is
+    safe as MPTI's unconditional default rather than a capability
+    -negotiated fallback - a stylistic choice that applies to every MPTI
+    app, not just Dysnomia. }
+  GlyphHLine = $2500;
+  GlyphVLine = $2502;
+  GlyphTL    = $250C;
+  GlyphTR    = $2510;
+  GlyphBL    = $2514;
+  GlyphBR    = $2518;
 var
   Row, Col, TX, I: Integer;
 begin
@@ -946,22 +960,22 @@ begin
 
   for Col := 0 to W - 1 do
   begin
-    MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X + Col, Y, Ord('-'),
+    MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X + Col, Y, GlyphHLine,
       MDefaultFg, MDefaultBg, []);
-    MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X + Col, Y + H - 1, Ord('-'),
+    MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X + Col, Y + H - 1, GlyphHLine,
       MDefaultFg, MDefaultBg, []);
   end;
   for Row := 0 to H - 1 do
   begin
-    MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X, Y + Row, Ord('|'),
+    MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X, Y + Row, GlyphVLine,
       MDefaultFg, MDefaultBg, []);
-    MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X + W - 1, Y + Row, Ord('|'),
+    MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X + W - 1, Y + Row, GlyphVLine,
       MDefaultFg, MDefaultBg, []);
   end;
-  MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X, Y, Ord('+'), MDefaultFg, MDefaultBg, []);
-  MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X + W - 1, Y, Ord('+'), MDefaultFg, MDefaultBg, []);
-  MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X, Y + H - 1, Ord('+'), MDefaultFg, MDefaultBg, []);
-  MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X + W - 1, Y + H - 1, Ord('+'), MDefaultFg, MDefaultBg, []);
+  MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X, Y, GlyphTL, MDefaultFg, MDefaultBg, []);
+  MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X + W - 1, Y, GlyphTR, MDefaultFg, MDefaultBg, []);
+  MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X, Y + H - 1, GlyphBL, MDefaultFg, MDefaultBg, []);
+  MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X + W - 1, Y + H - 1, GlyphBR, MDefaultFg, MDefaultBg, []);
 
   for Row := 1 to H - 2 do
     for Col := 1 to W - 2 do

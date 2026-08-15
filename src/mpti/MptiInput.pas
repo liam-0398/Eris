@@ -366,6 +366,7 @@ begin
             'S': Ev := KeyEvent(mkF4, ModsFromSGRParam(Nums[1]));
             'I': Ev.Kind := mekFocusIn;
             'O': Ev.Kind := mekFocusOut;
+            'Z': Ev := KeyEvent(mkTab, [kmShift]); { CSI Z - Shift+Tab/back-tab }
             '~':
               begin
                 if NumCount = 0 then
