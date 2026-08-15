@@ -8,10 +8,11 @@ program Dysnomia;
   fails with "Can't find unit Forms" - that failure is the guard rail,
   keep it.
 
-  Launcher-first boot (tui.md): shows DysLauncher's DAW/Control Station/
-  Tracker choice, then Init/Run/Done's whichever one was picked - one
-  process either way, same as before the launcher existed for the DAW
-  path. Cancelling the launcher (Esc/Cancel) just exits. }
+  No interactive launcher screen (removed per user request - the DAW/
+  Control Station/Tracker picker used to be DysLauncher's job). Boots
+  straight into the MPTI DAW by default; Control Station and Tracker
+  (both still Free Vision, untouched) are reachable with a command-line
+  argument instead of a selection screen. }
 
 {$mode objfpc}{$H+}
 
@@ -19,22 +20,18 @@ uses
   {$IFDEF UNIX}
   cthreads,
   {$ENDIF}
-  DysLauncher, DysnomiaApp, DysControlStationApp, DysTrackerApp;
+  SysUtils, DysMptiApp, DysControlStationApp, DysTrackerApp;
 
 var
-  Moon: TDysnomiaApp;
-
+  Mode: string;
 begin
-  case RunDysLauncher of
-    dlcDAW:
-      begin
-        Moon.Init;
-        Moon.Run;
-        Moon.Done;
-      end;
-    dlcControlStation:
-      RunDysControlStation;
-    dlcTracker:
-      RunDysTracker;
-  end;
+  Mode := '';
+  if ParamCount >= 1 then
+    Mode := LowerCase(ParamStr(1));
+  if (Mode = 'control-station') or (Mode = 'controlstation') then
+    RunDysControlStation
+  else if Mode = 'tracker' then
+    RunDysTracker
+  else
+    RunDysnomiaMpti;
 end.

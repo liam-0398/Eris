@@ -35,6 +35,7 @@ mkdir -p "$OUTDIR" "$UNITDIR"
   -Fu"$FPCDIR/units/$TARGET/fv" \
   -Fu"$LAZUTILSDIR" \
   -Fusrc/tui \
+  -Fusrc/mpti \
   -Fusrc/aengine -Fusrc/abackend -Fusrc/project -Fusrc/util \
   -dERIS_TUI \
   -odysnomia \

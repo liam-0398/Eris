@@ -43,6 +43,7 @@ mkdir -p "$OUTDIR" "$UNITDIR"
   -FE"$OUTDIR" -FU"$UNITDIR" \
   -Fu"$FPCDIR/units/$TARGET/fv" \
   -Fusrc/tui \
+  -Fusrc/mpti \
   -Fusrc/aengine -Fusrc/abackend -Fusrc/project -Fusrc/util \
   -dERIS_TUI \
   -odysnomia-ppc \
