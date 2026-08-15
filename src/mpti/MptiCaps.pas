@@ -40,6 +40,17 @@ type
     BracketedPaste: Boolean;
     FocusEvents: Boolean;
     KittyKeyboard: Boolean;
+    { Whether the terminal's locale is UTF-8, per $LANG/$LC_ALL/$LC_CTYPE -
+      needed by anything that wants to gate a Unicode-block-specific glyph
+      (braille dot patterns U+2800-28FF, say) behind more than "some xterm
+      or other", since the box-drawing/block glyphs MPTI already uses
+      unconditionally are safe on any terminal built after CP437-only
+      hardware went away but braille cells are a much newer, less
+      universally-fonted block. False (conservative) whenever the locale
+      string doesn't mention UTF-8 at all, same "err toward the lower
+      capability on ambiguity" rule MCapsFromEnv already follows for
+      everything else in this record. }
+    UnicodeOk: Boolean;
   end;
 
   TMDeviceAttrs = record
@@ -58,7 +69,7 @@ const
   any runtime probing has happened (or if it never can - e.g. output is
   not actually a tty). Errs toward the safe/lower capability whenever a
   $TERM value is ambiguous. }
-function MCapsFromEnv(const TermEnv, ColorTermEnv: string): TMTermCaps;
+function MCapsFromEnv(const TermEnv, ColorTermEnv: string; const LocaleEnv: string = ''): TMTermCaps;
 
 { Least-capable caps: 16 colors, no SGR1006, no paste/focus/kitty. Used
   as the MCapsFromEnv fallback for completely unrecognized $TERM values,
@@ -91,15 +102,18 @@ begin
   Result.BracketedPaste := False;
   Result.FocusEvents := False;
   Result.KittyKeyboard := False;
+  Result.UnicodeOk := False;
 end;
 
-function MCapsFromEnv(const TermEnv, ColorTermEnv: string): TMTermCaps;
+function MCapsFromEnv(const TermEnv, ColorTermEnv: string; const LocaleEnv: string = ''): TMTermCaps;
 var
-  T, CT: string;
+  T, CT, Loc: string;
 begin
   Result := MMinimalCaps;
   T := LowerCase(TermEnv);
   CT := LowerCase(ColorTermEnv);
+  Loc := UpperCase(LocaleEnv);
+  Result.UnicodeOk := (Pos('UTF-8', Loc) > 0) or (Pos('UTF8', Loc) > 0);
 
   if T = '' then
     Exit; { no $TERM at all: stay minimal, most conservative case }

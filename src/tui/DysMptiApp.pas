@@ -42,7 +42,8 @@ uses
   SysUtils, BaseUnix,
   MptiTypes, MptiCell, MptiCaps, MptiInput, MptiDriver, MptiRender,
   MptiCore, MptiLayout, MptiWidgets,
-  Config, AudioEngine, Project, SampleTypes, WavDecoder, ProjectFile, DysRemoteServer;
+  Config, AudioEngine, Project, SampleTypes, WavDecoder, ProjectFile, DysRemoteServer,
+  Effects, Quadraverb, BBE422A, Alesis3630, BossFZ2, Waveform;
 
 const
   { Same numbers as DysGeometry's constants (src/tui/DysGeometry.pas) -
@@ -72,11 +73,12 @@ const
 
 type
   TStringArray = array of string;
+  PEffect = ^Effects.TEffect;
 
   TDysMptiLayout = record
     TooSmall: Boolean;
     Cols, Rows: Integer;
-    ToolBar, FilePane, TrackPane, Timeline, BottomBar: TMRect;
+    ToolBar, FilePane, TrackPane, Timeline, EffectsPane, WaveformPane: TMRect;
   end;
 
   { ModalKind gates the whole main loop: while it's non-zero the four dock
@@ -150,7 +152,31 @@ type
     PrefSP1200: Integer;
     PrefInputBuf: string;
     PrefInputGain: string;
-    PrefTheme: Integer;
+
+    { Effects rack (bottom-left pane): flattened cursor over
+      Project.TrackEffects[CursorTrack] - see BuildEffectRows. Row 0 of
+      each effect is its own header (kind name + remove hint); the rows
+      after it are that effect's own parameters (BuildEffectParams).
+      ShowAddEffectMenu drives the Add-effect popup (an MDropdownList of
+      Effects.ekXxx kind names), mirroring TDysEffectsContent.
+      OpenAddEffectMenu's own add-then-append shape. }
+    EffCursor: Integer;
+    ShowAddEffectMenu: Boolean;
+
+    { Recording (transport bar's Rec button, DysStartRecording/
+      DysFinalizeRecording ported below) - mirrors DysTimeline's own
+      module-level RecordTrackIndex/RecordStartFrame; this file has no
+      unit-level var section for the main loop to keep session state in,
+      so they live on TDysAppState instead. }
+    RecordTrackIndex: Integer;
+    RecordStartFrame: Int64;
+
+    { Waveform pane (bottom-right) peak cache - see DrawWaveformPane's own
+      header comment on why this is cached rather than recomputed every
+      Draw. -1/-1/-1 = nothing cached yet, forcing the first frame's
+      lookup to compute it. }
+    WaveCacheTrack, WaveCacheClipIdx, WaveCacheSampleID: Integer;
+    WavePeaks: Waveform.TWaveformPeaks;
   end;
 
 function ComputeDysMptiLayout(Cols, Rows: Integer): TDysMptiLayout;
@@ -173,10 +199,19 @@ begin
   BodyTop := BodyTop + ToolBarHeight;
   BodyBottom := Rows - 1 - BottomBarHeight;
 
-  Result.BottomBar := MMakeRect(0, BodyBottom, Cols, BottomBarHeight);
   Result.FilePane := MMakeRect(0, BodyTop, FilePaneWidth, BodyBottom - BodyTop);
   Result.TrackPane := MMakeRect(Cols - TrackPaneWidth, BodyTop, TrackPaneWidth, BodyBottom - BodyTop);
   Result.Timeline := MMakeRect(FilePaneWidth, BodyTop, Cols - TrackPaneWidth - FilePaneWidth, BodyBottom - BodyTop);
+
+  { Bottom dock splits Effects (left, gets the extra column on an odd
+    width - param names/values need the room more than the wave shape
+    does) / Waveform (right), same "two docks share the one bottom strip"
+    layout DysGeometry's own BottomBar gave TDysBottomPane's toggled
+    Content/WaveformView - side by side here instead of toggled, since
+    MPTI's per-pane focus (Tab/Shift+Tab) already gives each its own
+    keyboard-reachable pane with no need to hide one behind the other. }
+  Result.EffectsPane := MMakeRect(0, BodyBottom, (Cols + 1) div 2, BottomBarHeight);
+  Result.WaveformPane := MMakeRect((Cols + 1) div 2, BodyBottom, Cols - (Cols + 1) div 2, BottomBarHeight);
 end;
 
 procedure EnsureDysTrackCount(ACount: Integer);
@@ -256,10 +291,10 @@ const
     (220, 90, 90), (90, 200, 120), (90, 150, 220), (210, 190, 80),
     (190, 100, 210), (90, 200, 200), (220, 140, 70), (150, 150, 230)
   );
-  { The clip's own leading column, always - see DrawClipSpan. Dark grey,
-    not black, so it reads as "a seam" against every track colour rather
-    than a gap of silence. }
-  ClipStartColor: array[0..2] of Byte = (70, 70, 70);
+  { The clip's own leading column, always - see DrawClipSpan. White (was
+    dark grey), so the seam reads clearly against every track colour
+    including the darker ones in TrackColorPalette. }
+  ClipStartColor: array[0..2] of Byte = (255, 255, 255);
 
 { Frames per bar at the project's current tempo (hardcoded 4/4, same
   simplification DysTimeline.BarFrames made - Project.pas has no time
@@ -836,7 +871,6 @@ begin
     State.PrefSP1200 := 0;
   State.PrefInputBuf := IntToStr(AudioEngineGetInputBufferSize);
   State.PrefInputGain := IntToStr(Round(AudioEngineGetInputGainDb));
-  State.PrefTheme := Config.Cfg.Theme;
   State.PrefFocusIdx := 0;
   State.ModalKind := dmPreferences;
 end;
@@ -862,7 +896,6 @@ begin
     AudioEngineSetInputBufferSize(N);
   if TryStrToInt(State.PrefInputGain, N) then
     AudioEngineSetInputGainDb(N);
-  Config.Cfg.Theme := State.PrefTheme;
 
   Config.Cfg.BackendName := AudioEngineBackendNameFromKind(AudioEngineGetBackend);
   Config.Cfg.OutputDevice := AudioEngineGetPipeWireOutputDevice;
@@ -929,9 +962,9 @@ begin
     if EventIsFocusPaneKey(Events[I], Backward) then
     begin
       if Backward then
-        State.PrefFocusIdx := (State.PrefFocusIdx + 8) mod 9
+        State.PrefFocusIdx := (State.PrefFocusIdx + 7) mod 8
       else
-        State.PrefFocusIdx := (State.PrefFocusIdx + 1) mod 9;
+        State.PrefFocusIdx := (State.PrefFocusIdx + 1) mod 8;
     end;
 
   Y := R.Y + 1;
@@ -943,7 +976,6 @@ begin
   RadioRow('SP-1200 (bit-crush):', State.PrefSP1200, ['Off', 'On'], 'prefs/sp1200', 5);
   TextRow('Input buffer size (128-4096):', State.PrefInputBuf, 'prefs/inputbuf', 6);
   TextRow('Input gain, dB (-24..24):', State.PrefInputGain, 'prefs/inputgain', 7);
-  RadioRow('Theme:', State.PrefTheme, ['Follow system', 'Light', 'Dark'], 'prefs/theme', 8);
 
   if MButton(Core, HR, Buf, 'prefs/ok', MWidgetID('prefs/ok'), R.X + 2, R.Y + R.H - 2, 'OK', Events) then
     ConfirmPreferences(State);
@@ -1209,6 +1241,719 @@ begin
     Result[I] := 'Track ' + IntToStr(I + 1);
 end;
 
+
+{ ---------------------------------------------------------------------
+  Instrument tracks - 'i' on a file-browser entry (DysFilePane's own
+  binding, ported verbatim from TDysFileListBox.SelectAsInstrument, src/
+  tui read-only reference) assigns the decoded sample straight to
+  Project.TrackInstrument on State.CursorTrack instead of dropping a
+  clip on the timeline. No end marker (InstrumentEndUnset) - playback
+  runs to the sample's own end, same as the reference. }
+procedure SelectFileAsInstrument(var State: TDysAppState);
+var
+  Name, FullPath: string;
+  Sample: TSample;
+  SampleID: Integer;
+begin
+  if (State.FileSelected < 0) or (State.FileSelected > High(State.FileEntries)) then
+    Exit;
+  Name := State.FileEntries[State.FileSelected];
+  if (Name = '..') or (Length(Name) = 0) or (Name[Length(Name)] = '/') then
+    Exit;
+  FullPath := State.FileCurDir + Name;
+  if not DecodeSampleFile(FullPath, Sample) then
+  begin
+    State.StatusMessage := 'Could not decode "' + Name + '" as audio.';
+    Exit;
+  end;
+  SampleID := Project.AddSampleToPool(Sample, Name, FullPath);
+  Project.TrackInstrument[State.CursorTrack] := SampleID;
+  Project.TrackInstrumentStart[State.CursorTrack] := 0;
+  Project.TrackInstrumentEnd[State.CursorTrack] := Project.InstrumentEndUnset;
+  State.StatusMessage := 'Track ' + IntToStr(State.CursorTrack + 1) + ' instrument: ' + Name;
+end;
+
+{ ---------------------------------------------------------------------
+  Recording (transport bar Rec button) - ported from DysTimeline.
+  DysStartRecording/DysFinalizeRecording (src/tui, read-only reference),
+  targeting State.CursorTrack/State.CursorFrame instead of DysTrackPane/
+  DysTimeline's own separate cursors (this file has one shared cursor -
+  see TDysAppState's own header comment). RecordTrackIndex/
+  RecordStartFrame move from the reference's unit-level vars onto
+  TDysAppState since this file has no such var section of its own.
+  --------------------------------------------------------------------- }
+{ Mirrors DysWidgets.TDysToolBar.PollRecordState's own caption states. }
+function RecordButtonCaption(ARecordState: Integer): string;
+begin
+  case ARecordState of
+    RecordStateCountIn: Result := 'Cnt';
+    RecordStateRecording: Result := 'REC';
+  else
+    Result := 'Rec';
+  end;
+end;
+
+procedure DoStartRecording(var State: TDysAppState);
+begin
+  State.RecordTrackIndex := State.CursorTrack;
+  if State.RecordTrackIndex < 0 then
+    Exit;
+  State.RecordStartFrame := State.CursorFrame;
+  AudioEngineSeek(State.RecordStartFrame);
+
+  if Project.TrackIsInput[State.RecordTrackIndex] then
+  begin
+    { line-in take: no keyboard instrument to check for, no count-in. }
+    AudioEngineStartRecording(State.RecordTrackIndex);
+    Exit;
+  end;
+
+  if not Project.TrackIsSampler[State.RecordTrackIndex] and
+    (Project.TrackInstrument[State.RecordTrackIndex] < 0) then
+  begin
+    State.StatusMessage := 'Load an instrument for this track first.';
+    Exit;
+  end;
+
+  AudioEngineStartCountIn(State.RecordTrackIndex);
+end;
+
+procedure DoFinalizeRecording(var State: TDysAppState);
+var
+  Data: PSingle;
+  FrameCount: Integer;
+  Sample: TSample;
+  NewClip: TClip;
+begin
+  { Unlike the reference (DysTimeline.DysFinalizeRecording), this doesn't
+    gate on AudioEngineRecordState still reading Recording at call time -
+    by the time the engine's own recording-length cap auto-stops it (see
+    the main loop's own poll, above), RecordState has already dropped
+    back to Idle, so that check would always read False for the auto-stop
+    path and silently drop the take. AudioEngineTakeRecordedAudio
+    returning nothing/zero frames is what actually means "there was
+    nothing to keep" (a manual stop during count-in, before anything was
+    captured), and covers that case just as well. }
+  AudioEngineStopRecording;
+  if not AudioEngineTakeRecordedAudio(Data, FrameCount) then
+    Exit;
+  if (State.RecordTrackIndex < 0) or (FrameCount <= 0) then
+    Exit;
+
+  FillChar(Sample, SizeOf(Sample), 0);
+  Sample.Data := Data;
+  Sample.FrameCount := FrameCount;
+  Sample.Channels := 2;
+  Sample.SampleRate := AudioEngine.ProjectSampleRate;
+  Sample.BaseNote := 60.0;
+
+  FillChar(NewClip, SizeOf(NewClip), 0);
+  NewClip.SampleID := Project.AddSampleToPool(Sample,
+    'Recording ' + IntToStr(Length(Project.SamplePool)), '');
+  NewClip.Offset := 0;
+  NewClip.Length := FrameCount;
+  NewClip.Position := State.RecordStartFrame;
+  NewClip.TrackID := State.RecordTrackIndex;
+  NewClip.Gain := 1.0;
+  NewClip.PitchSemitones := 0;
+  NewClip.WarpMode := SampleTypes.WarpModeBeats;
+
+  Project.CommitClipToTrack(State.RecordTrackIndex, NewClip);
+  PushTrackToEngineSimple(State.RecordTrackIndex);
+  State.StatusMessage := 'Recorded to track ' + IntToStr(State.RecordTrackIndex + 1) + '.';
+end;
+
+{ ---------------------------------------------------------------------
+  Effects rack (bottom-left pane) - ported from DysEffectsRack.pas's own
+  TDysEffectBox.BuildParams (src/tui, read-only reference), same names
+  and ranges, just appended into a flat array instead of constructing a
+  TScrollBar/TInputLine pair per parameter: MPTI has no per-row labelled-
+  slider widget (mpti.md's widget list doesn't call for one, see this
+  file's header comment on what's in scope to add to MPTI itself), and
+  this pane doesn't have the room for one regardless - Left/Right nudges
+  the value shown on the currently selected parameter row directly, the
+  same "value's already live, no separate Apply step" wiring the
+  original's direct-field-pointer bindings had. Every field the original
+  exposed is exposed here, including its handful of discrete mode/type
+  enums (shown and nudged as plain integers - MPTI has no listbox-in-a-
+  row widget either) - same visible/adjustable parameter set as the FV
+  rack, not new functionality. }
+type
+  TEffParam = record
+    Name: string[10];
+    UnitStr: string[5];
+    Min, Max, Scale: Single;
+    FloatPtr: PSingle;
+    IntPtr: PInteger;
+  end;
+  TEffParamArray = array[0..15] of TEffParam;
+
+procedure EffAddF(var Params: TEffParamArray; var Count: Integer;
+  const AName, AUnitStr: string; AMin, AMax, AScale: Single; APtr: PSingle);
+begin
+  if Count > High(Params) then Exit;
+  Params[Count].Name := AName;
+  Params[Count].UnitStr := AUnitStr;
+  Params[Count].Min := AMin;
+  Params[Count].Max := AMax;
+  Params[Count].Scale := AScale;
+  Params[Count].FloatPtr := APtr;
+  Params[Count].IntPtr := nil;
+  Inc(Count);
+end;
+
+procedure EffAddI(var Params: TEffParamArray; var Count: Integer;
+  const AName, AUnitStr: string; AMin, AMax: Integer; APtr: PInteger);
+begin
+  if Count > High(Params) then Exit;
+  Params[Count].Name := AName;
+  Params[Count].UnitStr := AUnitStr;
+  Params[Count].Min := AMin;
+  Params[Count].Max := AMax;
+  Params[Count].Scale := 1;
+  Params[Count].FloatPtr := nil;
+  Params[Count].IntPtr := APtr;
+  Inc(Count);
+end;
+
+function BuildEffectParams(AKind: Integer; EffectPtr: PEffect; out Params: TEffParamArray): Integer;
+var
+  I, Count, MaxSrcTrack: Integer;
+begin
+  Count := 0;
+  case AKind of
+    Effects.ekLowpass:
+      EffAddF(Params, Count, 'Freq', 'Hz', 20, 20000, 1, @EffectPtr^.LowpassFreqHz);
+    Effects.ekHighpass:
+      EffAddF(Params, Count, 'Freq', 'Hz', 20, 20000, 1, @EffectPtr^.HighpassFreqHz);
+    Effects.ekBandpass:
+      begin
+        EffAddF(Params, Count, 'Freq', 'Hz', 20, 20000, 1, @EffectPtr^.BandpassFreqHz);
+        EffAddF(Params, Count, 'Q', '', 0.1, 10, 10, @EffectPtr^.BandpassQ);
+      end;
+    Effects.ekEQ4:
+      for I := 0 to Effects.MaxEQBands - 1 do
+      begin
+        EffAddF(Params, Count, 'F' + Chr(Ord('1') + I), 'Hz', 20, 20000, 1, @EffectPtr^.EQFreqHz[I]);
+        EffAddF(Params, Count, 'G' + Chr(Ord('1') + I), 'dB', -12, 12, 1, @EffectPtr^.EQGainDb[I]);
+      end;
+    Effects.ekLimiter:
+      begin
+        EffAddF(Params, Count, 'Thresh', 'dB', -24, 0, 1, @EffectPtr^.LimiterThresholdDb);
+        EffAddF(Params, Count, 'Release', 'ms', 10, 500, 1, @EffectPtr^.LimiterReleaseMs);
+      end;
+    Effects.ekChorus:
+      begin
+        EffAddF(Params, Count, 'Rate', 'Hz', 0.05, 5.0, 100, @EffectPtr^.ChorusRateHz);
+        EffAddF(Params, Count, 'Depth', '%', 0, 100, 1, @EffectPtr^.ChorusDepthPercent);
+      end;
+    Effects.ekReverb:
+      begin
+        EffAddI(Params, Count, 'Preset', '', 0, Effects.ReverbPresetCount - 1, @EffectPtr^.ReverbPreset);
+        EffAddF(Params, Count, 'Mix', '%', 0, 100, 1, @EffectPtr^.ReverbMixPercent);
+      end;
+    Effects.ekFlanger:
+      begin
+        EffAddF(Params, Count, 'Rate', 'Hz', 0.05, 5.0, 100, @EffectPtr^.FlangerRateHz);
+        EffAddF(Params, Count, 'Depth', '%', 0, 100, 1, @EffectPtr^.FlangerDepthPercent);
+        EffAddF(Params, Count, 'Feedback', '%', 0, 95, 1, @EffectPtr^.FlangerFeedbackPercent);
+        EffAddF(Params, Count, 'Mix', '%', 0, 100, 1, @EffectPtr^.FlangerMixPercent);
+      end;
+    Effects.ekPhaser:
+      begin
+        EffAddF(Params, Count, 'Rate', 'Hz', 0.05, 5.0, 100, @EffectPtr^.PhaserRateHz);
+        EffAddF(Params, Count, 'Depth', '%', 0, 100, 1, @EffectPtr^.PhaserDepthPercent);
+        EffAddF(Params, Count, 'Feedback', '%', 0, 95, 1, @EffectPtr^.PhaserFeedbackPercent);
+        EffAddF(Params, Count, 'Mix', '%', 0, 100, 1, @EffectPtr^.PhaserMixPercent);
+      end;
+    Effects.ekSidechain:
+      begin
+        MaxSrcTrack := Project.TrackCount - 1;
+        if MaxSrcTrack < 0 then MaxSrcTrack := 0;
+        EffAddI(Params, Count, 'SrcTrk', '', 0, MaxSrcTrack, @EffectPtr^.SidechainSourceTrack);
+        EffAddF(Params, Count, 'Thresh', 'dB', -60, 0, 1, @EffectPtr^.SidechainThresholdDb);
+        EffAddF(Params, Count, 'Attack', 'ms', 1, 200, 1, @EffectPtr^.SidechainAttackMs);
+        EffAddF(Params, Count, 'Release', 'ms', 10, 1000, 1, @EffectPtr^.SidechainReleaseMs);
+        EffAddF(Params, Count, 'Strength', '%', 0, 100, 1, @EffectPtr^.SidechainStrengthPercent);
+      end;
+    Effects.ekDrowning:
+      begin
+        EffAddF(Params, Count, 'Tone', 'Hz', 20, 20000, 1, @EffectPtr^.DrowningToneHz);
+        EffAddF(Params, Count, 'WRate', 'Hz', 0.05, 5.0, 100, @EffectPtr^.DrowningWarbleRateHz);
+        EffAddF(Params, Count, 'WDepth', '%', 0, 100, 1, @EffectPtr^.DrowningWarbleDepthPercent);
+        EffAddF(Params, Count, 'Size', '%', 0, 100, 1, @EffectPtr^.DrowningSizePercent);
+        EffAddF(Params, Count, 'Decay', '%', 0, 100, 1, @EffectPtr^.DrowningDecayPercent);
+        EffAddF(Params, Count, 'Mix', '%', 0, 100, 1, @EffectPtr^.DrowningMixPercent);
+      end;
+    Effects.ekTuner:
+      ; { read-only - no user parameters, see Effects.pas's own note }
+    Effects.ekOverdrive:
+      begin
+        EffAddF(Params, Count, 'Freq', 'Hz', 20, 20000, 1, @EffectPtr^.OverdriveFreqHz);
+        EffAddF(Params, Count, 'Q', '', 0.1, 5.0, 20, @EffectPtr^.OverdriveQ);
+        EffAddF(Params, Count, 'Drive', '%', 0, 100, 1, @EffectPtr^.OverdriveDrivePercent);
+        EffAddF(Params, Count, 'Color', '%', 0, 100, 1, @EffectPtr^.OverdriveColorPercent);
+        EffAddF(Params, Count, 'Mix', '%', 0, 100, 1, @EffectPtr^.OverdriveMixPercent);
+      end;
+    Effects.ekQuadraverbReverb:
+      begin
+        EffAddI(Params, Count, 'Type', '', 0, Quadraverb.QVReverbTypeCount - 1, @EffectPtr^.QVReverbType);
+        EffAddF(Params, Count, 'Predelay', 'ms', Quadraverb.QVPredelayMinMs, Quadraverb.QVPredelayMaxMs, 1,
+          @EffectPtr^.QVReverbPredelayMs);
+        EffAddF(Params, Count, 'PreMix', '%', Quadraverb.QVPredelayMixMin, Quadraverb.QVPredelayMixMax, 1,
+          @EffectPtr^.QVReverbPredelayMix);
+        EffAddF(Params, Count, 'Decay', '%', Quadraverb.QVDecayMin, Quadraverb.QVDecayMax, 1,
+          @EffectPtr^.QVReverbDecay);
+        EffAddF(Params, Count, 'Diffuse', '', Quadraverb.QVDiffusionMin, Quadraverb.QVDiffusionMax, 1,
+          @EffectPtr^.QVReverbDiffusion);
+        EffAddF(Params, Count, 'Density', '', Quadraverb.QVDensityMin, Quadraverb.QVDensityMax, 1,
+          @EffectPtr^.QVReverbDensity);
+        EffAddF(Params, Count, 'LowDecay', 'dB', Quadraverb.QVBandDecayMin, Quadraverb.QVBandDecayMax, 1,
+          @EffectPtr^.QVReverbLowDecay);
+        EffAddF(Params, Count, 'HiDecay', 'dB', Quadraverb.QVBandDecayMin, Quadraverb.QVBandDecayMax, 1,
+          @EffectPtr^.QVReverbHighDecay);
+        EffAddF(Params, Count, 'Mix', '%', 0, 100, 1, @EffectPtr^.QVReverbMixPercent);
+      end;
+    Effects.ekQuadraverbDelay:
+      begin
+        EffAddI(Params, Count, 'Type', '', 0, Quadraverb.QVDelayTypeCount - 1, @EffectPtr^.QVDelayType);
+        EffAddF(Params, Count, 'TimeL', 'ms', 0, Quadraverb.QVDelayMonoMaxMs, 1, @EffectPtr^.QVDelayTimeLMs);
+        EffAddF(Params, Count, 'TimeR', 'ms', 0, Quadraverb.QVDelayStereoMaxMs, 1, @EffectPtr^.QVDelayTimeRMs);
+        EffAddF(Params, Count, 'FbkL', '%', 0, Quadraverb.QVDelayFeedbackMax, 1, @EffectPtr^.QVDelayFeedbackL);
+        EffAddF(Params, Count, 'FbkR', '%', 0, Quadraverb.QVDelayFeedbackMax, 1, @EffectPtr^.QVDelayFeedbackR);
+        EffAddF(Params, Count, 'Mix', '%', 0, 100, 1, @EffectPtr^.QVDelayMixPercent);
+      end;
+    Effects.ekExciter422A:
+      begin
+        EffAddF(Params, Count, 'LoContour', 'dB', BBE422A.BBELoContourMinDb, BBE422A.BBELoContourMaxDb, 1,
+          @EffectPtr^.BBELoContourDb);
+        EffAddF(Params, Count, 'Definitn', '%', BBE422A.BBEDefinitionMin, BBE422A.BBEDefinitionMax, 1,
+          @EffectPtr^.BBEDefinition);
+        EffAddF(Params, Count, 'Mix', '%', 0, 100, 1, @EffectPtr^.BBEMixPercent);
+      end;
+    Effects.ekCompressor3630:
+      begin
+        EffAddI(Params, Count, 'Response', '', 0, Alesis3630.A36ResponseCount - 1, @EffectPtr^.C36Response);
+        EffAddI(Params, Count, 'Knee', '', 0, Alesis3630.A36KneeCount - 1, @EffectPtr^.C36Knee);
+        EffAddF(Params, Count, 'Thresh', 'dBu', Alesis3630.A36ThresholdMinDbu, Alesis3630.A36ThresholdMaxDbu, 1,
+          @EffectPtr^.C36ThresholdDbu);
+        EffAddF(Params, Count, 'Ratio', 'x', 1, Alesis3630.A36RatioMaxFinite, 10, @EffectPtr^.C36Ratio);
+        EffAddF(Params, Count, 'Attack', 'ms', Alesis3630.A36AttackMinMs, Alesis3630.A36AttackMaxMs, 10,
+          @EffectPtr^.C36AttackMs);
+        EffAddF(Params, Count, 'Release', 'ms', Alesis3630.A36ReleaseMinMs, Alesis3630.A36ReleaseMaxMs, 1,
+          @EffectPtr^.C36ReleaseMs);
+        EffAddF(Params, Count, 'Output', 'dB', Alesis3630.A36OutputMinDb, Alesis3630.A36OutputMaxDb, 1,
+          @EffectPtr^.C36OutputDb);
+        EffAddF(Params, Count, 'GateThr', 'dBfs', Alesis3630.A36GateThresholdMinDbfs,
+          Alesis3630.A36GateThresholdMaxDbfs, 10, @EffectPtr^.C36GateThresholdDbfs);
+        EffAddF(Params, Count, 'GateRate', 'ms', Alesis3630.A36GateRateMinMs, Alesis3630.A36GateRateMaxMs, 1,
+          @EffectPtr^.C36GateRateMs);
+        EffAddF(Params, Count, 'Mix', '%', 0, 100, 1, @EffectPtr^.C36MixPercent);
+      end;
+    Effects.ekFuzzFZ2:
+      begin
+        EffAddI(Params, Count, 'Mode', '', 0, BossFZ2.FZ2ModeCount - 1, @EffectPtr^.FZ2Mode);
+        EffAddF(Params, Count, 'Gain', '%', BossFZ2.FZ2KnobMin, BossFZ2.FZ2KnobMax, 1, @EffectPtr^.FZ2Gain);
+        EffAddF(Params, Count, 'Treble', '%', BossFZ2.FZ2KnobMin, BossFZ2.FZ2KnobMax, 1, @EffectPtr^.FZ2Treble);
+        EffAddF(Params, Count, 'Bass', '%', BossFZ2.FZ2KnobMin, BossFZ2.FZ2KnobMax, 1, @EffectPtr^.FZ2Bass);
+        EffAddF(Params, Count, 'Level', '%', BossFZ2.FZ2KnobMin, BossFZ2.FZ2KnobMax, 1, @EffectPtr^.FZ2Level);
+        EffAddF(Params, Count, 'Mix', '%', 0, 100, 1, @EffectPtr^.FZ2MixPercent);
+      end;
+  end;
+  Result := Count;
+end;
+
+function EffParamValue(const P: TEffParam): Double;
+begin
+  if Assigned(P.FloatPtr) then Result := P.FloatPtr^
+  else if Assigned(P.IntPtr) then Result := P.IntPtr^
+  else Result := 0;
+end;
+
+procedure EffParamNudge(const P: TEffParam; ADir: Integer);
+var
+  Step, V: Double;
+begin
+  if ADir = 0 then Exit;
+  if Assigned(P.IntPtr) then
+  begin
+    V := P.IntPtr^ + ADir;
+    if V < P.Min then V := P.Min;
+    if V > P.Max then V := P.Max;
+    P.IntPtr^ := Round(V);
+  end
+  else if Assigned(P.FloatPtr) then
+  begin
+    Step := (P.Max - P.Min) / 50;
+    if Step <= 0 then Step := 1;
+    V := P.FloatPtr^ + ADir * Step;
+    if V < P.Min then V := P.Min;
+    if V > P.Max then V := P.Max;
+    P.FloatPtr^ := V;
+  end;
+end;
+
+function EffectKindName(AKind: Integer): string;
+begin
+  case AKind of
+    Effects.ekLowpass: Result := 'Lowpass';
+    Effects.ekHighpass: Result := 'Highpass';
+    Effects.ekBandpass: Result := 'Bandpass';
+    Effects.ekEQ4: Result := '4-Band EQ';
+    Effects.ekLimiter: Result := 'Limiter';
+    Effects.ekChorus: Result := 'Chorus';
+    Effects.ekReverb: Result := 'Reverb';
+    Effects.ekFlanger: Result := 'Flanger';
+    Effects.ekPhaser: Result := 'Phaser';
+    Effects.ekSidechain: Result := 'Sidechain';
+    Effects.ekDrowning: Result := 'Drowning';
+    Effects.ekTuner: Result := 'Tuner';
+    Effects.ekOverdrive: Result := 'Overdrive';
+    Effects.ekQuadraverbReverb: Result := 'QV Reverb';
+    Effects.ekQuadraverbDelay: Result := 'QV Delay';
+    Effects.ekExciter422A: Result := 'Exciter 422A';
+    Effects.ekCompressor3630: Result := 'Comp 3630';
+    Effects.ekFuzzFZ2: Result := 'Fuzz FZ-2';
+  else
+    Result := 'Effect';
+  end;
+end;
+
+const
+  EffectKindOrder: array[0..17] of Integer = (
+    Effects.ekLowpass, Effects.ekHighpass, Effects.ekBandpass, Effects.ekEQ4,
+    Effects.ekLimiter, Effects.ekChorus, Effects.ekReverb, Effects.ekFlanger,
+    Effects.ekPhaser, Effects.ekSidechain, Effects.ekDrowning, Effects.ekTuner,
+    Effects.ekOverdrive, Effects.ekQuadraverbReverb, Effects.ekQuadraverbDelay,
+    Effects.ekExciter422A, Effects.ekCompressor3630, Effects.ekFuzzFZ2
+  );
+
+type
+  TEffRow = record
+    IsHeader: Boolean;
+    EffIdx, ParamIdx: Integer;
+  end;
+  TEffRowArray = array of TEffRow;
+
+function BuildEffectRows(ATrack: Integer): TEffRowArray;
+var
+  I, J, N, PCount: Integer;
+  Params: TEffParamArray;
+begin
+  Result := nil;
+  N := 0;
+  for I := 0 to Project.TrackEffectCount[ATrack] - 1 do
+  begin
+    SetLength(Result, N + 1);
+    Result[N].IsHeader := True;
+    Result[N].EffIdx := I;
+    Result[N].ParamIdx := -1;
+    Inc(N);
+    PCount := BuildEffectParams(Project.TrackEffects[ATrack][I].Kind,
+      @Project.TrackEffects[ATrack][I], Params);
+    for J := 0 to PCount - 1 do
+    begin
+      SetLength(Result, N + 1);
+      Result[N].IsHeader := False;
+      Result[N].EffIdx := I;
+      Result[N].ParamIdx := J;
+      Inc(N);
+    end;
+  end;
+end;
+
+{ Draws and self-handles the effects rack pane for whatever track the
+  timeline cursor (State.CursorTrack) is currently on - rebuilds every
+  frame from Project.TrackEffects directly (no cached rack-widget tree to
+  keep in sync, unlike TDysEffectsContent.RebuildBoxes's own explicit
+  rebuild-on-focus/rebuild-on-mutate calls - immediate mode means this is
+  just always current). Up/Down move the flattened row cursor; Left/Right
+  nudge the value on a parameter row; 'a' opens the add-effect popup;
+  Delete/'x' removes the effect the cursor's row belongs to. }
+procedure DrawEffectsPane(var Core: TMCoreState; var HR: TMHitRegistry; var Buf: TCellBuffer;
+  const R: TMRect; var State: TDysAppState; PaneID: TMWidgetID; Focused: Boolean;
+  const Events: TMInputEventArray);
+var
+  Rows: TEffRowArray;
+  Params: TEffParamArray;
+  PCount, I, Row, Y, CW: Integer;
+  Line: string;
+  Style: TMCellStyle;
+  Names: TStringArray;
+  AddSel: Integer;
+  Hit: TMRect;
+begin
+  if (R.W < 8) or (R.H < 3) then Exit;
+  CW := R.W - 2;
+
+  Rows := BuildEffectRows(State.CursorTrack);
+  if State.EffCursor > High(Rows) then State.EffCursor := High(Rows);
+  if State.EffCursor < 0 then State.EffCursor := 0;
+
+  Hit := MMakeRect(R.X + 1, R.Y + 1, CW, R.H - 2);
+  MRegisterHitRect(HR, PaneID, PaneID, Hit);
+  for I := 0 to High(Events) do
+    if (Events[I].Kind = mekMouse) and (Events[I].Mouse.Action = maPress) and
+       (Events[I].Mouse.Button = mbLeft) and MRectContains(Hit, Events[I].Mouse.X, Events[I].Mouse.Y) then
+      MSetFocus(Core, PaneID, PaneID);
+
+  if Focused and not State.ShowAddEffectMenu then
+    for I := 0 to High(Events) do
+      if Events[I].Kind = mekKey then
+      begin
+        case Events[I].Key.Code of
+          mkUp: if State.EffCursor > 0 then Dec(State.EffCursor);
+          mkDown: if State.EffCursor < High(Rows) then Inc(State.EffCursor);
+          mkLeft, mkRight:
+            if (State.EffCursor >= 0) and (State.EffCursor <= High(Rows)) and
+               not Rows[State.EffCursor].IsHeader then
+            begin
+              PCount := BuildEffectParams(Project.TrackEffects[State.CursorTrack][Rows[State.EffCursor].EffIdx].Kind,
+                @Project.TrackEffects[State.CursorTrack][Rows[State.EffCursor].EffIdx], Params);
+              if Rows[State.EffCursor].ParamIdx < PCount then
+                if Events[I].Key.Code = mkLeft then
+                  EffParamNudge(Params[Rows[State.EffCursor].ParamIdx], -1)
+                else
+                  EffParamNudge(Params[Rows[State.EffCursor].ParamIdx], 1);
+            end;
+          mkDelete:
+            if (State.EffCursor >= 0) and (State.EffCursor <= High(Rows)) then
+            begin
+              Project.RemoveTrackEffect(State.CursorTrack, Rows[State.EffCursor].EffIdx);
+              Rows := BuildEffectRows(State.CursorTrack);
+              if State.EffCursor > High(Rows) then State.EffCursor := High(Rows);
+            end;
+          mkChar:
+            case Events[I].Key.CodePoint of
+              Ord('a'), Ord('A'): State.ShowAddEffectMenu := True;
+              Ord('x'), Ord('X'):
+                if (State.EffCursor >= 0) and (State.EffCursor <= High(Rows)) then
+                begin
+                  Project.RemoveTrackEffect(State.CursorTrack, Rows[State.EffCursor].EffIdx);
+                  Rows := BuildEffectRows(State.CursorTrack);
+                  if State.EffCursor > High(Rows) then State.EffCursor := High(Rows);
+                end;
+            end;
+        end;
+      end;
+
+  Y := R.Y + 1;
+  if Length(Rows) = 0 then
+    DrawText(Buf, R.X + 1, Y, Copy('(no effects - a: add)', 1, CW))
+  else
+    for Row := 0 to High(Rows) do
+    begin
+      if Y > R.Y + R.H - 2 then Break;
+      if Focused and (Row = State.EffCursor) then Style := [csReverse] else Style := [];
+      if Rows[Row].IsHeader then
+      begin
+        Line := IntToStr(Rows[Row].EffIdx + 1) + '. ' +
+          EffectKindName(Project.TrackEffects[State.CursorTrack][Rows[Row].EffIdx].Kind) + '  [x]';
+        DrawText(Buf, R.X + 1, Y, Copy(Line, 1, CW), MDefaultFg, MDefaultBg, Style + [csBold]);
+      end
+      else
+      begin
+        PCount := BuildEffectParams(Project.TrackEffects[State.CursorTrack][Rows[Row].EffIdx].Kind,
+          @Project.TrackEffects[State.CursorTrack][Rows[Row].EffIdx], Params);
+        if Rows[Row].ParamIdx < PCount then
+          Line := '   ' + Params[Rows[Row].ParamIdx].Name + ': ' +
+            FormatFloat('0.##', EffParamValue(Params[Rows[Row].ParamIdx])) + Params[Rows[Row].ParamIdx].UnitStr
+        else
+          Line := '';
+        DrawText(Buf, R.X + 1, Y, Copy(Line, 1, CW), MDefaultFg, MDefaultBg, Style);
+      end;
+      Inc(Y);
+    end;
+
+  if State.ShowAddEffectMenu then
+  begin
+    SetLength(Names, Length(EffectKindOrder));
+    for I := 0 to High(EffectKindOrder) do
+      Names[I] := EffectKindName(EffectKindOrder[I]);
+    AddSel := MDropdownList(Core, HR, Buf, 'effects/addmenu', PaneID, R.X + 2, R.Y + 2, Names, Events);
+    if AddSel >= 0 then
+    begin
+      Project.AddTrackEffect(State.CursorTrack, EffectKindOrder[AddSel]);
+      State.ShowAddEffectMenu := False;
+    end
+    else if AddSel = -2 then
+      State.ShowAddEffectMenu := False;
+  end;
+end;
+
+{ ---------------------------------------------------------------------
+  Waveform pane (bottom-right) - follows whatever clip the timeline
+  cursor is currently sitting over on State.CursorTrack (no separate
+  "mark" key like the FV rack's 'k' - CursorFrame already IS "where the
+  cursor is", so there is nothing a mark step would add here). Peaks
+  are cached (State.WaveCache*/WavePeaks) and only recomputed when the
+  marked clip's identity actually changes, same reasoning
+  TDysWaveformContent.SetClip's own comment gives for computing once per
+  mark rather than once per Draw. Renders via braille dot patterns when
+  the terminal's own locale reports UTF-8 (Caps.UnicodeOk, negotiated at
+  startup - see MptiCaps' own comment on why that's a runtime, not
+  compile-time, decision: one binary, checked fresh against $LANG every
+  run), falling back to the plain full-block glyph DysWidgets.
+  WaveRowGlyph used otherwise - never a hard build-time choice between
+  two binaries. }
+procedure DrawWaveformBlocks(var Buf: TCellBuffer; X, Y, W, H: Integer; const Peaks: TWaveformPeaks);
+var
+  Col, Row, BinCount, BinLo, BinHi, I: Integer;
+  MinV, MaxV, MidRow, Top, Bot, OverlapTop, OverlapBot: Double;
+begin
+  BinCount := Length(Peaks.Maxs);
+  if BinCount = 0 then Exit;
+  MidRow := H / 2;
+  for Col := 0 to W - 1 do
+  begin
+    BinLo := (Col * BinCount) div W;
+    BinHi := ((Col + 1) * BinCount) div W - 1;
+    if BinHi < BinLo then BinHi := BinLo;
+    if BinHi > BinCount - 1 then BinHi := BinCount - 1;
+    MinV := Peaks.Mins[BinLo];
+    MaxV := Peaks.Maxs[BinLo];
+    for I := BinLo + 1 to BinHi do
+    begin
+      if Peaks.Mins[I] < MinV then MinV := Peaks.Mins[I];
+      if Peaks.Maxs[I] > MaxV then MaxV := Peaks.Maxs[I];
+    end;
+    Top := MidRow - MaxV * MidRow;
+    Bot := MidRow - MinV * MidRow;
+    if Bot < Top + 0.02 then Bot := Top + 0.02;
+    for Row := 0 to H - 1 do
+    begin
+      OverlapTop := Top - Row;
+      if OverlapTop < 0 then OverlapTop := 0;
+      OverlapBot := Bot - Row;
+      if OverlapBot > 1 then OverlapBot := 1;
+      if (OverlapBot > OverlapTop) and (OverlapBot - OverlapTop >= 0.5) then
+        MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X + Col, Y + Row, BlockChar,
+          MDefaultFg, MDefaultBg, []);
+    end;
+  end;
+end;
+
+procedure DrawWaveformBraille(var Buf: TCellBuffer; X, Y, W, H: Integer; const Peaks: TWaveformPeaks);
+const
+  DotBits: array[0..3, 0..1] of Integer = ((1, 8), (2, 16), (4, 32), (64, 128));
+var
+  Col, Row, S, BinCount, BinLo, BinHi, I, Bits: Integer;
+  MinV, MaxV, MidRow, Top, Bot, SubTop, SubBot, OverlapTop, OverlapBot: Double;
+  Cp: TMUInt32;
+begin
+  BinCount := Length(Peaks.Maxs);
+  if BinCount = 0 then Exit;
+  MidRow := H / 2;
+  for Col := 0 to W - 1 do
+  begin
+    BinLo := (Col * BinCount) div W;
+    BinHi := ((Col + 1) * BinCount) div W - 1;
+    if BinHi < BinLo then BinHi := BinLo;
+    if BinHi > BinCount - 1 then BinHi := BinCount - 1;
+    MinV := Peaks.Mins[BinLo];
+    MaxV := Peaks.Maxs[BinLo];
+    for I := BinLo + 1 to BinHi do
+    begin
+      if Peaks.Mins[I] < MinV then MinV := Peaks.Mins[I];
+      if Peaks.Maxs[I] > MaxV then MaxV := Peaks.Maxs[I];
+    end;
+    Top := MidRow - MaxV * MidRow;
+    Bot := MidRow - MinV * MidRow;
+    if Bot < Top + 0.02 then Bot := Top + 0.02;
+    for Row := 0 to H - 1 do
+    begin
+      Bits := 0;
+      for S := 0 to 3 do
+      begin
+        SubTop := Row + S / 4;
+        SubBot := Row + (S + 1) / 4;
+        OverlapTop := Top;
+        if OverlapTop < SubTop then OverlapTop := SubTop;
+        OverlapBot := Bot;
+        if OverlapBot > SubBot then OverlapBot := SubBot;
+        if OverlapBot > OverlapTop then
+          Bits := Bits or DotBits[S][0] or DotBits[S][1];
+      end;
+      if Bits <> 0 then
+      begin
+        Cp := $2800 + TMUInt32(Bits);
+        MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X + Col, Y + Row, Cp,
+          MDefaultFg, MDefaultBg, []);
+      end;
+    end;
+  end;
+end;
+
+procedure DrawWaveformPane(var HR: TMHitRegistry; var Buf: TCellBuffer; const R: TMRect;
+  var State: TDysAppState; PaneID: TMWidgetID; UseBraille: Boolean);
+var
+  ClipIdx, Track: Integer;
+  Clip: TClip;
+  Windowed: TSample;
+  Avail, SrcLen: Int64;
+  CX0, CY0, CW, CH, WaveRows: Integer;
+  Hdr: string;
+begin
+  if (R.W < 6) or (R.H < 3) then Exit;
+  CX0 := R.X + 1;
+  CY0 := R.Y + 1;
+  CW := R.W - 2;
+  CH := R.H - 2;
+
+  { A single whole-pane hit rect standing in for this pane's one and only
+    Tab stop - the view has nothing to interact with (it just follows the
+    timeline cursor), but still needs SOME widget registered under its
+    own PaneID or MFocusCycleInPane/MFocusNextPane (MptiCore.pas) has
+    nothing to land focus on and Shift+Tab would silently skip it. }
+  MRegisterHitRect(HR, PaneID, PaneID, MMakeRect(R.X + 1, R.Y + 1, CW, CH));
+
+  Track := State.CursorTrack;
+  ClipIdx := ClipIndexAtFrame(Track, State.CursorFrame);
+  if ClipIdx < 0 then
+  begin
+    DrawText(Buf, CX0, CY0, Copy('waveform: (place cursor over a clip)', 1, CW));
+    State.WaveCacheClipIdx := -1;
+    Exit;
+  end;
+  Clip := Project.Tracks[Track].Clips[ClipIdx];
+
+  if (State.WaveCacheTrack <> Track) or (State.WaveCacheClipIdx <> ClipIdx) or
+     (State.WaveCacheSampleID <> Clip.SampleID) then
+  begin
+    State.WaveCacheTrack := Track;
+    State.WaveCacheClipIdx := ClipIdx;
+    State.WaveCacheSampleID := Clip.SampleID;
+    State.WavePeaks.Mins := nil;
+    State.WavePeaks.Maxs := nil;
+    if (Clip.SampleID >= 0) and (Clip.SampleID <= High(Project.SamplePool)) then
+    begin
+      Windowed := Project.SamplePool[Clip.SampleID];
+      Avail := Windowed.FrameCount - Clip.Offset;
+      if Avail < 0 then Avail := 0;
+      SrcLen := Project.ClipSourceLength(Clip);
+      if SrcLen < Avail then Avail := SrcLen;
+      if (Windowed.Data <> nil) and (Avail > 0) then
+      begin
+        Windowed.Data := @Windowed.Data[Clip.Offset * Windowed.Channels];
+        Windowed.FrameCount := Avail;
+        State.WavePeaks := Waveform.ComputeWaveformPeaks(Windowed);
+      end;
+    end;
+  end;
+
+  Hdr := 'waveform: sample ' + IntToStr(Clip.SampleID) + '  gain ' +
+    FormatFloat('0.00', Clip.Gain) + '  detune ' + FormatFloat('0.0', Clip.PitchSemitones) + 'st';
+  DrawText(Buf, CX0, CY0, Copy(Hdr, 1, CW));
+
+  WaveRows := CH - 1;
+  if (WaveRows < 1) or (Length(State.WavePeaks.Maxs) = 0) then Exit;
+
+  if UseBraille then
+    DrawWaveformBraille(Buf, CX0, CY0 + 1, CW, WaveRows, State.WavePeaks)
+  else
+    DrawWaveformBlocks(Buf, CX0, CY0 + 1, CW, WaveRows, State.WavePeaks);
+end;
+
 procedure RunDysnomiaMpti;
 var
   D: TMDriverState;
@@ -1223,16 +1968,17 @@ var
   Layout: TDysMptiLayout;
   MenuPaneID: TMWidgetID;
   TransportPaneID, TempoID, FileListID, TrackListID, TimelineID: TMWidgetID;
+  EffectsPaneID, WaveformPaneID: TMWidgetID;
   TempoLabel: string;
   TempoW, TempoX: Integer;
   OpenMenu: Integer;
   FileDropSel, EditDropSel, HelpDropSel: Integer;
   ShowFileDrop, ShowEditDrop, ShowHelpDrop: Boolean;
   State: TDysAppState;
-  PaneIDs: array[0..3] of TMWidgetID;
+  PaneIDs: array[0..5] of TMWidgetID;
   FocusIdx: Integer;
   Backward: Boolean;
-  TX, StopX, PlayX, IntervalX: Integer;
+  TX, StopX, PlayX, IntervalX, RecX: Integer;
   R: TMRect;
   TempoVal: Double;
   TempoCode: Word;
@@ -1253,7 +1999,8 @@ begin
       Exit;
     end;
 
-    D.Caps := MCapsFromEnv(GetEnvironmentVariable('TERM'), GetEnvironmentVariable('COLORTERM'));
+    D.Caps := MCapsFromEnv(GetEnvironmentVariable('TERM'), GetEnvironmentVariable('COLORTERM'),
+      GetEnvironmentVariable('LANG'));
     MEnableRawMode(D);
     MInstallResizeHandler(D);
     MEnableTerminalModes(D);
@@ -1266,10 +2013,14 @@ begin
       FileListID := MWidgetID('files/list');
       TrackListID := MWidgetID('tracks/list');
       TimelineID := MWidgetID('timeline/canvas');
+      EffectsPaneID := MWidgetID('dysnomia/effects');
+      WaveformPaneID := MWidgetID('dysnomia/waveform');
       PaneIDs[0] := TransportPaneID;
       PaneIDs[1] := FileListID;
       PaneIDs[2] := TimelineID;
       PaneIDs[3] := TrackListID;
+      PaneIDs[4] := EffectsPaneID;
+      PaneIDs[5] := WaveformPaneID;
 
       FillChar(State, SizeOf(State), 0);
       State.CursorTrack := 0;
@@ -1286,6 +2037,11 @@ begin
       State.LoopEnd := -1;
       State.ResizeActive := False;
       State.ResizeClipIndex := -1;
+      State.EffCursor := 0;
+      State.RecordTrackIndex := -1;
+      State.WaveCacheTrack := -1;
+      State.WaveCacheClipIdx := -1;
+      State.WaveCacheSampleID := -1;
       { One random colour per track slot, all MaxTracks of them up front
         (not just Project.TrackCount's current value) so a track added
         later already has one waiting - same "Randomize once" shape
@@ -1331,9 +2087,22 @@ begin
           modal is up, since none of the four docks are interactive then. }
         FocusIdx := -1;
         if State.ModalKind = dmNone then
-          for I := 0 to 3 do
+          for I := 0 to High(PaneIDs) do
             if PaneIDs[I] = Core.FocusedPane then
               FocusIdx := I;
+
+        { Recording auto-finalizes itself the moment AudioEngineRecordState
+          drops back to Idle on its own (the engine's own recording-length
+          cap - see AudioEngine.MaxRecordSeconds), not just on a manual Rec
+          click - same "poll on the way in, don't wait for a click" shape
+          DysWidgets.TDysToolBar.PollRecordState used. A manual click stops
+          and finalizes immediately from the Rec button's own handler below
+          instead, so this only ever fires for the engine's own auto-stop. }
+        if (State.RecordTrackIndex >= 0) and (AudioEngineRecordState = RecordStateIdle) then
+        begin
+          DoFinalizeRecording(State);
+          State.RecordTrackIndex := -1;
+        end;
 
         Layout := ComputeDysMptiLayout(RState.Back.Width, RState.Back.Height);
         if Layout.TooSmall then
@@ -1344,7 +2113,8 @@ begin
           DrawPaneAt(RState.Back, Layout.FilePane, 'Files', FocusIdx = 1);
           DrawPaneAt(RState.Back, Layout.Timeline, 'Timeline', FocusIdx = 2);
           DrawPaneAt(RState.Back, Layout.TrackPane, 'Trk', FocusIdx = 3);
-          DrawPaneAt(RState.Back, Layout.BottomBar, 'Effects / Waveform', False);
+          DrawPaneAt(RState.Back, Layout.EffectsPane, 'Effects', FocusIdx = 4);
+          DrawPaneAt(RState.Back, Layout.WaveformPane, 'Waveform', FocusIdx = 5);
 
           { The four dock panes and the menu bar only get to consume
             Events while no modal is up - a modal is the only thing
@@ -1390,11 +2160,31 @@ begin
             IntervalNames[State.IntervalIdx], Events) then
             State.IntervalIdx := (State.IntervalIdx + 1) mod Length(IntervalNames);
 
+          { Record - mirrors DysWidgets.TDysToolBar's own Rec button
+            caption states (Rec/Cnt/REC, driven by AudioEngineRecordState).
+            A click while counting in or recording stops+finalizes right
+            away (DoFinalizeRecording); a click while idle starts
+            (DoStartRecording). The engine's own auto-stop-at-cap case is
+            polled and finalized at the top of the frame instead - see
+            that block's own comment. }
+          RecX := IntervalX + 8;
+          if MButton(Core, HR, RState.Back, 'toolbar/record', TransportPaneID, RecX, R.Y + 1,
+            RecordButtonCaption(AudioEngineRecordState), Events) then
+          begin
+            if AudioEngineRecordState <> RecordStateIdle then
+            begin
+              DoFinalizeRecording(State);
+              State.RecordTrackIndex := -1;
+            end
+            else
+              DoStartRecording(State);
+          end;
+
           TempoLabel := 'Tempo:';
           TempoW := Length(TempoLabel) + 1 + 6;
           TempoX := R.X + R.W - 1 - TempoW;
-          if TempoX < IntervalX + 8 then
-            TempoX := IntervalX + 8; { narrow terminal: just follow Interval instead of overlapping it }
+          if TempoX < RecX + 8 then
+            TempoX := RecX + 8; { narrow terminal: just follow Rec instead of overlapping it }
           DrawText(RState.Back, TempoX, R.Y + 1, TempoLabel);
           MTextInput(Core, HR, RState.Back, 'toolbar/tempo', TransportPaneID,
             TempoX + Length(TempoLabel) + 1, R.Y + 1, 6, State.TempoText, Events);
@@ -1420,8 +2210,14 @@ begin
             State.FileSelected, State.FileScroll, Events);
           if MIsFocused(Core, FileListID) then
             for I := 0 to High(Events) do
-              if (Events[I].Kind = mekKey) and (Events[I].Key.Code = mkEnter) then
-                ActivateFileEntry(State);
+              if Events[I].Kind = mekKey then
+              begin
+                if Events[I].Key.Code = mkEnter then
+                  ActivateFileEntry(State)
+                else if (Events[I].Key.Code = mkChar) and
+                  ((Events[I].Key.CodePoint = Ord('i')) or (Events[I].Key.CodePoint = Ord('I'))) then
+                  SelectFileAsInstrument(State);
+              end;
 
           { Track pane: one row per track, Selected IS State.CursorTrack -
             single source of truth (see this file's header comment). }
@@ -1484,6 +2280,18 @@ begin
                       CancelPending(State);
                   mkChar:
                     case Events[I].Key.CodePoint of
+                      Ord(' '):
+                        { Space toggles Play/Pause with the timeline
+                          focused - same action as the transport bar's own
+                          Play/Pause button, just reachable without
+                          Shift-Tabbing all the way over to it first. }
+                        if AudioEngineIsPlaying then
+                          AudioEngineStop
+                        else if AudioEngineHasClip then
+                        begin
+                          AudioEngineSeek(State.CursorFrame);
+                          AudioEnginePlay;
+                        end;
                       Ord('l'), Ord('L'):
                         { Three-press cycle: start marker, end marker,
                           clear - ported from DysTimeline's own 'l' key. }
@@ -1530,6 +2338,13 @@ begin
                     end;
                 end;
 
+          { Effects rack / waveform panes - both self-checked against
+            Events/HR, same "not a stock MPTI widget" pattern the timeline
+            canvas above already uses. }
+          DrawEffectsPane(Core, HR, RState.Back, Layout.EffectsPane, State, EffectsPaneID,
+            FocusIdx = 4, Events);
+          DrawWaveformPane(HR, RState.Back, Layout.WaveformPane, State, WaveformPaneID, D.Caps.UnicodeOk);
+
           { Menu bar / dropdowns. }
           OpenMenu := MMenuBar(Core, HR, RState.Back, 'dysnomia/menubar', MenuPaneID,
             0, MenuBarRow, ['File', 'Edit', 'Help'], Events);
@@ -1552,14 +2367,14 @@ begin
             FileDropSel := MDropdownList(Core, HR, RState.Back, 'dysnomia/filemenu',
               MenuPaneID, 0, MenuBarRow + 1, FileMenuItems, Events);
             case FileDropSel of
-              FiNew: begin DoFileNew(State); ShowFileDrop := False; end;
-              FiOpen: begin DoFileOpenBegin(State); ShowFileDrop := False; end;
-              FiSave: begin DoFileSave(State); ShowFileDrop := False; end;
-              FiSaveAs: begin DoFileSaveAsBegin(State); ShowFileDrop := False; end;
+              FiNew: begin DoFileNew(State); ShowFileDrop := False; MMenuBarClose(Core, 'dysnomia/menubar'); end;
+              FiOpen: begin DoFileOpenBegin(State); ShowFileDrop := False; MMenuBarClose(Core, 'dysnomia/menubar'); end;
+              FiSave: begin DoFileSave(State); ShowFileDrop := False; MMenuBarClose(Core, 'dysnomia/menubar'); end;
+              FiSaveAs: begin DoFileSaveAsBegin(State); ShowFileDrop := False; MMenuBarClose(Core, 'dysnomia/menubar'); end;
               FiExit: Quit := True;
               -1: ; { still open }
             else
-              ShowFileDrop := False; { -2: cancelled }
+              begin ShowFileDrop := False; MMenuBarClose(Core, 'dysnomia/menubar'); end; { -2: cancelled }
             end;
           end;
 
@@ -1571,9 +2386,13 @@ begin
             begin
               DoShowPreferences(State);
               ShowEditDrop := False;
+              MMenuBarClose(Core, 'dysnomia/menubar');
             end
             else if EditDropSel <> -1 then
+            begin
               ShowEditDrop := False;
+              MMenuBarClose(Core, 'dysnomia/menubar');
+            end;
           end;
 
           if ShowHelpDrop then
@@ -1581,7 +2400,10 @@ begin
             HelpDropSel := MDropdownList(Core, HR, RState.Back, 'dysnomia/helpmenu',
               MenuPaneID, 12, MenuBarRow + 1, HelpMenuItems, Events);
             if HelpDropSel <> -1 then
+            begin
               ShowHelpDrop := False;
+              MMenuBarClose(Core, 'dysnomia/menubar');
+            end;
           end;
 
           { Tab walks every widget in the currently-focused pane; Shift+Tab

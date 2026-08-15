@@ -147,10 +147,26 @@ function MListView(var Core: TMCoreState; var HR: TMHitRegistry; var Buf: TCellB
   N open" every frame to decide whether to also draw its dropdown this
   frame, the same "every frame, not just on change" rationale MToggleButton's
   doc comment already gives for its own Result. Escape closes whatever is
-  open. Returns the currently-open label index, or -1 if none. }
+  open. F10 toggles the bar open/closed too (the universal "activate the
+  menu bar" key every FV/DOS-descended TUI binds) - opens label 0 if
+  nothing was open, closes whatever was open otherwise, regardless of which
+  pane currently holds focus. Returns the currently-open label index, or -1
+  if none. }
 function MMenuBar(var Core: TMCoreState; var HR: TMHitRegistry; var Buf: TCellBuffer;
   const Name: string; PaneID: TMWidgetID; X, Y: Integer; const Items: array of string;
   const Events: TMInputEventArray): Integer;
+
+{ Forces menu bar Name closed (its retained open-index reset to -1) without
+  waiting for an Escape/outside-click event to arrive through MMenuBar's own
+  Events scan. Needed because MMenuBar's open index lives in Core widget
+  state and survives frames where the app doesn't even call MMenuBar (e.g.
+  while a modal dialog owns input) - an app that stops calling MMenuBar for
+  a few frames and then resumes would otherwise find it still reporting the
+  same label "open" with no new click/Escape to close it. Call this
+  wherever the app itself decides a menu selection is finished (a dropdown
+  item was chosen, or the action that item started - e.g. opening a modal -
+  has begun) rather than relying on MMenuBar to infer it. }
+procedure MMenuBarClose(var Core: TMCoreState; const Name: string);
 
 { Bordered popup list of Items at (X, Y) - the shared primitive behind both
   "dropdowns" and "context menus" from mpti.md's TUI Features list, since
@@ -882,10 +898,27 @@ begin
 
   for K := 0 to High(Events) do
     if (Events[K].Kind = mekKey) and (Events[K].Key.Code = mkEscape) then
-      OpenIndex := -1;
+      OpenIndex := -1
+    else if (Events[K].Kind = mekKey) and (Events[K].Key.Code = mkF10) then
+    begin
+      if OpenIndex = -1 then
+      begin
+        if Length(Items) > 0 then OpenIndex := 0;
+      end
+      else
+        OpenIndex := -1;
+    end;
 
   St^.SelectStart := OpenIndex;
   Result := OpenIndex;
+end;
+
+procedure MMenuBarClose(var Core: TMCoreState; const Name: string);
+var
+  St: PMWidgetState;
+begin
+  St := MGetWidgetState(Core, MWidgetID(Name));
+  St^.SelectStart := -1;
 end;
 
 function MDropdownList(var Core: TMCoreState; var HR: TMHitRegistry; var Buf: TCellBuffer;
