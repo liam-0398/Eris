@@ -180,10 +180,42 @@ function MDropdownList(var Core: TMCoreState; var HR: TMHitRegistry; var Buf: TC
   no ID/state: a pane's own identity, if it needs one for focus routing,
   belongs to whatever PaneID the caller already threads through the widgets
   drawn inside it - a border by itself has nothing to focus. Border glyphs
-  are plain ASCII ('+'/'-'/'|'), not Unicode box-drawing, so this renders
-  correctly on the oldest terminal MPTI has to support (hard requirement
-  6 - Tiger's stock xterm) without any capability check. }
+  are Unicode box-drawing (U+2500 family), MPTI's unconditional default -
+  see MDrawPane's own implementation comment for why that's safe even on
+  the oldest terminal MPTI targets (hard requirement 6 - Tiger's stock
+  xterm). }
 procedure MDrawPane(var Buf: TCellBuffer; X, Y, W, H: Integer; const Title: string);
+
+type
+  { One ruler/grid tick: Col is 0-based within the caller's own Width: the
+    caller has already done the frame/pixel-to-column math (mpti.md has no
+    opinion on what a "bar", "second", or zoom level means - see
+    MTimelineRuler's own comment). Major marks a bar/beat-style tick drawn
+    bold; Label_ is only ever drawn for a Major tick, and only when the
+    caller asks for labels at all (see DrawLabels). }
+  TMRulerTick = record
+    Col: Integer;
+    Major: Boolean;
+    Label_: string;
+  end;
+  TMRulerTickArray = array of TMRulerTick;
+
+{ Draws one row of tick marks at each Ticks[].Col - a plain '|' for a
+  minor tick, bold for a Major one, with Ticks[].Label_ printed just after
+  a Major tick when DrawLabels is set. This is the "Timeline Ruler
+  primitive" from mpti.md's TUI Features list; the same call also works as
+  a per-row grid-line overlay with DrawLabels off, since both are the
+  identical "mark these columns" shape at different rows - the same
+  "mechanism here, policy in the app" split MptiLayout and MMenuBar+
+  MDropdownList's own comments already describe elsewhere in this unit.
+  The caller computes Ticks itself: what a bar/beat/second is, the current
+  zoom/snap interval, and any scroll offset are all DAW-specific policy
+  MPTI has no opinion on. Draw-only and additive - columns with no tick
+  are left untouched, so a caller wanting a baseline (dashes, blank) draws
+  that first and calls this on top, same convention MDrawPane's own
+  "clears its interior first" note documents for the opposite case. }
+procedure MTimelineRuler(var Buf: TCellBuffer; X, Y, Width: Integer;
+  const Ticks: TMRulerTickArray; DrawLabels: Boolean);
 
 { Single-cell status light - the "indicator lights" widget from mpti.md's
   TUI Features list. Deliberately the simplest possible shape (draw-only,
@@ -991,6 +1023,33 @@ begin
       MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, TX, Y, Ord(Title[I]),
         MDefaultFg, MDefaultBg, []);
       Inc(TX);
+    end;
+  end;
+end;
+
+procedure MTimelineRuler(var Buf: TCellBuffer; X, Y, Width: Integer;
+  const Ticks: TMRulerTickArray; DrawLabels: Boolean);
+var
+  I, Col, LX, K, W: Integer;
+  Style: TMCellStyle;
+begin
+  for I := 0 to High(Ticks) do
+  begin
+    Col := Ticks[I].Col;
+    if (Col < 0) or (Col >= Width) then Continue;
+    if Ticks[I].Major then Style := [csBold] else Style := [];
+    MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X + Col, Y, Ord('|'),
+      MDefaultFg, MDefaultBg, Style);
+    if DrawLabels and Ticks[I].Major and (Ticks[I].Label_ <> '') then
+    begin
+      LX := Col + 1;
+      for K := 1 to Length(Ticks[I].Label_) do
+      begin
+        if LX >= Width then Break;
+        W := MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, X + LX, Y,
+          Ord(Ticks[I].Label_[K]), MDefaultFg, MDefaultBg, [csBold]);
+        Inc(LX, W);
+      end;
     end;
   end;
 end;

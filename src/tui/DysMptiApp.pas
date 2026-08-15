@@ -1000,10 +1000,60 @@ begin
     Result := -1;
 end;
 
+{ Grid/ruler tick positions for the visible width - fixed at quarter-note
+  resolution regardless of the transport's own snap interval (the button
+  up top, IntervalIdx/GridStepFrames): drawing ticks at 1/16 resolution
+  would be unreadable clutter at this app's fixed zoom, so the VISUAL grid
+  stays at quarters while cursor/clip snapping follows whatever interval
+  is actually selected - two different things that happen to share a unit
+  (frames) but not a density. Every 4th quarter (a bar) is marked Major
+  and labelled with its 1-based bar number, per the user's "1.0 2.0 3.0"
+  request. This is DAW-specific policy (what a "bar" is, at this project's
+  tempo) - see MTimelineRuler's own doc comment for why that stays out of
+  MPTI itself. }
+function BuildGridTicks(const State: TDysAppState; CW: Integer): TMRulerTickArray;
+var
+  BarF, QuarterF, F: Int64;
+  FirstQ, LastQ, QIdx, Col: Int64;
+  Count: Integer;
+begin
+  Result := nil;
+  BarF := BarFrames;
+  if (BarF <= 0) or (State.FramesPerCol <= 0) then
+    Exit;
+  QuarterF := BarF div 4;
+  if QuarterF <= 0 then
+    Exit;
+  FirstQ := (State.ViewStartFrame + QuarterF - 1) div QuarterF;
+  LastQ := (State.ViewStartFrame + Int64(CW) * State.FramesPerCol) div QuarterF;
+  Count := 0;
+  for QIdx := FirstQ to LastQ do
+  begin
+    F := QIdx * QuarterF;
+    Col := (F - State.ViewStartFrame) div State.FramesPerCol;
+    if (Col >= 0) and (Col < CW) then
+    begin
+      SetLength(Result, Count + 1);
+      Result[Count].Col := Col;
+      if (QIdx mod 4) = 0 then
+      begin
+        Result[Count].Major := True;
+        Result[Count].Label_ := IntToStr(QIdx div 4 + 1);
+      end
+      else
+      begin
+        Result[Count].Major := False;
+        Result[Count].Label_ := '';
+      end;
+      Inc(Count);
+    end;
+  end;
+end;
+
 procedure DrawTimeline(var Buf: TCellBuffer; const R: TMRect; var State: TDysAppState;
   Focused: Boolean; NowMs: QWord);
 var
-  CX0, CY0, CW, CH, T, Row, I: Integer;
+  CX0, CY0, CW, CH, T, Row, I, Col: Integer;
   Label_: string;
   LblFg, LblBg: TMColor;
   LblStyle: TMCellStyle;
@@ -1012,15 +1062,16 @@ var
   PosSec: Double;
   Header: string;
   FlashOn: Boolean;
-  LoopColor: TMColor;
+  LoopColor, GridColor: TMColor;
+  Ticks: TMRulerTickArray;
 begin
-  if (R.W < TimelineLabelWidth + 4) or (R.H < 3) then
+  if (R.W < TimelineLabelWidth + 4) or (R.H < 4) then
     Exit;
   CX0 := R.X + 1 + TimelineLabelWidth;
   CY0 := R.Y + 1;
   CW := R.W - 2 - TimelineLabelWidth;
   CH := R.H - 2;
-  if (CW < 1) or (CH < 2) then
+  if (CW < 1) or (CH < 3) then
     Exit;
 
   PosSec := State.CursorFrame / AudioEngine.ProjectSampleRate;
@@ -1034,11 +1085,19 @@ begin
     Header := Header + '  [playing]';
   DrawText(Buf, CX0 - TimelineLabelWidth, CY0, Header);
 
+  { Ruler row: quarter-note ticks, bold + bar-numbered every 4th (bar
+    boundary) - MTimelineRuler is MPTI's own generic tick-drawing
+    primitive (mpti.md's Timeline Ruler feature), fed Dysnomia's own idea
+    of where a bar falls (see BuildGridTicks). }
+  Ticks := BuildGridTicks(State, CW);
+  MTimelineRuler(Buf, CX0, CY0 + 1, CW, Ticks, True);
+
+  GridColor := MMakeColor(90, 90, 90);
   FlashOn := (NowMs div 400) mod 2 = 0;
 
   for T := 0 to Project.TrackCount - 1 do
   begin
-    Row := 1 + T;
+    Row := 2 + T;
     if Row >= CH then
       Break;
 
@@ -1059,6 +1118,15 @@ begin
       MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, R.X + 1 + I, CY0 + Row, 32,
         LblFg, LblBg, LblStyle);
     DrawText(Buf, R.X + 1, CY0 + Row, Label_, LblFg, LblBg, LblStyle);
+
+    { Empty-track baseline (dashes) plus the same grid ticks as the ruler,
+      overlaid on top - drawn before clips so a clip cleanly overwrites
+      the grid wherever it actually sits, same raster order MDrawPane's
+      own "clears its interior first" convention follows. }
+    for Col := 0 to CW - 1 do
+      MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, CX0 + Col, CY0 + Row,
+        Ord('-'), GridColor, MDefaultBg, []);
+    MTimelineRuler(Buf, CX0, CY0 + Row, CW, Ticks, False);
 
     for I := 0 to High(Project.Tracks[T].Clips) do
     begin
@@ -1087,22 +1155,20 @@ begin
     end;
   end;
 
-  { Loop markers, drawn on the header row (not per-track - keeps them out
-    of the way of clip blocks, same simplification the header's own
-    single-line summary already makes). }
+  { Loop markers, drawn on the ruler row right alongside the bar ticks. }
   LoopColor := MMakeColor(120, 220, 140);
   if State.LoopStart >= 0 then
   begin
     LoopStartCol := FrameToCol(State.LoopStart, State, CW);
     if LoopStartCol >= 0 then
-      MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, CX0 + LoopStartCol, CY0,
+      MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, CX0 + LoopStartCol, CY0 + 1,
         Ord('L'), LoopColor, MDefaultBg, [csBold]);
   end;
   if State.LoopEnd >= 0 then
   begin
     LoopEndCol := FrameToCol(State.LoopEnd, State, CW);
     if LoopEndCol >= 0 then
-      MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, CX0 + LoopEndCol, CY0,
+      MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, CX0 + LoopEndCol, CY0 + 1,
         Ord('L'), LoopColor, MDefaultBg, [csBold]);
   end;
 
@@ -1110,7 +1176,7 @@ begin
   begin
     PlayCol := FrameToCol(AudioEngineGetPosition, State, CW);
     if PlayCol >= 0 then
-      for Row := 1 to CH - 1 do
+      for Row := 2 to CH - 1 do
         MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, CX0 + PlayCol, CY0 + Row,
           Ord('|'), MMakeColor(255, 80, 80), MDefaultBg, [csBold]);
   end;
