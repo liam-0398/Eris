@@ -1123,7 +1123,7 @@ procedure DrawFileDialogFrame(var Core: TMCoreState; var HR: TMHitRegistry;
 var
   R: TMRect;
   Title: string;
-  ListID, NameID: TMWidgetID;
+  ListID, NameID, OkID, CancelID: TMWidgetID;
   I: Integer;
   Backward: Boolean;
 begin
@@ -1137,14 +1137,27 @@ begin
 
   ListID := MWidgetID('filedlg/list');
   NameID := MWidgetID('filedlg/name');
+  OkID := MWidgetID('filedlg/ok');
+  CancelID := MWidgetID('filedlg/cancel');
 
+  { 4-stop cycle (list/name/OK/Cancel), not the old 2-stop one - OK/Cancel
+    used to be mouse-only (never reachable via Tab, so MButton's own
+    built-in "Enter/Space activates while focused" path - see MButton's
+    doc comment - was dead code here), which is why clicking them felt
+    less reliable than just pressing Enter: Enter only ever worked through
+    the list/name field's own direct kbEnter handlers below, never through
+    the buttons themselves. Now Tab can reach either button and Enter
+    activates it like any other MPTI button. }
   for I := 0 to High(Events) do
     if EventIsFocusPaneKey(Events[I], Backward) then
-      State.FDFocusIdx := (State.FDFocusIdx + 1) mod 2;
-  if State.FDFocusIdx = 1 then
-    MSetFocus(Core, NameID, NameID)
+      State.FDFocusIdx := (State.FDFocusIdx + 1) mod 4;
+  case State.FDFocusIdx of
+    1: MSetFocus(Core, NameID, NameID);
+    2: MSetFocus(Core, OkID, OkID);
+    3: MSetFocus(Core, CancelID, CancelID);
   else
     MSetFocus(Core, ListID, ListID);
+  end;
 
   MListView(Core, HR, Buf, 'filedlg/list', ListID, R.X + 2, R.Y + 2, R.W - 4, R.H - 7,
     State.FDEntries, State.FDSelected, State.FDScroll, Events);
@@ -1161,9 +1174,9 @@ begin
       if (Events[I].Kind = mekKey) and (Events[I].Key.Code = mkEnter) then
         ConfirmFileDialog(State);
 
-  if MButton(Core, HR, Buf, 'filedlg/ok', ListID, R.X + 2, R.Y + R.H - 2, 'OK', Events) then
+  if MButton(Core, HR, Buf, 'filedlg/ok', OkID, R.X + 2, R.Y + R.H - 2, 'OK', Events) then
     ConfirmFileDialog(State);
-  if MButton(Core, HR, Buf, 'filedlg/cancel', ListID, R.X + 14, R.Y + R.H - 2, 'Cancel', Events) then
+  if MButton(Core, HR, Buf, 'filedlg/cancel', CancelID, R.X + 14, R.Y + R.H - 2, 'Cancel', Events) then
     State.ModalKind := dmNone;
 
   for I := 0 to High(Events) do
