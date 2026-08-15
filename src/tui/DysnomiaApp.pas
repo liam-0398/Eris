@@ -681,34 +681,31 @@ begin
             nil, mfInformation or mfOKButton);
           FullScreenRefresh;
         end;
+      { cmEditCopy/Paste/Duplicate's timeline clip-under-cursor fallback
+        (Timeline^.Content^.CopyClipUnderCursor/PasteClipAtCursor/
+        DuplicateClipUnderCursor) was ported to DysMptiApp.pas and removed
+        from DysTimeline.pas - this whole app is unreachable anyway
+        (dysnomia.lpr boots RunDysnomiaMpti, not TDysnomiaApp; this file
+        isn't even in dysnomia.lpr's uses graph any more), kept only as
+        src/tui-freevision-backed reference. The waveform drag-selection
+        branches below are unaffected and still call the still-present
+        DysCopyWaveformSelection/DysDuplicateWaveformSelection/
+        DysPasteWaveformClipboard/ChopWaveformSelectionProc. }
       cmEditCopy:
-        { Same routing as cmEditDelete below: Ctrl+C/V/D are menu-bar
-          hotkeys too (see InitMenuBar), so TMenuBar intercepts them before
-          TDysWaveformContent ever sees the raw key - this is the one place
-          each is handled. A waveform drag-selection wins over the
-          timeline's own clip-under-cursor Copy whenever the bottom pane is
-          showing the waveform AND has a selection; otherwise falls back to
-          the timeline as before. }
-        if not ((ActiveBottomPane <> nil) and ActiveBottomPane^.ShowingWaveform and
+        if (ActiveBottomPane <> nil) and ActiveBottomPane^.ShowingWaveform and
           (ActiveBottomPane^.WaveformView <> nil) and
-          ActiveBottomPane^.WaveformView^.SelActive and
-          DysCopyWaveformSelection) then
-          if Timeline <> nil then
-            Timeline^.Content^.CopyClipUnderCursor;
+          ActiveBottomPane^.WaveformView^.SelActive then
+          DysCopyWaveformSelection;
       cmEditPaste:
         if (ActiveBottomPane <> nil) and ActiveBottomPane^.ShowingWaveform and
           (ActiveBottomPane^.WaveformView <> nil) and
           ActiveBottomPane^.WaveformView^.CursorActive then
-          DysPasteWaveformClipboard
-        else if Timeline <> nil then
-          Timeline^.Content^.PasteClipAtCursor;
+          DysPasteWaveformClipboard;
       cmEditDuplicate:
         if (ActiveBottomPane <> nil) and ActiveBottomPane^.ShowingWaveform and
           (ActiveBottomPane^.WaveformView <> nil) and
           ActiveBottomPane^.WaveformView^.SelActive then
-          DysDuplicateWaveformSelection
-        else if Timeline <> nil then
-          Timeline^.Content^.DuplicateClipUnderCursor;
+          DysDuplicateWaveformSelection;
       cmEditSplit:
         if Timeline <> nil then
           Timeline^.Content^.SplitClipUnderCursor;
@@ -716,17 +713,11 @@ begin
         { The Edit menu's "Del" hotkey (see InitMenuBar) is a Free Vision
           menu-bar hotkey, which TMenuBar/TMenuView.HandleEvent (menus.pas)
           intercepts in the phPreProcess phase of EVERY evKeyDown BEFORE
-          the focused subview - here, TDysWaveformContent - ever sees the
-          raw key, converting it straight to this cmEditDelete command
-          regardless of what's focused. That made the waveform pane's own
-          Delete-a-selection binding (TDysWaveformContent.HandleEvent's old
-          kbDel case, now removed - this is the one place Delete is handled)
-          dead code, since the raw kbDel byte could never reach it. Route
-          here instead: a waveform drag-selection wins over the timeline's
-          own clip-under-cursor delete whenever the bottom pane is actually
-          showing the waveform AND has a selection - that's a strictly more
-          specific, more recently-made choice than "whatever's under the
-          timeline cursor". }
+          the focused subview ever sees the raw key - this is the one place
+          Delete is handled. Timeline's own clip-under-cursor Delete
+          fallback (Timeline^.Content^.DeleteClipUnderCursor) was ported to
+          DysMptiApp.pas and removed from DysTimeline.pas - see this
+          case's own header comment. }
         if (ActiveBottomPane <> nil) and ActiveBottomPane^.ShowingWaveform and
           (ActiveBottomPane^.WaveformView <> nil) and
           ActiveBottomPane^.WaveformView^.SelActive then
@@ -736,9 +727,7 @@ begin
               ActiveBottomPane^.WaveformView^.SelEndFrame);
           ActiveBottomPane^.WaveformView^.SelActive := False;
           ActiveBottomPane^.WaveformView^.DrawView;
-        end
-        else if Timeline <> nil then
-          Timeline^.Content^.DeleteClipUnderCursor;
+        end;
       cmEditPreferences:
         begin
           ShowPreferencesDialog;

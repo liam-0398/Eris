@@ -127,21 +127,17 @@ type
     procedure BeginOverlay(ASampleID: Integer; ALength: Int64);
     procedure CancelOverlay;
     procedure PlaceOverlay;
-    { Clip manipulation "under the cursor" - all five key off the same clip
-      lookup (ClipIndexAtFrame at CursorTrack/CursorFrame) and the same
-      cursor-frame convention 'l' already established (see tui.md's
-      Bindings). Ported from ArrangementView's Copy/Paste/Duplicate/Split/
-      DeleteSelection (src/ui) simplified for a single cursor instead of a
-      selection: there's no multi-clip range-select here, so the clipboard
-      only ever holds one clip. Public so both the direct keys (HandleEvent)
-      and the Edit menu (DysnomiaApp, routed through ActiveTimelineContent)
-      call the same implementation, same as Eris's MainForm/ArrangementView
-      split. }
-    procedure CopyClipUnderCursor;
-    procedure PasteClipAtCursor;
-    procedure DuplicateClipUnderCursor;
+    { Copy/Paste/Duplicate/Delete-under-cursor were ported to
+      DysMptiApp.pas and removed here - see that unit's own
+      CopyClipUnderCursor/PasteClipAtCursor/DuplicateClipUnderCursor/
+      DeleteClipUnderCursor. Split-under-cursor (Ctrl+E) wasn't part of
+      that port, so it stays; key off the same ClipIndexAtFrame(
+      CursorTrack, CursorFrame) lookup 'l' already established (see
+      tui.md's Bindings). Public so both the direct key (HandleEvent) and
+      the Edit menu (DysnomiaApp, routed through ActiveTimelineContent)
+      call the same implementation, same as Eris's MainForm/
+      ArrangementView split. }
     procedure SplitClipUnderCursor;
-    procedure DeleteClipUnderCursor;
     { Enter while ResizeActive/MoveActive - see the field comments above. }
     procedure SolidifyResize;
     procedure SolidifyMove;
@@ -1104,38 +1100,16 @@ begin
           ClearEvent(Event);
           Exit;
         end;
-      { Same operations the Edit menu's Copy/Paste/Duplicate/Split/Delete
-        items call (DysnomiaApp.HandleEvent) - bound directly here too, same
-        dual-binding ArrangementView.KeyDown/MainForm's Edit menu use in
-        Eris, so the shortcuts work with the timeline focused whether or not
-        the menu bar is ever touched. }
-      kbCtrlC:
-        begin
-          CopyClipUnderCursor;
-          ClearEvent(Event);
-          Exit;
-        end;
-      kbCtrlV:
-        begin
-          PasteClipAtCursor;
-          ClearEvent(Event);
-          Exit;
-        end;
-      kbCtrlD:
-        begin
-          DuplicateClipUnderCursor;
-          ClearEvent(Event);
-          Exit;
-        end;
+      { Same operation the Edit menu's Split item calls (DysnomiaApp.
+        HandleEvent) - bound directly here too, same dual-binding
+        ArrangementView.KeyDown/MainForm's Edit menu use in Eris, so the
+        shortcut works with the timeline focused whether or not the menu
+        bar is ever touched. Copy/Paste/Duplicate/Delete (Ctrl+C/V/D, Del)
+        were ported to DysMptiApp.pas and removed here - see this
+        procedure's own header comment. }
       kbCtrlE:
         begin
           SplitClipUnderCursor;
-          ClearEvent(Event);
-          Exit;
-        end;
-      kbDel:
-        begin
-          DeleteClipUnderCursor;
           ClearEvent(Event);
           Exit;
         end;
@@ -1328,53 +1302,13 @@ begin
   DrawView;
 end;
 
-procedure TDysTimelineContent.CopyClipUnderCursor;
-var
-  ClipIdx: Integer;
-begin
-  ClipIdx := ClipIndexAtFrame(CursorTrack, CursorFrame);
-  if ClipIdx < 0 then
-    Exit;
-  ClipboardClip := Project.Tracks[CursorTrack].Clips[ClipIdx];
-  ClipboardClip.Position := 0; { rebased - see the clipboard var's comment }
-  ClipboardHasItem := True;
-end;
-
-procedure TDysTimelineContent.PasteClipAtCursor;
-var
-  NewClip: TClip;
-begin
-  if not ClipboardHasItem then
-    Exit;
-  NewClip := ClipboardClip;
-  NewClip.Position := CursorFrame + NewClip.Position;
-  NewClip.TrackID := CursorTrack;
-  Project.CommitClipToTrack(CursorTrack, NewClip);
-  PushTrackToEngine(CursorTrack);
-  DrawView;
-end;
-
-procedure TDysTimelineContent.DuplicateClipUnderCursor;
-var
-  ClipIdx: Integer;
-  NewClip: TClip;
-begin
-  ClipIdx := ClipIndexAtFrame(CursorTrack, CursorFrame);
-  if ClipIdx < 0 then
-    Exit;
-  NewClip := Project.Tracks[CursorTrack].Clips[ClipIdx];
-  { Immediately after the original, Ableton-style, same as
-    ArrangementView.DuplicateSelection's single-clip branch - not
-    overlapping, not at the cursor. }
-  NewClip.Position := NewClip.Position + NewClip.Length;
-  Project.CommitClipToTrack(CursorTrack, NewClip);
-  PushTrackToEngine(CursorTrack);
-  { Move the cursor onto the duplicate, so a repeated Ctrl+D keeps stacking
-    copies rightward instead of re-duplicating the original every time. }
-  CursorFrame := NewClip.Position;
-  DrawView;
-end;
-
+{ Copy/Paste/Duplicate/Delete-under-cursor were ported to the mpti app
+  (DysMptiApp.pas's CopyClipUnderCursor/PasteClipAtCursor/
+  DuplicateClipUnderCursor/DeleteClipUnderCursor) and removed here - this
+  FV shell is unreachable (dysnomia.lpr boots RunDysnomiaMpti, not
+  TDysnomiaApp), and src/tui-freevision keeps the original byte-identical
+  copy if this is ever needed as reference again. SplitClipUnderCursor
+  (Ctrl+E) stays - it wasn't part of that port. }
 procedure TDysTimelineContent.SplitClipUnderCursor;
 var
   ClipIdx: Integer;
@@ -1429,18 +1363,6 @@ begin
     end;
   end;
   Project.ReplaceTrackClips(CursorTrack, NewClips);
-  PushTrackToEngine(CursorTrack);
-  DrawView;
-end;
-
-procedure TDysTimelineContent.DeleteClipUnderCursor;
-var
-  ClipIdx: Integer;
-begin
-  ClipIdx := ClipIndexAtFrame(CursorTrack, CursorFrame);
-  if ClipIdx < 0 then
-    Exit;
-  Project.RemoveClipAt(CursorTrack, ClipIdx);
   PushTrackToEngine(CursorTrack);
   DrawView;
 end;

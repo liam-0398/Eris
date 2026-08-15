@@ -1636,7 +1636,7 @@ begin
       CursorCol := FrameToCol(State.CursorFrame, State, CW);
       if CursorCol >= 0 then
         MPutCodepointClipped(Buf, 0, 0, Buf.Width, Buf.Height, CX0 + CursorCol, CY0 + Row,
-          Ord(' '), MDefaultFg, MDefaultBg, [csReverse]);
+          BlockChar, MMakeColor(255, 255, 255), MDefaultBg, [csBlink]);
     end;
   end;
 
