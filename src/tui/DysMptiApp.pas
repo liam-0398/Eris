@@ -43,7 +43,7 @@ uses
   MptiTypes, MptiCell, MptiCaps, MptiInput, MptiDriver, MptiRender,
   MptiCore, MptiLayout, MptiWidgets,
   Config, AudioEngine, Project, SampleTypes, WavDecoder, ProjectFile, DysRemoteServer,
-  Effects, Quadraverb, BBE422A, Alesis3630, BossFZ2, Waveform;
+  Effects, Quadraverb, BBE422A, Alesis3630, BossFZ2, Waveform, Math;
 
 const
   { Same numbers as DysGeometry's constants (src/tui/DysGeometry.pas) -
@@ -86,7 +86,7 @@ type
     RunDysnomiaMpti) and only the modal's own draw+handle procedure does -
     the same "one thing owns input this frame" rule a real modal dialog
     needs, done by hand since MPTI has no TDialog/ExecView of its own. }
-  TDysModalKind = (dmNone, dmFileDialog, dmPreferences);
+  TDysModalKind = (dmNone, dmFileDialog, dmPreferences, dmTrackOptions);
   TDysFileDialogMode = (dfmOpen, dfmSaveAs);
 
   TDysAppState = record
@@ -162,6 +162,12 @@ type
       OpenAddEffectMenu's own add-then-append shape. }
     EffCursor: Integer;
     ShowAddEffectMenu: Boolean;
+    { -1 = category list showing; >= 0 = that category's own effect
+      submenu showing (index into EffCatNames/EffCatKinds below). Two
+      levels because a flat 18-item popup (the original single-level
+      MDropdownList this replaced) ran off the bottom of the screen in a
+      short terminal - see DrawEffectsPane's own comment. }
+    AddEffectCatIdx: Integer;
 
     { Recording (transport bar's Rec button, DysStartRecording/
       DysFinalizeRecording ported below) - mirrors DysTimeline's own
@@ -170,6 +176,17 @@ type
       so they live on TDysAppState instead. }
     RecordTrackIndex: Integer;
     RecordStartFrame: Int64;
+
+    { Track options popup (Ctrl+O on the track pane) - CTRL-O is meant as
+      the standard "options popup for whatever's under the cursor" binding
+      across this codebase going forward, not just tracks; this is the
+      first of what should be a growing set of such popups. Gain/Pan are
+      TDysAppState-local text mirrors of Project.TrackVolume/TrackPan,
+      same "type a number, Enter commits, Esc reverts" shape the
+      Preferences dialog's own text rows use. }
+    OptTrack: Integer;
+    OptGainText, OptPanText: string;
+    OptFocusIdx: Integer;
 
     { Waveform pane (bottom-right) peak cache - see DrawWaveformPane's own
       header comment on why this is cached rather than recomputed every
@@ -203,15 +220,15 @@ begin
   Result.TrackPane := MMakeRect(Cols - TrackPaneWidth, BodyTop, TrackPaneWidth, BodyBottom - BodyTop);
   Result.Timeline := MMakeRect(FilePaneWidth, BodyTop, Cols - TrackPaneWidth - FilePaneWidth, BodyBottom - BodyTop);
 
-  { Bottom dock splits Effects (left, gets the extra column on an odd
-    width - param names/values need the room more than the wave shape
-    does) / Waveform (right), same "two docks share the one bottom strip"
+  { Bottom dock splits Waveform (left) / Effects (right, gets the extra
+    column on an odd width - param names/values need the room more than
+    the wave shape does), same "two docks share the one bottom strip"
     layout DysGeometry's own BottomBar gave TDysBottomPane's toggled
     Content/WaveformView - side by side here instead of toggled, since
     MPTI's per-pane focus (Tab/Shift+Tab) already gives each its own
     keyboard-reachable pane with no need to hide one behind the other. }
-  Result.EffectsPane := MMakeRect(0, BodyBottom, (Cols + 1) div 2, BottomBarHeight);
-  Result.WaveformPane := MMakeRect((Cols + 1) div 2, BodyBottom, Cols - (Cols + 1) div 2, BottomBarHeight);
+  Result.WaveformPane := MMakeRect(0, BodyBottom, Cols div 2, BottomBarHeight);
+  Result.EffectsPane := MMakeRect(Cols div 2, BodyBottom, Cols - Cols div 2, BottomBarHeight);
 end;
 
 procedure EnsureDysTrackCount(ACount: Integer);
@@ -987,6 +1004,163 @@ begin
       State.ModalKind := dmNone;
 end;
 
+{ ---------------------------------------------------------------------
+  Track options popup (Ctrl+O on the track pane) - the first of what's
+  meant to be a standard "Ctrl+O on whatever's under the cursor" popup
+  convention across this codebase (see TDysAppState.OptTrack's own
+  comment), so it follows the same small-modal shape DrawFileDialogFrame/
+  DrawPreferencesFrame already established rather than inventing a new
+  one: goes through State.ModalKind (dmTrackOptions), gets the same
+  input-exclusivity gate the other two already get in RunDysnomiaMpti,
+  and edits through a text mirror of the live Project field, Enter/OK to
+  commit. Gain is Project.TrackVolume's own linear multiplier (1.0 =
+  unity, same domain the field is already in); Pan is shown as the whole
+  -100..100 number the old FV track header displayed it as (Project.
+  TrackPan's own comment), converted back to -1.0..1.0 on commit. }
+procedure DoShowTrackOptions(var State: TDysAppState; ATrack: Integer);
+begin
+  if (ATrack < 0) or (ATrack >= Project.TrackCount) then
+    Exit;
+  State.OptTrack := ATrack;
+  State.OptGainText := FormatFloat('0.00', Project.TrackVolume[ATrack]);
+  State.OptPanText := IntToStr(Round(Project.TrackPan[ATrack] * 100));
+  State.OptFocusIdx := 0;
+  State.ModalKind := dmTrackOptions;
+end;
+
+procedure ConfirmTrackOptions(var State: TDysAppState);
+var
+  GainVal: Double;
+  PanVal: Integer;
+begin
+  if (State.OptTrack >= 0) and (State.OptTrack < Project.TrackCount) then
+  begin
+    if TryStrToFloat(State.OptGainText, GainVal) then
+    begin
+      if GainVal < 0 then GainVal := 0;
+      Project.TrackVolume[State.OptTrack] := GainVal;
+    end;
+    if TryStrToInt(State.OptPanText, PanVal) then
+    begin
+      if PanVal < -100 then PanVal := -100;
+      if PanVal > 100 then PanVal := 100;
+      Project.TrackPan[State.OptTrack] := PanVal / 100;
+    end;
+  end;
+  State.ModalKind := dmNone;
+end;
+
+procedure DrawTrackOptionsFrame(var Core: TMCoreState; var HR: TMHitRegistry;
+  var Buf: TCellBuffer; var State: TDysAppState; const Events: TMInputEventArray);
+var
+  R: TMRect;
+  Y, I: Integer;
+  ID: TMWidgetID;
+  Backward: Boolean;
+begin
+  R := ModalRect(Buf.Width, Buf.Height, 34, 10);
+  MDrawPane(Buf, R.X, R.Y, R.W, R.H, 'Track ' + IntToStr(State.OptTrack + 1) + ' Options');
+
+  for I := 0 to High(Events) do
+    if EventIsFocusPaneKey(Events[I], Backward) then
+      State.OptFocusIdx := (State.OptFocusIdx + 1) mod 2; { only 2 fields: forward/backward land the same }
+
+  Y := R.Y + 2;
+  DrawText(Buf, R.X + 2, Y, 'Gain (linear, 1.00 = unity):');
+  Inc(Y);
+  ID := MWidgetID('trackopts/gain');
+  if State.OptFocusIdx = 0 then
+    MSetFocus(Core, ID, ID);
+  MTextInput(Core, HR, Buf, 'trackopts/gain', ID, R.X + 2, Y, 10, State.OptGainText, Events);
+  Inc(Y, 2);
+
+  DrawText(Buf, R.X + 2, Y, 'Pan (-100..100):');
+  Inc(Y);
+  ID := MWidgetID('trackopts/pan');
+  if State.OptFocusIdx = 1 then
+    MSetFocus(Core, ID, ID);
+  MTextInput(Core, HR, Buf, 'trackopts/pan', ID, R.X + 2, Y, 10, State.OptPanText, Events);
+
+  for I := 0 to High(Events) do
+    if (Events[I].Kind = mekKey) and (Events[I].Key.Code = mkEnter) then
+      ConfirmTrackOptions(State);
+
+  if MButton(Core, HR, Buf, 'trackopts/ok', MWidgetID('trackopts/ok'), R.X + 2, R.Y + R.H - 2, 'OK', Events) then
+    ConfirmTrackOptions(State);
+  if MButton(Core, HR, Buf, 'trackopts/cancel', MWidgetID('trackopts/ok'), R.X + 14, R.Y + R.H - 2, 'Cancel', Events) then
+    State.ModalKind := dmNone;
+
+  for I := 0 to High(Events) do
+    if (Events[I].Kind = mekKey) and (Events[I].Key.Code = mkEscape) then
+      State.ModalKind := dmNone;
+end;
+
+{ Draws and self-handles the right-dock track listing: one row per track,
+  offset down 2 rows (R.Y + 3 + T, not R.Y + 1 + T) to line up with the
+  timeline grid's own header+ruler rows (DrawTimeline's Row := 2 + T at
+  CY0 = R.Y + 1, i.e. absolute row R.Y + 3 + T - the exact same formula,
+  so a track's number always sits beside its own lane regardless of
+  which row of the grid the pane happens to start on). Numbers-only
+  (the old "Track N" text didn't fit this pane's 8-column width - see
+  build-dysnomia.sh's own FilePaneWidth/TrackPaneWidth constants).
+  'm'/'s' toggle mute/solo on whichever track State.CursorTrack (shared
+  with the timeline/file panes) is on; Ctrl+O opens the options popup. }
+procedure DrawTrackPane(var Core: TMCoreState; var HR: TMHitRegistry; var Buf: TCellBuffer;
+  const R: TMRect; var State: TDysAppState; PaneID: TMWidgetID; Focused: Boolean;
+  const Events: TMInputEventArray);
+var
+  T, Y, CW: Integer;
+  Fg: TMColor;
+  Style: TMCellStyle;
+  Hit: TMRect;
+  I: Integer;
+begin
+  if (R.W < 3) or (R.H < 4) then Exit;
+  CW := R.W - 2;
+
+  Hit := MMakeRect(R.X + 1, R.Y + 1, CW, R.H - 2);
+  MRegisterHitRect(HR, PaneID, PaneID, Hit);
+  for I := 0 to High(Events) do
+    if (Events[I].Kind = mekMouse) and (Events[I].Mouse.Action = maPress) and
+       (Events[I].Mouse.Button = mbLeft) and MRectContains(Hit, Events[I].Mouse.X, Events[I].Mouse.Y) then
+      MSetFocus(Core, PaneID, PaneID);
+
+  if Focused then
+    for I := 0 to High(Events) do
+      if Events[I].Kind = mekKey then
+        case Events[I].Key.Code of
+          mkUp: if State.CursorTrack > 0 then Dec(State.CursorTrack);
+          mkDown: if State.CursorTrack < Project.TrackCount - 1 then Inc(State.CursorTrack);
+          mkChar:
+            if (Events[I].Key.CodePoint = Ord('o')) and (kmCtrl in Events[I].Key.Mods) then
+              DoShowTrackOptions(State, State.CursorTrack)
+            else
+              case Events[I].Key.CodePoint of
+                Ord('m'), Ord('M'):
+                  Project.TrackEnabled[State.CursorTrack] := not Project.TrackEnabled[State.CursorTrack];
+                Ord('s'), Ord('S'):
+                  Project.TrackSolo[State.CursorTrack] := not Project.TrackSolo[State.CursorTrack];
+              end;
+        end;
+
+  for T := 0 to Project.TrackCount - 1 do
+  begin
+    Y := R.Y + 3 + T;
+    if Y > R.Y + R.H - 2 then Break;
+    if Focused and (T = State.CursorTrack) then
+      Style := [csReverse]
+    else
+      Style := [];
+    if not Project.TrackEnabled[T] then
+      Fg := MMakeColor(220, 70, 70)
+    else if Project.TrackSolo[T] then
+      Fg := MMakeColor(220, 210, 70)
+    else
+      Fg := MDefaultFg;
+    DrawText(Buf, R.X + 1, Y, Copy(IntToStr(T + 1), 1, CW), Fg, MDefaultBg, Style);
+  end;
+end;
+
 { Draws one clip span [APos, APos+ALen) in column space, plus the small
   black leading-edge strip (this file's own visual convention - not an
   MPTI-wide one, see the header comment) that marks where the clip
@@ -1070,7 +1244,7 @@ begin
       if (QIdx mod 4) = 0 then
       begin
         Result[Count].Major := True;
-        Result[Count].Label_ := IntToStr(QIdx div 4 + 1);
+        Result[Count].Label_ := IntToStr(QIdx div 4);
       end
       else
       begin
@@ -1232,15 +1406,6 @@ begin
   end;
 end;
 
-function TrackLabels(Count: Integer): TStringArray;
-var
-  I: Integer;
-begin
-  SetLength(Result, Count);
-  for I := 0 to Count - 1 do
-    Result[I] := 'Track ' + IntToStr(I + 1);
-end;
-
 
 { ---------------------------------------------------------------------
   Instrument tracks - 'i' on a file-browser entry (DysFilePane's own
@@ -1271,6 +1436,98 @@ begin
   Project.TrackInstrumentStart[State.CursorTrack] := 0;
   Project.TrackInstrumentEnd[State.CursorTrack] := Project.InstrumentEndUnset;
   State.StatusMessage := 'Track ' + IntToStr(State.CursorTrack + 1) + ' instrument: ' + Name;
+end;
+
+{ ---------------------------------------------------------------------
+  Dual-octave QWERTY instrument keyboard - ported straight from
+  DysWidgets.DysKeyToSemitoneOffset/DysEffectsRack.TriggerDysKeyboardNote/
+  AdjustDysKeyboardOctave (src/tui, read-only reference; same key table
+  as MainForm.KeyToSemitoneOffset, src/ui), active while the transport
+  pane holds focus - same "the toolbar is where the keyboard lives" home
+  the FV rack used - targeting State.CursorTrack instead of DysTrackPane.
+  SelectedTrackIndex (this file's one shared cursor, see TDysAppState's
+  own header comment). }
+function DysKeyToSemitoneOffsetMpti(AChar: Char; out AOffset: Integer): Boolean;
+begin
+  Result := True;
+  case UpCase(AChar) of
+    'Z': AOffset := 0;
+    'S': AOffset := 1;
+    'X': AOffset := 2;
+    'D': AOffset := 3;
+    'C': AOffset := 4;
+    'V': AOffset := 5;
+    'G': AOffset := 6;
+    'B': AOffset := 7;
+    'H': AOffset := 8;
+    'N': AOffset := 9;
+    'J': AOffset := 10;
+    'M': AOffset := 11;
+    'Q': AOffset := 12;
+    '2': AOffset := 13;
+    'W': AOffset := 14;
+    '3': AOffset := 15;
+    'E': AOffset := 16;
+    'R': AOffset := 17;
+    '5': AOffset := 18;
+    'T': AOffset := 19;
+    '6': AOffset := 20;
+    'Y': AOffset := 21;
+    '7': AOffset := 22;
+    'U': AOffset := 23;
+    'I': AOffset := 24;
+    '9': AOffset := 25;
+    'O': AOffset := 26;
+    '0': AOffset := 27;
+    'P': AOffset := 28;
+  else
+    Result := False;
+  end;
+end;
+
+procedure TriggerInstrumentNote(var State: TDysAppState; ASemitoneOffset: Integer);
+var
+  Track, SampleID, TotalOffset: Integer;
+  Sample: TSample;
+  StartFrame, EndFrame, TrimmedCount: Int64;
+begin
+  Track := State.CursorTrack;
+  SampleID := Project.TrackInstrument[Track];
+  if SampleID < 0 then
+    Exit;
+  Sample := Project.SamplePool[SampleID];
+  StartFrame := Project.TrackInstrumentStart[Track];
+  EndFrame := Project.TrackInstrumentEnd[Track];
+  if StartFrame < 0 then
+    StartFrame := 0;
+  if (EndFrame <= 0) or (EndFrame > Sample.FrameCount) then
+    EndFrame := Sample.FrameCount;
+  TrimmedCount := EndFrame - StartFrame;
+  if TrimmedCount <= 0 then
+    Exit;
+  TotalOffset := ASemitoneOffset + Project.TrackOctave[Track] * 12;
+  AudioEngineTriggerNote(Track, @Sample.Data[StartFrame * Sample.Channels],
+    TrimmedCount, Sample.Channels, TotalOffset,
+    Power(10, Project.TrackInstrumentGainDb[Track] / 20));
+end;
+
+{ Ctrl+Z/Ctrl+X - matches AdjustDysKeyboardOctave's own -4..4 clamp
+  (MainForm.SamplerOctaveDownClick/UpClick's own range, src/ui). }
+procedure AdjustInstrumentOctave(var State: TDysAppState; ADelta: Integer);
+var
+  Track: Integer;
+begin
+  Track := State.CursorTrack;
+  if ADelta < 0 then
+  begin
+    if Project.TrackOctave[Track] > -4 then
+      Dec(Project.TrackOctave[Track]);
+  end
+  else
+  begin
+    if Project.TrackOctave[Track] < 4 then
+      Inc(Project.TrackOctave[Track]);
+  end;
 end;
 
 { ---------------------------------------------------------------------
@@ -1620,12 +1877,31 @@ begin
 end;
 
 const
-  EffectKindOrder: array[0..17] of Integer = (
-    Effects.ekLowpass, Effects.ekHighpass, Effects.ekBandpass, Effects.ekEQ4,
-    Effects.ekLimiter, Effects.ekChorus, Effects.ekReverb, Effects.ekFlanger,
-    Effects.ekPhaser, Effects.ekSidechain, Effects.ekDrowning, Effects.ekTuner,
-    Effects.ekOverdrive, Effects.ekQuadraverbReverb, Effects.ekQuadraverbDelay,
-    Effects.ekExciter422A, Effects.ekCompressor3630, Effects.ekFuzzFZ2
+  { Same category grouping as the LCL rack's own BuildEffectsMenu (src/ui/
+    MainForm.pas, read-only reference) - a flat 18-item popup (this file's
+    first cut) ran off the bottom of a normal-height terminal, the same
+    problem a flat Free Vision popup menu would have had, which is why
+    the LCL rack already groups these. EffCatKinds pads unused slots with
+    Effects.ekNone (0), which is never itself a selectable effect, so it
+    is a safe sentinel; EffCatCount is how many of each row are real. }
+  EffCatNames: array[0..11] of string = (
+    'Filters', 'EQ', 'Modulation', 'Distortion', 'Reverb', 'Delay',
+    'Dynamics', 'Exciter', 'Pedals', 'Utility', 'Mastering', 'Experimental'
+  );
+  EffCatCount: array[0..11] of Integer = (3, 1, 3, 1, 2, 1, 1, 1, 1, 2, 1, 1);
+  EffCatKinds: array[0..11, 0..2] of Integer = (
+    (Effects.ekLowpass, Effects.ekHighpass, Effects.ekBandpass),
+    (Effects.ekEQ4, Effects.ekNone, Effects.ekNone),
+    (Effects.ekChorus, Effects.ekFlanger, Effects.ekPhaser),
+    (Effects.ekOverdrive, Effects.ekNone, Effects.ekNone),
+    (Effects.ekReverb, Effects.ekQuadraverbReverb, Effects.ekNone),
+    (Effects.ekQuadraverbDelay, Effects.ekNone, Effects.ekNone),
+    (Effects.ekCompressor3630, Effects.ekNone, Effects.ekNone),
+    (Effects.ekExciter422A, Effects.ekNone, Effects.ekNone),
+    (Effects.ekFuzzFZ2, Effects.ekNone, Effects.ekNone),
+    (Effects.ekSidechain, Effects.ekTuner, Effects.ekNone),
+    (Effects.ekLimiter, Effects.ekNone, Effects.ekNone),
+    (Effects.ekDrowning, Effects.ekNone, Effects.ekNone)
   );
 
 type
@@ -1765,19 +2041,42 @@ begin
       Inc(Y);
     end;
 
-  if State.ShowAddEffectMenu then
+  if State.ShowAddEffectMenu and (State.AddEffectCatIdx < 0) then
   begin
-    SetLength(Names, Length(EffectKindOrder));
-    for I := 0 to High(EffectKindOrder) do
-      Names[I] := EffectKindName(EffectKindOrder[I]);
-    AddSel := MDropdownList(Core, HR, Buf, 'effects/addmenu', PaneID, R.X + 2, R.Y + 2, Names, Events);
+    { Level 1: category list - clamped to the pane's own height so it
+      never runs off the bottom of a short terminal (the bug this
+      cascade was added to fix: a flat 18-item popup routinely did). }
+    SetLength(Names, Length(EffCatNames));
+    for I := 0 to High(EffCatNames) do
+      Names[I] := EffCatNames[I];
+    AddSel := MDropdownList(Core, HR, Buf, 'effects/addmenu/cat', PaneID,
+      R.X + 2, Min(R.Y + 2, Buf.Height - (Length(Names) + 2)), Names, Events);
     if AddSel >= 0 then
-    begin
-      Project.AddTrackEffect(State.CursorTrack, EffectKindOrder[AddSel]);
-      State.ShowAddEffectMenu := False;
-    end
+      State.AddEffectCatIdx := AddSel
     else if AddSel = -2 then
       State.ShowAddEffectMenu := False;
+  end
+  else if State.ShowAddEffectMenu and (State.AddEffectCatIdx >= 0) then
+  begin
+    { Level 2: the chosen category's own effects - cascaded to the right
+      of where the category list was, same "cascading submenu" shape a
+      Free Vision popup menu's own sub-items would show. Escape/outside-
+      click here backs up to the category list rather than closing the
+      whole popup, so picking the wrong category isn't a full restart. }
+    SetLength(Names, EffCatCount[State.AddEffectCatIdx]);
+    for I := 0 to High(Names) do
+      Names[I] := EffectKindName(EffCatKinds[State.AddEffectCatIdx][I]);
+    AddSel := MDropdownList(Core, HR, Buf, 'effects/addmenu/sub', PaneID,
+      R.X + 2 + Length(EffCatNames[State.AddEffectCatIdx]) + 4,
+      Min(R.Y + 2 + State.AddEffectCatIdx, Buf.Height - (Length(Names) + 2)), Names, Events);
+    if AddSel >= 0 then
+    begin
+      Project.AddTrackEffect(State.CursorTrack, EffCatKinds[State.AddEffectCatIdx][AddSel]);
+      State.ShowAddEffectMenu := False;
+      State.AddEffectCatIdx := -1;
+    end
+    else if AddSel = -2 then
+      State.AddEffectCatIdx := -1; { back to the category list, not fully closed }
   end;
 end;
 
@@ -1986,6 +2285,7 @@ var
   NowMs: QWord;
   PalIdx, ClipIdx: Integer;
   LoopCandidate: Int64;
+  NoteOffset: Integer;
 begin
   ConfigLoad;
   AudioEngineInit;
@@ -2038,7 +2338,9 @@ begin
       State.ResizeActive := False;
       State.ResizeClipIndex := -1;
       State.EffCursor := 0;
+      State.AddEffectCatIdx := -1;
       State.RecordTrackIndex := -1;
+      State.OptTrack := -1;
       State.WaveCacheTrack := -1;
       State.WaveCacheClipIdx := -1;
       State.WaveCacheSampleID := -1;
@@ -2203,6 +2505,30 @@ begin
               State.TempoText := IntToStr(Round(TempoVal));
             end;
 
+          { Dual-octave QWERTY instrument keyboard - live while the
+            transport pane holds focus, same home the FV rack's own
+            keyboard had. Guarded off whenever the Tempo field itself
+            currently owns text-edit focus, so typing a tempo doesn't
+            also trigger notes for any digit/letter that happens to
+            double as a keyboard-note key (DysKeyToSemitoneOffsetMpti's
+            own table includes several digits). Ctrl+Z/Ctrl+X shift the
+            octave; every other mapped key triggers a note. }
+          if (FocusIdx = 0) and not MIsFocused(Core, TempoID) then
+            for I := 0 to High(Events) do
+              if (Events[I].Kind = mekKey) and (Events[I].Key.Code = mkChar) and
+                 (Events[I].Key.CodePoint >= 32) and (Events[I].Key.CodePoint <= 126) then
+              begin
+                if (kmCtrl in Events[I].Key.Mods) and
+                   (Events[I].Key.CodePoint in [Ord('z'), Ord('Z')]) then
+                  AdjustInstrumentOctave(State, -1)
+                else if (kmCtrl in Events[I].Key.Mods) and
+                   (Events[I].Key.CodePoint in [Ord('x'), Ord('X')]) then
+                  AdjustInstrumentOctave(State, 1)
+                else if not (kmCtrl in Events[I].Key.Mods) and
+                   DysKeyToSemitoneOffsetMpti(Chr(Events[I].Key.CodePoint), NoteOffset) then
+                  TriggerInstrumentNote(State, NoteOffset);
+              end;
+
           { File browser. }
           R := Layout.FilePane;
           MListView(Core, HR, RState.Back, 'files/list', FileListID,
@@ -2220,11 +2546,12 @@ begin
               end;
 
           { Track pane: one row per track, Selected IS State.CursorTrack -
-            single source of truth (see this file's header comment). }
+            single source of truth (see this file's header comment). Not a
+            stock MPTI widget any more (was MListView) - see DrawTrackPane's
+            own header comment for why (row alignment with the timeline
+            grid, mute/solo colour, Ctrl+O). }
           R := Layout.TrackPane;
-          MListView(Core, HR, RState.Back, 'tracks/list', TrackListID,
-            R.X + 1, R.Y + 1, R.W - 2, R.H - 2, TrackLabels(Project.TrackCount),
-            State.CursorTrack, State.TrackScroll, Events);
+          DrawTrackPane(Core, HR, RState.Back, R, State, TrackListID, FocusIdx = 3, Events);
 
           { Timeline canvas - self-checked against Events/HR the same
             pattern MButton's own doc comment describes, since this isn't
@@ -2429,7 +2756,9 @@ begin
           if State.ModalKind = dmFileDialog then
             DrawFileDialogFrame(Core, HR, RState.Back, State, Events)
           else if State.ModalKind = dmPreferences then
-            DrawPreferencesFrame(Core, HR, RState.Back, State, Events);
+            DrawPreferencesFrame(Core, HR, RState.Back, State, Events)
+          else if State.ModalKind = dmTrackOptions then
+            DrawTrackOptionsFrame(Core, HR, RState.Back, State, Events);
 
           if State.StatusMessage <> '' then
             DrawText(RState.Back, 0, RState.Back.Height - 1, State.StatusMessage)
