@@ -1002,7 +1002,11 @@ begin
   State.FDMode := dfmSaveAs;
   State.FDCurDir := IncludeTrailingPathDelimiter(StartDir);
   State.FDNameText := StartName;
-  State.FDFocusIdx := 0;
+  { Save As opens with the Name field focused, not the file list - typing
+    a name is the whole point of this dialog, and defaulting focus to the
+    list (as Open correctly does, for browsing) meant typing did nothing
+    until the user knew to press Tab first. }
+  State.FDFocusIdx := 1;
   ReloadFDEntries(State);
   State.ModalKind := dmFileDialog;
 end;
