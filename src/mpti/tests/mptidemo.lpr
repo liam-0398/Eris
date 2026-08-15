@@ -9,11 +9,12 @@ program mptidemo;
 {$mode objfpc}{$H+}
 
 uses
-  SysUtils, MptiTypes, MptiCell, MptiCaps, MptiInput, MptiDriver;
+  SysUtils, MptiTypes, MptiCell, MptiCaps, MptiInput, MptiDriver, MptiRender;
 
 var
   Buf: array[0..7] of Byte;
   Failures: Integer;
+  I2: Integer;
   CBuf: TCellBuffer;
   Cell: TCell;
   Caps: TMTermCaps;
@@ -21,6 +22,10 @@ var
   PState: TMInputParseState;
   IEvents: TMInputEventArray;
   DState: TMDriverState;
+  RState: TMRenderState;
+  Out1: TMByteBuf;
+  OutStr: string;
+  UB: TMByteBuf;
 
 function Bytes(const S: string): TMByteArray;
 var
@@ -239,6 +244,93 @@ begin
   MFeedInput(PState, Bytes(#27'[I'#27'[O'), IEvents);
   Check((Length(IEvents) = 2) and (IEvents[0].Kind = mekFocusIn)
     and (IEvents[1].Kind = mekFocusOut), 'focus in/out');
+
+  { MptiRender: byte buffer growth past its initial capacity }
+  MInitByteBuf(UB);
+  for I2 := 1 to 1000 do
+    MAppendByte(UB, Byte(I2 and $FF));
+  Check(UB.Len = 1000, 'byte buf grows past initial capacity');
+  Check(UB.Data[0] = 1, 'byte buf preserves early bytes after growth');
+  Check(UB.Data[999] = Byte(1000 and $FF), 'byte buf preserves last appended byte');
+
+  { MptiRender: UTF-8 encode roundtrips through MptiInput's decoder }
+  MInitByteBuf(UB);
+  MEncodeUtf8($00E9, UB); { e-acute, 2 bytes }
+  Check(UB.Len = 2, 'UTF-8 encode e-acute is 2 bytes');
+  MInitInputParseState(PState);
+  SetLength(IEvents, 0);
+  MFeedInput(PState, Copy(UB.Data, 0, UB.Len), IEvents);
+  Check((Length(IEvents) = 1) and (IEvents[0].Key.CodePoint = $00E9),
+    'UTF-8 encode/decode roundtrip through MptiInput');
+
+  { MptiRender: first frame is a forced full redraw }
+  Caps := MCapsFromEnv('xterm-256color', 'truecolor');
+  MInitRenderState(RState, Caps, 4, 2);
+  Cell := MBlankCell;
+  Cell.CodePoint := Ord('A');
+  MSetCell(RState.Back, 0, 0, Cell);
+  MRenderDiff(RState, Out1);
+  OutStr := MByteBufToString(Out1);
+  Check(Pos(#27'[1;1H', OutStr) = 1, 'first frame: cursor positioned to origin first');
+  Check(Pos('A', OutStr) > 0, 'first frame: changed cell glyph emitted');
+  Check(Pos(#27'[2;1H', OutStr) > 0,
+    'first frame: second row (all blank) still gets its own CUP (forced full redraw)');
+
+  { MptiRender: identical second frame emits nothing }
+  MRenderDiff(RState, Out1);
+  Check(Out1.Len = 0, 'unchanged frame emits zero bytes');
+
+  { MptiRender: single-cell change emits exactly one CUP + glyph, no SGR
+    (attrs unchanged from the last emitted cell). }
+  Cell := MBlankCell;
+  Cell.CodePoint := Ord('Z');
+  MSetCell(RState.Back, 2, 1, Cell);
+  MRenderDiff(RState, Out1);
+  OutStr := MByteBufToString(Out1);
+  Check(OutStr = #27'[2;3HZ', 'single unchanged-attr cell diff: bare CUP + glyph, no SGR');
+
+  { MptiRender: attribute change forces a fresh SGR sequence }
+  Cell := MBlankCell;
+  Cell.CodePoint := Ord('Y');
+  Cell.Fg := MMakeColor(1, 2, 3);
+  MSetCell(RState.Back, 2, 1, Cell);
+  MRenderDiff(RState, Out1);
+  OutStr := MByteBufToString(Out1);
+  Check(Pos(#27'[0;38;2;1;2;3', OutStr) > 0, 'attribute change emits truecolor SGR');
+  Check(OutStr[Length(OutStr)] = 'Y', 'attribute-change diff still ends in the glyph');
+
+  { MptiRender: resize forces the next diff back to full redraw }
+  MResizeRenderState(RState, 6, 3);
+  Check(RState.ForceFullRedraw, 'resize sets ForceFullRedraw');
+  MSetCell(RState.Back, 0, 0, MBlankCell);
+  MRenderDiff(RState, Out1);
+  Check(Out1.Len > 0, 'post-resize diff redraws (all cells considered changed)');
+
+  { MptiRender: color-mode SGR paths }
+  Caps := MCapsFromEnv('linux', ''); { mcm16, no SGR1006 }
+  MInitRenderState(RState, Caps, 1, 1);
+  Cell := MBlankCell;
+  Cell.CodePoint := Ord('Q');
+  Cell.Fg := MMakeColor(255, 0, 0); { bright red -> ansi16 index 9 -> fg code 91 }
+  MSetCell(RState.Back, 0, 0, Cell);
+  MRenderDiff(RState, Out1);
+  OutStr := MByteBufToString(Out1);
+  Check(Pos(';91;', OutStr) > 0, 'mcm16 SGR uses bright fg code for ansi16 index 9');
+
+  Caps.ColorMode := mcm256;
+  MInitRenderState(RState, Caps, 1, 1);
+  MSetCell(RState.Back, 0, 0, Cell);
+  MRenderDiff(RState, Out1);
+  OutStr := MByteBufToString(Out1);
+  Check(Pos(';38;5;', OutStr) > 0, 'mcm256 SGR uses 256-color indexed fg');
+
+  Caps.ColorMode := mcmMono;
+  MInitRenderState(RState, Caps, 1, 1);
+  MSetCell(RState.Back, 0, 0, Cell); { bright red -> mono-bright -> csBold }
+  MRenderDiff(RState, Out1);
+  OutStr := MByteBufToString(Out1);
+  Check(Pos(';1', OutStr) > 0, 'mono mode compensates bright color with bold');
+  Check(Pos('38', OutStr) = 0, 'mono mode emits no color codes at all');
 
   { MptiDriver: only ever probes, never mutates terminal state unless a
     real interactive tty is confirmed present - safe to run in CI/headless. }
